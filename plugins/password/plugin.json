@@ -1,0 +1,13 @@
+{
+  "name": "password",
+  "version": "1.0.0",
+  "description": "随机密码生成器",
+  "author": "iTools",
+  "features": [
+    {
+      "code": "main",
+      "explain": "生成随机密码",
+      "cmds": ["password", "密码", "passwd", "mima"]
+    }
+  ]
+}

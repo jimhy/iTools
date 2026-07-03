@@ -1,0 +1,20 @@
+{
+  "name": "itools",
+  "version": "0.1.0",
+  "description": "iTools — macOS 风格的效率启动器（Tauri 2 + Rust + HTML）",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.1.1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.1.0",
+    "typescript": "^5.6.3",
+    "vite": "^6.0.3"
+  }
+}

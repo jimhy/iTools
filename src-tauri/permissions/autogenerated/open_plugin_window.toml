@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-open-plugin-window"
+description = "Enables the open_plugin_window command without any pre-configured scope."
+commands.allow = ["open_plugin_window"]
+
+[[permission]]
+identifier = "deny-open-plugin-window"
+description = "Denies the open_plugin_window command without any pre-configured scope."
+commands.deny = ["open_plugin_window"]

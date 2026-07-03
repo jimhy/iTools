@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-rescan-plugins"
+description = "Enables the rescan_plugins command without any pre-configured scope."
+commands.allow = ["rescan_plugins"]
+
+[[permission]]
+identifier = "deny-rescan-plugins"
+description = "Denies the rescan_plugins command without any pre-configured scope."
+commands.deny = ["rescan_plugins"]

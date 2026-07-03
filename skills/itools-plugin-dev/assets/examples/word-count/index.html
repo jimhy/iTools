@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>字数统计</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; }
+    :root { --bg:#f6f7f9; --panel:#fff; --line:#e6e8ec; --text:#1d2129; --sub:#86909c; --accent:#0ea5a4; }
+    @media (prefers-color-scheme: dark){ :root{ --bg:#1b1c1e; --panel:#242628; --line:#34373b; --text:#e8eaed; --sub:#9aa0a6; } }
+    body { background:var(--bg); color:var(--text); font:14px system-ui,"Segoe UI","Microsoft YaHei",sans-serif;
+           display:flex; flex-direction:column; gap:12px; padding:16px; height:100vh; }
+    textarea { flex:1; resize:none; background:var(--panel); color:var(--text); border:1px solid var(--line);
+               border-radius:10px; padding:12px; font:13px/1.6 system-ui,sans-serif; outline:none; }
+    textarea:focus { border-color:var(--accent); }
+    .stats { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; }
+    .stat { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:10px; text-align:center; }
+    .stat .n { font-size:20px; font-weight:700; font-variant-numeric:tabular-nums; }
+    .stat .k { font-size:12px; color:var(--sub); margin-top:2px; }
+  </style>
+</head>
+<body>
+  <textarea id="io" placeholder="输入或粘贴文本…"></textarea>
+  <div class="stats">
+    <div class="stat"><div class="n" id="chars">0</div><div class="k">字符</div></div>
+    <div class="stat"><div class="n" id="nospace">0</div><div class="k">不含空白</div></div>
+    <div class="stat"><div class="n" id="words">0</div><div class="k">词</div></div>
+    <div class="stat"><div class="n" id="lines">0</div><div class="k">行</div></div>
+  </div>
+
+  <script>
+    const io = document.getElementById("io");
+    const $ = (id) => document.getElementById(id);
+
+    function update() {
+      const t = io.value;
+      $("chars").textContent = [...t].length;                       // 按 Unicode 码点计（正确处理中文/emoji）
+      $("nospace").textContent = [...t.replace(/\s/g, "")].length;
+      // 词：中文按字、英文按空白分词
+      const cjk = (t.match(/[一-鿿]/g) || []).length;
+      const en = (t.match(/[A-Za-z0-9]+(?:['-][A-Za-z0-9]+)*/g) || []).length;
+      $("words").textContent = cjk + en;
+      $("lines").textContent = t ? t.split(/\r\n|\r|\n/).length : 0;
+    }
+
+    io.addEventListener("input", update);
+
+    // text/regex 触发：用户输入直接进来(info.query)；keyword 触发则读剪贴板。字数统计直接统计。
+    window.itools.onEnter(async (info) => {
+      if ((info.type === "text" || info.type === "regex") && info.query) io.value = info.query;
+      else { try { const t = await window.itools.readText(); if (t) io.value = t; } catch (_) {} }
+      update();
+      io.focus();
+    });
+
+    window.addEventListener("keydown", (e) => { if (e.key === "Escape") window.itools.hide(); });
+    update();
+  </script>
+</body>
+</html>

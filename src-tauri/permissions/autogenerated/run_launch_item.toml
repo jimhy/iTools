@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-run-launch-item"
+description = "Enables the run_launch_item command without any pre-configured scope."
+commands.allow = ["run_launch_item"]
+
+[[permission]]
+identifier = "deny-run-launch-item"
+description = "Denies the run_launch_item command without any pre-configured scope."
+commands.deny = ["run_launch_item"]

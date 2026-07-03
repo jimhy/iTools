@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-open-external"
+description = "Enables the plugin_open_external command without any pre-configured scope."
+commands.allow = ["plugin_open_external"]
+
+[[permission]]
+identifier = "deny-plugin-open-external"
+description = "Denies the plugin_open_external command without any pre-configured scope."
+commands.deny = ["plugin_open_external"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-db-set"
+description = "Enables the plugin_db_set command without any pre-configured scope."
+commands.allow = ["plugin_db_set"]
+
+[[permission]]
+identifier = "deny-plugin-db-set"
+description = "Denies the plugin_db_set command without any pre-configured scope."
+commands.deny = ["plugin_db_set"]

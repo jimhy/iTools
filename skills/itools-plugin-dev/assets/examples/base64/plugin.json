@@ -1,0 +1,13 @@
+{
+  "name": "base64",
+  "version": "1.0.0",
+  "description": "Base64 编码 / 解码",
+  "author": "iTools",
+  "features": [
+    {
+      "code": "main",
+      "explain": "Base64 编码 / 解码",
+      "cmds": ["base64", "b64", "编码", "解码"]
+    }
+  ]
+}

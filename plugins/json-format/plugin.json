@@ -1,0 +1,13 @@
+{
+  "name": "json-format",
+  "version": "1.0.0",
+  "description": "JSON 格式化 / 压缩",
+  "author": "iTools",
+  "features": [
+    {
+      "code": "main",
+      "explain": "JSON 格式化 / 压缩",
+      "cmds": ["json", "json格式化", "格式化"]
+    }
+  ]
+}

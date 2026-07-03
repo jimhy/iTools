@@ -1,0 +1,17 @@
+# 依赖与产物
+node_modules/
+dist/
+/src-tauri/target/
+/src-tauri/gen/schemas/
+
+# 编辑器/系统
+.DS_Store
+Thumbs.db
+*.log
+
+# 工具临时产物
+.playwright-mcp/
+.claude/
+
+# 记忆库（含内部笔记/凭据，勿提交）
+.engram/

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-add-launch-items"
+description = "Enables the add_launch_items command without any pre-configured scope."
+commands.allow = ["add_launch_items"]
+
+[[permission]]
+identifier = "deny-add-launch-items"
+description = "Denies the add_launch_items command without any pre-configured scope."
+commands.deny = ["add_launch_items"]

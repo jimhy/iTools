@@ -1,0 +1,51 @@
+name: Release
+
+# 推送 v* 标签（如 v0.1.0）或在 Actions 页手动触发，即构建 Windows 安装包并发布 Release
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "版本标签（如 v0.1.0）"
+        required: true
+
+jobs:
+  release-windows:
+    runs-on: windows-latest
+    permissions:
+      contents: write # 创建 Release、上传安装包需要
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust 编译缓存
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - name: 安装前端依赖
+        run: npm ci
+
+      - name: 构建并发布（Windows 安装包）
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.event.inputs.version || github.ref_name }}
+          releaseName: "iTools ${{ github.event.inputs.version || github.ref_name }}"
+          releaseBody: |
+            iTools —— macOS 风格的键盘驱动效率启动器（Windows）。
+
+            本 Release 由 GitHub Actions 自动构建，附件为 Windows 安装包（.msi / .exe 安装程序）。
+          releaseDraft: false
+          prerelease: false

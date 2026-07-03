@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-load-icons"
+description = "Enables the load_icons command without any pre-configured scope."
+commands.allow = ["load_icons"]
+
+[[permission]]
+identifier = "deny-load-icons"
+description = "Denies the load_icons command without any pre-configured scope."
+commands.deny = ["load_icons"]

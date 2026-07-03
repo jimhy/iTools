@@ -1,0 +1,13 @@
+{
+  "name": "word-count",
+  "version": "1.0.0",
+  "description": "字数统计（字符 / 词 / 行）",
+  "author": "iTools",
+  "features": [
+    {
+      "code": "main",
+      "explain": "字数统计",
+      "cmds": ["字数", "wordcount", "wc", { "type": "text" }]
+    }
+  ]
+}

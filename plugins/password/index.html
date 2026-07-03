@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>密码生成器</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    :root { --bg:#f6f7f9; --panel:#fff; --line:#e6e8ec; --text:#1d2129; --sub:#86909c; --accent:#16a34a; --accent2:#15803d; }
+    @media (prefers-color-scheme: dark) { :root { --bg:#1b1c1e; --panel:#242628; --line:#34373b; --text:#e8eaed; --sub:#9aa0a6; } }
+    body { background: var(--bg); color: var(--text); font: 14px/1.5 system-ui, "Segoe UI", "Microsoft YaHei", sans-serif; padding: 16px; display: flex; flex-direction: column; gap: 14px; }
+    header { display: flex; align-items: center; gap: 10px; }
+    header .logo { width: 30px; height: 30px; border-radius: 8px; background: linear-gradient(135deg, #22c55e, #16a34a); display: grid; place-items: center; color: #fff; font-weight: 700; font-size: 15px; }
+    header h1 { font-size: 15px; font-weight: 600; }
+    .out { display: flex; gap: 8px; }
+    .out input { flex: 1; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; font: 16px/1.4 "Consolas", ui-monospace, monospace; color: var(--text); letter-spacing: 1px; outline: none; }
+    .len { display: flex; align-items: center; gap: 10px; }
+    .len input[type=range] { flex: 1; accent-color: var(--accent); }
+    .len .val { width: 34px; text-align: right; font-variant-numeric: tabular-nums; color: var(--sub); }
+    .opts { display: flex; flex-wrap: wrap; gap: 10px 18px; }
+    label.chk { display: flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; }
+    label.chk input { accent-color: var(--accent); }
+    .row { display: flex; gap: 8px; }
+    button { border: 1px solid var(--line); background: var(--panel); color: var(--text); border-radius: 8px; padding: 9px 16px; font-size: 13px; cursor: pointer; transition: all .12s; }
+    button:hover { border-color: var(--accent); color: var(--accent); }
+    button.primary { background: var(--accent); border-color: var(--accent); color: #fff; flex: 1; }
+    button.primary:hover { background: var(--accent2); border-color: var(--accent2); color: #fff; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="logo">🔑</div>
+    <h1>密码生成器</h1>
+  </header>
+
+  <div class="out">
+    <input id="pwd" readonly placeholder="点「生成」" />
+    <button id="copy">复制</button>
+  </div>
+
+  <div class="len">
+    <span>长度</span>
+    <input type="range" id="len" min="6" max="48" value="16" />
+    <span class="val" id="lenVal">16</span>
+  </div>
+
+  <div class="opts">
+    <label class="chk"><input type="checkbox" id="upper" checked /> 大写 A-Z</label>
+    <label class="chk"><input type="checkbox" id="lower" checked /> 小写 a-z</label>
+    <label class="chk"><input type="checkbox" id="digit" checked /> 数字 0-9</label>
+    <label class="chk"><input type="checkbox" id="symbol" /> 符号 !@#$</label>
+  </div>
+
+  <div class="row">
+    <button class="primary" id="gen">生成</button>
+  </div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const SETS = { upper: "ABCDEFGHJKLMNPQRSTUVWXYZ", lower: "abcdefghijkmnopqrstuvwxyz", digit: "23456789", symbol: "!@#$%^&*-_=+?" };
+
+    function readOpts() {
+      return { len: +$("len").value, upper: $("upper").checked, lower: $("lower").checked, digit: $("digit").checked, symbol: $("symbol").checked };
+    }
+
+    function generate() {
+      const o = readOpts();
+      let pool = "";
+      for (const k of ["upper", "lower", "digit", "symbol"]) if (o[k]) pool += SETS[k];
+      if (!pool) { window.itools.showToast("至少勾选一类字符"); return; }
+      const arr = new Uint32Array(o.len);
+      crypto.getRandomValues(arr);
+      let out = "";
+      for (let i = 0; i < o.len; i++) out += pool[arr[i] % pool.length];
+      $("pwd").value = out;
+      // 记住设置（下次进入自动恢复）——演示 itools.db 持久化
+      window.itools.db.set("opts", o).catch(() => {});
+    }
+
+    $("len").oninput = () => { $("lenVal").textContent = $("len").value; };
+    $("gen").onclick = generate;
+    $("copy").onclick = async () => {
+      if (!$("pwd").value) return;
+      await window.itools.copyText($("pwd").value);
+      window.itools.showToast("已复制");
+    };
+
+    window.itools.onEnter(async () => {
+      // 恢复上次设置
+      try {
+        const o = await window.itools.db.get("opts");
+        if (o) {
+          $("len").value = o.len; $("lenVal").textContent = o.len;
+          $("upper").checked = o.upper; $("lower").checked = o.lower;
+          $("digit").checked = o.digit; $("symbol").checked = o.symbol;
+        }
+      } catch (_) {}
+      generate();
+    });
+
+    window.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") window.itools.hide();
+      if (e.key === "Enter") generate();
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-db-remove"
+description = "Enables the plugin_db_remove command without any pre-configured scope."
+commands.allow = ["plugin_db_remove"]
+
+[[permission]]
+identifier = "deny-plugin-db-remove"
+description = "Denies the plugin_db_remove command without any pre-configured scope."
+commands.deny = ["plugin_db_remove"]

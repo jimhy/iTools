@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-open-path"
+description = "Enables the plugin_open_path command without any pre-configured scope."
+commands.allow = ["plugin_open_path"]
+
+[[permission]]
+identifier = "deny-plugin-open-path"
+description = "Denies the plugin_open_path command without any pre-configured scope."
+commands.deny = ["plugin_open_path"]

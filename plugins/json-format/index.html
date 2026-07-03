@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>JSON 格式化</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    :root { --bg:#f6f7f9; --panel:#fff; --line:#e6e8ec; --text:#1d2129; --sub:#86909c; --accent:#f59e0b; --accent2:#d97706; --err:#e5484d; }
+    @media (prefers-color-scheme: dark) { :root { --bg:#1b1c1e; --panel:#242628; --line:#34373b; --text:#e8eaed; --sub:#9aa0a6; } }
+    html, body { height: 100%; }
+    body { background: var(--bg); color: var(--text); font: 14px/1.5 system-ui, "Segoe UI", "Microsoft YaHei", sans-serif; display: flex; flex-direction: column; padding: 16px; gap: 12px; }
+    header { display: flex; align-items: center; gap: 10px; }
+    header .logo { width: 30px; height: 30px; border-radius: 8px; background: linear-gradient(135deg, #fbbf24, #f59e0b); display: grid; place-items: center; color: #fff; font-weight: 700; font-size: 14px; }
+    header h1 { font-size: 15px; font-weight: 600; }
+    header .sub { color: var(--sub); font-size: 12px; margin-left: auto; }
+    header .sub.err { color: var(--err); }
+    textarea { flex: 1; min-height: 160px; resize: none; width: 100%; background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 10px; padding: 12px; font: 13px/1.55 "Consolas", "SF Mono", ui-monospace, monospace; outline: none; tab-size: 2; }
+    textarea:focus { border-color: var(--accent); }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; }
+    button { border: 1px solid var(--line); background: var(--panel); color: var(--text); border-radius: 8px; padding: 8px 14px; font-size: 13px; cursor: pointer; transition: all .12s; }
+    button:hover { border-color: var(--accent); color: var(--accent); }
+    button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    button.primary:hover { background: var(--accent2); border-color: var(--accent2); color: #fff; }
+    .row .spacer { flex: 1; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="logo">{ }</div>
+    <h1>JSON 格式化</h1>
+    <span class="sub" id="hint">进入时自动读取剪贴板</span>
+  </header>
+
+  <textarea id="io" placeholder="粘贴 JSON…" spellcheck="false"></textarea>
+
+  <div class="row">
+    <button class="primary" id="pretty">格式化</button>
+    <button id="mini">压缩</button>
+    <button id="copy">复制结果</button>
+    <div class="spacer"></div>
+    <button id="clear">清空</button>
+  </div>
+
+  <script>
+    const io = document.getElementById("io");
+    const hint = document.getElementById("hint");
+
+    function setHint(text, isErr) {
+      hint.textContent = text;
+      hint.classList.toggle("err", !!isErr);
+    }
+
+    function transform(indent, okMsg) {
+      const raw = io.value.trim();
+      if (!raw) return;
+      try {
+        io.value = JSON.stringify(JSON.parse(raw), null, indent);
+        setHint(okMsg, false);
+      } catch (e) {
+        setHint("JSON 语法错误：" + e.message, true);
+      }
+    }
+
+    document.getElementById("pretty").onclick = () => transform(2, "已格式化");
+    document.getElementById("mini").onclick = () => transform(0, "已压缩");
+    document.getElementById("clear").onclick = () => { io.value = ""; io.focus(); setHint("已清空", false); };
+    document.getElementById("copy").onclick = async () => {
+      if (!io.value) return;
+      await window.itools.copyText(io.value);
+      window.itools.showToast("已复制到剪贴板");
+    };
+
+    window.itools.onEnter(async () => {
+      try {
+        const text = await window.itools.readText();
+        if (text && text.trim()) { io.value = text; setHint("已读入剪贴板内容", false); }
+      } catch (_) {}
+      io.focus();
+    });
+
+    window.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") window.itools.hide();
+      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) transform(2, "已格式化");
+    });
+  </script>
+</body>
+</html>

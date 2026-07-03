@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-notify"
+description = "Enables the plugin_notify command without any pre-configured scope."
+commands.allow = ["plugin_notify"]
+
+[[permission]]
+identifier = "deny-plugin-notify"
+description = "Denies the plugin_notify command without any pre-configured scope."
+commands.deny = ["plugin_notify"]

@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>My Plugin</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; }
+    :root { --bg:#f6f7f9; --panel:#fff; --line:#e6e8ec; --text:#1d2129; --sub:#86909c; --accent:#3b6cf6; }
+    @media (prefers-color-scheme: dark) { :root { --bg:#1b1c1e; --panel:#242628; --line:#34373b; --text:#e8eaed; --sub:#9aa0a6; } }
+    body { background: var(--bg); color: var(--text); font: 14px/1.5 system-ui, "Segoe UI", "Microsoft YaHei", sans-serif;
+           display: flex; flex-direction: column; gap: 12px; padding: 16px; height: 100vh; }
+    textarea { flex: 1; resize: none; background: var(--panel); color: var(--text); border: 1px solid var(--line);
+               border-radius: 10px; padding: 12px; font: 13px/1.55 Consolas, ui-monospace, monospace; outline: none; }
+    textarea:focus { border-color: var(--accent); }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; }
+    button { border: 1px solid var(--line); background: var(--panel); color: var(--text); border-radius: 8px;
+             padding: 8px 14px; font-size: 13px; cursor: pointer; }
+    button:hover { border-color: var(--accent); color: var(--accent); }
+    button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  </style>
+</head>
+<body>
+  <textarea id="io" placeholder="输入…"></textarea>
+  <div class="row">
+    <button class="primary" id="run">执行</button>
+    <button id="copy">复制</button>
+  </div>
+
+  <script>
+    // 所有系统能力经 window.itools 调用（没有 Node / window.__TAURI__ / 外部资源 / 默认外网）
+    const io = document.getElementById("io");
+
+    // 进入插件：初始化、聚焦。info = { code, type, query }
+    window.itools.onEnter(async (info) => {
+      try {
+        // text/regex 触发时用户输入在 info.query；keyword 触发则读剪贴板（keyword 时 query 是关键词本身，别填）
+        if ((info.type === "text" || info.type === "regex") && info.query) io.value = info.query;
+        else { const t = await window.itools.readText(); if (t) io.value = t; }
+      } catch (_) {}
+      io.focus();
+    });
+
+    document.getElementById("run").onclick = () => {
+      // TODO: 处理 io.value，把结果写回 io.value
+      window.itools.showToast("完成");
+    };
+    document.getElementById("copy").onclick = async () => {
+      await window.itools.copyText(io.value);
+      window.itools.showToast("已复制");
+    };
+
+    // 约定：Esc 收起面板
+    window.addEventListener("keydown", (e) => { if (e.key === "Escape") window.itools.hide(); });
+  </script>
+</body>
+</html>

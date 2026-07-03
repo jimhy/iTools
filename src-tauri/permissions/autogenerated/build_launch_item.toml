@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-build-launch-item"
+description = "Enables the build_launch_item command without any pre-configured scope."
+commands.allow = ["build_launch_item"]
+
+[[permission]]
+identifier = "deny-build-launch-item"
+description = "Denies the build_launch_item command without any pre-configured scope."
+commands.deny = ["build_launch_item"]

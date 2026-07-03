@@ -1,0 +1,13 @@
+{
+  "name": "my-plugin",
+  "version": "1.0.0",
+  "description": "一句话描述这个插件做什么",
+  "author": "you",
+  "features": [
+    {
+      "code": "main",
+      "explain": "功能标题（进入搜索结果）",
+      "cmds": ["关键词1", "keyword2"]
+    }
+  ]
+}

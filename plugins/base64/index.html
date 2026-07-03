@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Base64 编解码</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #f6f7f9; --panel: #fff; --line: #e6e8ec; --text: #1d2129;
+      --sub: #86909c; --accent: #3b6cf6; --accent-2: #2f56c9;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg: #1b1c1e; --panel: #242628; --line: #34373b; --text: #e8eaed; --sub: #9aa0a6; }
+    }
+    html, body { height: 100%; }
+    body {
+      background: var(--bg); color: var(--text);
+      font: 14px/1.5 system-ui, "Segoe UI", "Microsoft YaHei", sans-serif;
+      display: flex; flex-direction: column; padding: 16px; gap: 12px;
+    }
+    header { display: flex; align-items: center; gap: 10px; }
+    header .logo {
+      width: 30px; height: 30px; border-radius: 8px;
+      background: linear-gradient(135deg, #6a5cff, #3b6cf6);
+      display: grid; place-items: center; color: #fff; font-weight: 700; font-size: 12px;
+    }
+    header h1 { font-size: 15px; font-weight: 600; }
+    header .sub { color: var(--sub); font-size: 12px; margin-left: auto; }
+    textarea {
+      flex: 1; min-height: 120px; resize: none; width: 100%;
+      background: var(--panel); color: var(--text);
+      border: 1px solid var(--line); border-radius: 10px; padding: 12px;
+      font: 13px/1.55 "Consolas", "SF Mono", ui-monospace, monospace;
+      outline: none;
+    }
+    textarea:focus { border-color: var(--accent); }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; }
+    button {
+      border: 1px solid var(--line); background: var(--panel); color: var(--text);
+      border-radius: 8px; padding: 8px 14px; font-size: 13px; cursor: pointer;
+      transition: all .12s;
+    }
+    button:hover { border-color: var(--accent); color: var(--accent); }
+    button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    button.primary:hover { background: var(--accent-2); border-color: var(--accent-2); color: #fff; }
+    .row .spacer { flex: 1; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="logo">B64</div>
+    <h1>Base64 编解码</h1>
+    <span class="sub" id="hint">进入时自动读取剪贴板</span>
+  </header>
+
+  <textarea id="io" placeholder="在此输入文本或 Base64…" spellcheck="false"></textarea>
+
+  <div class="row">
+    <button class="primary" id="encode">编码 →</button>
+    <button class="primary" id="decode">← 解码</button>
+    <button id="copy">复制结果</button>
+    <div class="spacer"></div>
+    <button id="clear">清空</button>
+  </div>
+
+  <script>
+    const io = document.getElementById("io");
+
+    // UTF-8 安全的 Base64（btoa/atob 只处理 Latin-1，中文需先过 TextEncoder/Decoder）
+    function encodeB64(str) {
+      const bytes = new TextEncoder().encode(str);
+      let bin = "";
+      for (const b of bytes) bin += String.fromCharCode(b);
+      return btoa(bin);
+    }
+    function decodeB64(b64) {
+      const bin = atob(b64.trim());
+      const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
+      return new TextDecoder().decode(bytes);
+    }
+
+    function run(fn, okMsg) {
+      try {
+        io.value = fn(io.value);
+        window.itools.showToast(okMsg);
+      } catch (e) {
+        window.itools.showToast("处理失败：" + e.message);
+      }
+    }
+
+    document.getElementById("encode").onclick = () => run(encodeB64, "已编码");
+    document.getElementById("decode").onclick = () => run(decodeB64, "已解码");
+    document.getElementById("clear").onclick = () => {
+      io.value = "";
+      io.focus();
+    };
+    document.getElementById("copy").onclick = async () => {
+      if (!io.value) return;
+      await window.itools.copyText(io.value);
+      window.itools.showToast("已复制到剪贴板");
+    };
+
+    // 进入插件：读剪贴板预填，聚焦；Esc 收起窗口
+    window.itools.onEnter(async (info) => {
+      try {
+        const text = await window.itools.readText();
+        if (text && text.trim()) {
+          io.value = text;
+          document.getElementById("hint").textContent = "已读入剪贴板内容";
+        }
+      } catch (_) {}
+      io.focus();
+      io.select();
+    });
+
+    window.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") window.itools.hide();
+      // Ctrl+Enter 快捷编码
+      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+        run(encodeB64, "已编码");
+      }
+    });
+  </script>
+</body>
+</html>
