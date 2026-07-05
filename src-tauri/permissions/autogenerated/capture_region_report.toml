@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-capture-region-report"
+description = "Enables the capture_region_report command without any pre-configured scope."
+commands.allow = ["capture_region_report"]
+
+[[permission]]
+identifier = "deny-capture-region-report"
+description = "Denies the capture_region_report command without any pre-configured scope."
+commands.deny = ["capture_region_report"]

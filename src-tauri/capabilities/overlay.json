@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "capture-overlay",
+  "description": "截图框选覆盖层窗口（label=capture-overlay，itoverlay 自定义协议源）：仅允许回传选区结果。",
+  "windows": ["capture-overlay"],
+  "remote": {
+    "urls": ["http://itoverlay.localhost", "http://itoverlay.localhost/*"]
+  },
+  "permissions": ["allow-capture-region-report", "allow-capture-overlay-ready"]
+}

@@ -122,6 +122,23 @@ pub fn save_settings(
     if old.hotkey != next.hotkey {
         let _ = app.global_shortcut().unregister_all();
         crate::register_toggle_hotkey(&app, &next.hotkey);
+        // unregister_all 把截图热键也撤了 → 补注册回来
+        if !next.screenshot_hotkey.trim().is_empty() {
+            let _ =
+                crate::plugin::capture::register_screenshot_hotkey(&app, next.screenshot_hotkey.trim());
+        }
+    } else if old.screenshot_hotkey != next.screenshot_hotkey {
+        // 只改了截图热键：换绑（空 = 撤销）
+        let t = next.screenshot_hotkey.trim();
+        if t.is_empty() {
+            if let Some(st) = app.try_state::<crate::plugin::capture::ScreenshotState>() {
+                if let Some(sc) = st.shortcut.lock().unwrap().take() {
+                    let _ = app.global_shortcut().unregister(sc);
+                }
+            }
+        } else {
+            let _ = crate::plugin::capture::register_screenshot_hotkey(&app, t);
+        }
     }
     if old.custom_apps != next.custom_apps {
         index.rescan_apps(next.custom_apps.clone());

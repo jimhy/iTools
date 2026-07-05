@@ -70,6 +70,10 @@ pub struct AppSettings {
     pub disabled_plugins: Vec<String>,
     /// 按插件已授权的高危能力：插件名 → 已授权能力（如 ["runCommand","network"]）
     pub plugin_permissions: HashMap<String, Vec<String>>,
+
+    // ---------- 截图（宿主内置，原生覆盖层，无界面/像 PixPin） ----------
+    /// 截图全局快捷键（默认 "ctrl+shift+a"，可改；空 = 不注册）
+    pub screenshot_hotkey: String,
 }
 
 impl Default for AppSettings {
@@ -91,6 +95,7 @@ impl Default for AppSettings {
             local_launch_items: Vec::new(),
             disabled_plugins: Vec::new(),
             plugin_permissions: HashMap::new(),
+            screenshot_hotkey: "ctrl+shift+a".to_string(),
         }
     }
 }

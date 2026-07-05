@@ -94,6 +94,11 @@ export async function renderSettings(root: HTMLElement, ctx: AdminCtx): Promise<
       hotkeyRecorder(() => settings.hotkey, (hk) => (settings.hotkey = hk)),
     ),
     row(
+      "截图快捷键",
+      "内置原生截图（PixPin 风格：框选 · 就地标注 · 复制/保存/贴图/OCR），无需插件",
+      hotkeyRecorder(() => settings.screenshot_hotkey, (hk) => (settings.screenshot_hotkey = hk)),
+    ),
+    row(
       "自动清除搜索内容",
       "失焦后多久清空搜索框",
       select(

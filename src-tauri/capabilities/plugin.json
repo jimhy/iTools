@@ -14,8 +14,12 @@
     "allow-plugin-set-height",
     "allow-plugin-copy-text",
     "allow-plugin-read-text",
+    "allow-plugin-read-image",
+    "allow-plugin-write-image",
+    "allow-plugin-save-image",
     "allow-plugin-read-file",
     "allow-plugin-write-file",
+    "allow-plugin-remove-file",
     "allow-plugin-open-external",
     "allow-plugin-open-path",
     "allow-plugin-notify",
@@ -24,6 +28,17 @@
     "allow-plugin-db-get",
     "allow-plugin-db-set",
     "allow-plugin-db-remove",
-    "allow-plugin-db-keys"
+    "allow-plugin-db-keys",
+    "allow-plugin-list-displays",
+    "allow-plugin-capture-full",
+    "allow-plugin-capture-region",
+    "allow-plugin-register-hotkey",
+    "allow-plugin-unregister-hotkey",
+    "allow-plugin-create-pin",
+    "allow-plugin-ocr",
+    "allow-plugin-start-audio-record",
+    "allow-plugin-stop-audio-record",
+    "allow-plugin-start-gif-record",
+    "allow-plugin-stop-gif-record"
   ]
 }

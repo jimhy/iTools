@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "pin",
+  "description": "贴图浮窗（label=pin-*，itpin 自定义协议源）：仅允许缩放/关闭自身窗口。",
+  "windows": ["pin-*"],
+  "remote": {
+    "urls": ["http://itpin.localhost", "http://itpin.localhost/*"]
+  },
+  "permissions": ["allow-pin-resize", "allow-pin-move", "allow-pin-close"]
+}

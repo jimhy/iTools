@@ -44,8 +44,12 @@ const COMMANDS: &[&str] = &[
         "plugin_set_height",
         "plugin_copy_text",
         "plugin_read_text",
+        "plugin_read_image",
+        "plugin_write_image",
+        "plugin_save_image",
         "plugin_read_file",
         "plugin_write_file",
+        "plugin_remove_file",
         "plugin_open_external",
         "plugin_open_path",
         "plugin_notify",
@@ -55,6 +59,24 @@ const COMMANDS: &[&str] = &[
         "plugin_db_set",
         "plugin_db_remove",
         "plugin_db_keys",
+        "plugin_list_displays",
+        "plugin_capture_full",
+        "plugin_capture_region",
+        // 由截图覆盖层窗口（capture-overlay）调用，不授予插件窗口
+        "capture_region_report",
+        "capture_overlay_ready",
+        "plugin_register_hotkey",
+        "plugin_unregister_hotkey",
+        "plugin_create_pin",
+        // 由贴图窗口（pin-*）调用，作用于自身
+        "pin_resize",
+        "pin_move",
+        "pin_close",
+        "plugin_ocr",
+        "plugin_start_audio_record",
+        "plugin_stop_audio_record",
+        "plugin_start_gif_record",
+        "plugin_stop_gif_record",
 ];
 
 fn main() {

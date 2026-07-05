@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-start-gif-record"
+description = "Enables the plugin_start_gif_record command without any pre-configured scope."
+commands.allow = ["plugin_start_gif_record"]
+
+[[permission]]
+identifier = "deny-plugin-start-gif-record"
+description = "Denies the plugin_start_gif_record command without any pre-configured scope."
+commands.deny = ["plugin_start_gif_record"]

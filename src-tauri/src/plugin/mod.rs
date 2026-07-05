@@ -8,7 +8,15 @@
 //!
 //! 命令与窗口在 `plugin::commands`；注入 `window.itools` 的桥接脚本在 `plugin::commands::BRIDGE_JS`。
 
+pub mod audio;
+pub mod capture;
 pub mod commands;
+pub mod hotkey;
+#[cfg(windows)]
+pub mod native_overlay;
+pub mod ocr;
+pub mod pin;
+pub mod record;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, RwLock};
@@ -578,7 +586,8 @@ pub fn serve(root: &Path, request: &tauri::http::Request<Vec<u8>>) -> tauri::htt
     // 插件页统一【严格 CSP】：允许内联脚本/样式，但掐断一切外联(connect/img)与被框入(frame-ancestors)。
     // 联网【不经 CSP 放开】——所有插件共享同一源(http://itplugin.localhost)，同源下 per-document CSP 不是隔离边界，
     // 会被同源 iframe 借道绕过；改由原生 itools.fetch 代理按【当前活动插件的 network 授权】放行（见 plugin_fetch）。
-    const CSP: &str = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; form-action 'self'; base-uri 'self'; frame-ancestors 'none'";
+    // img/media 放开 blob:——插件用 URL.createObjectURL 显示原生截图/贴图/录屏结果（blob: 同源、页面自建，安全）。
+    const CSP: &str = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; connect-src 'self'; form-action 'self'; base-uri 'self'; frame-ancestors 'none'";
     tauri::http::Response::builder()
         .status(200)
         .header("Content-Type", mime)

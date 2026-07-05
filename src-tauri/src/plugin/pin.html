@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>贴图</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: transparent; user-select: none; }
+  #img {
+    width: 100%; height: 100%; object-fit: fill; display: block;
+    -webkit-user-drag: none; border: 1px solid rgba(76,157,255,0.9);
+    box-shadow: 0 6px 26px rgba(0,0,0,0.35); cursor: move;
+  }
+  body.thumb #img { border: 2px solid rgba(76,157,255,0.95); border-radius: 8px; box-shadow: 0 4px 16px rgba(0,0,0,0.4); }
+</style>
+</head>
+<body>
+  <img id="img" alt="" />
+  <script>
+    "use strict";
+    var invoke = function (cmd, args) { return window.__TAURI_INTERNALS__.invoke(cmd, args || {}); };
+    var img = document.getElementById("img");
+    var m = location.pathname.match(/\/view\/([^/?]+)/);
+    var pinId = m ? m[1] : "";
+    var op = parseFloat(new URLSearchParams(location.search).get("op") || "1");
+    img.style.opacity = String(op);
+    img.src = "/img/" + pinId; // 相对本页源（http://itpin.localhost）
+
+    var natW = 0, natH = 0, scale = 1;
+    var state = "full";            // full | thumb
+    var fullW = 0, fullH = 0;      // 进缩略图前记住的窗口尺寸，用于还原
+    var THUMB = 92;                // 缩略图宽（px）
+    img.onload = function () { natW = img.naturalWidth; natH = img.naturalHeight; };
+
+    // 手动拖动（不用 data-tauri-drag-region，以免吞掉 dblclick）：每次发物理增量，后端读当前位置再加
+    var dragging = false, lx = 0, ly = 0, moved = false;
+    img.addEventListener("mousedown", function (e) {
+      if (e.button !== 0) return;
+      dragging = true; moved = false; lx = e.screenX; ly = e.screenY;
+    });
+    window.addEventListener("mousemove", function (e) {
+      if (!dragging) return;
+      var dx = e.screenX - lx, dy = e.screenY - ly;
+      if (dx || dy) {
+        moved = true; lx = e.screenX; ly = e.screenY;
+        var r = window.devicePixelRatio || 1;
+        invoke("pin_move", { dx: Math.round(dx * r), dy: Math.round(dy * r) }).catch(function () {});
+      }
+    });
+    window.addEventListener("mouseup", function () { dragging = false; });
+
+    // 滚轮缩放（仅正常态）
+    window.addEventListener("wheel", function (e) {
+      e.preventDefault();
+      if (state !== "full" || !natW) return;
+      scale = Math.max(0.15, Math.min(6, scale * (e.deltaY < 0 ? 1.1 : 0.9)));
+      var w = Math.round(natW * scale);
+      invoke("pin_resize", { width: w, height: Math.round(w * natH / natW) }).catch(function () {});
+    }, { passive: false });
+
+    // 双击：正常态 + Ctrl → 变缩略图；缩略图态 → 还原
+    window.addEventListener("dblclick", function (e) {
+      if (state === "thumb") { restore(); }
+      else if (e.ctrlKey) { toThumb(); }
+    });
+    function toThumb() {
+      fullW = window.innerWidth; fullH = window.innerHeight;
+      state = "thumb"; document.body.classList.add("thumb");
+      var h = natW ? Math.round(THUMB * natH / natW) : THUMB;
+      invoke("pin_resize", { width: THUMB, height: Math.max(24, h) }).catch(function () {});
+    }
+    function restore() {
+      state = "full"; document.body.classList.remove("thumb");
+      var w = fullW || natW, h = fullH || natH;
+      scale = natW ? w / natW : 1;
+      invoke("pin_resize", { width: w, height: h }).catch(function () {});
+    }
+
+    window.addEventListener("keydown", function (e) {
+      if (e.key === "Escape") invoke("pin_close").catch(function () {});
+      if (e.key === "1" && state === "full") { scale = 1; invoke("pin_resize", { width: natW, height: natH }).catch(function () {}); }
+    });
+    window.addEventListener("contextmenu", function (e) { e.preventDefault(); });
+  </script>
+</body>
+</html>

@@ -38,6 +38,8 @@ export interface AppSettings {
   local_launch_items: LaunchItem[];
   disabled_plugins: string[];
   plugin_permissions: Record<string, string[]>;
+  /** 截图全局快捷键（宿主内置原生截图，空 = 不启用） */
+  screenshot_hotkey: string;
 }
 
 /** 已装插件信息，与 Rust 侧 `PluginInfo` 保持一致 */

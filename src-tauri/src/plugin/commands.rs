@@ -16,8 +16,8 @@ use super::{EnterInfo, PluginRegistry};
 /// 注入插件页的桥接脚本（构造 window.itools）。
 pub const BRIDGE_JS: &str = include_str!("bridge.js");
 
-/// 判定某插件是否被用户授权了某高危能力（runCommand / network）。
-fn plugin_granted(settings: &SettingsStore, plugin: &str, perm: &str) -> bool {
+/// 判定某插件是否被用户授权了某高危能力（runCommand / network / screen-capture / …）。
+pub(crate) fn plugin_granted(settings: &SettingsStore, plugin: &str, perm: &str) -> bool {
     settings
         .get()
         .plugin_permissions
@@ -30,12 +30,20 @@ fn plugin_granted(settings: &SettingsStore, plugin: &str, perm: &str) -> bool {
 /// 必须是 async 命令：动态 `WebviewWindowBuilder::build()` 若跑在同步命令/主线程回调里会死锁
 /// （tauri#13963 / wry#583，见 lib.rs::open_admin 注释）。async 命令在独立任务执行，规避该坑。
 #[tauri::command]
-pub async fn open_plugin_window(
+pub async fn open_plugin_window(app: AppHandle, target: String, query: String) -> Result<(), String> {
+    open_plugin(app, target, query, false).await
+}
+
+/// 打开/复用插件窗口的实现（命令与「热键唤起」共用）。内部自取 PluginRegistry。
+/// `hidden=true`：建/导航后**不显示**面板——热键触发「不需要面板」的动作（如截图）时用，
+/// 杜绝「先弹面板再被藏起来」的闪现。隐藏的 webview 照常加载并跑 onEnter（可自行截图）。
+pub async fn open_plugin(
     app: AppHandle,
     target: String,
     query: String,
-    registry: State<'_, PluginRegistry>,
+    hidden: bool,
 ) -> Result<(), String> {
+    let registry = app.state::<PluginRegistry>();
     let (plugin_id, code) = target
         .split_once('#')
         .ok_or_else(|| "非法插件目标（缺 #code）".to_string())?;
@@ -67,9 +75,12 @@ pub async fn open_plugin_window(
 
     if let Some(win) = app.get_webview_window("plugin") {
         win.navigate(url).map_err(|e| e.to_string())?;
-        let _ = win.show();
-        let _ = win.unminimize();
-        let _ = win.set_focus();
+        // hidden 时不显示——若面板本就隐藏则保持隐藏（热键截图不闪）；本就显示的则不强抢焦点
+        if !hidden {
+            let _ = win.show();
+            let _ = win.unminimize();
+            let _ = win.set_focus();
+        }
     } else {
         let init = format!(
             "window.__ITOOLS_DEV__={};\n{}",
@@ -81,6 +92,8 @@ pub async fn open_plugin_window(
             .inner_size(760.0, 560.0)
             .min_inner_size(360.0, 240.0)
             .resizable(true)
+            // 热键截图：隐藏建窗，页面照常加载并 onEnter 触发截图，面板全程不露脸
+            .visible(!hidden)
             .initialization_script(&init)
             // 只允许在插件自身源内导航；外链应走 itools.openExternal（默认浏览器打开），
             // 拦住 window.location/表单把本地数据顶层导航外泄。
@@ -226,6 +239,70 @@ pub fn plugin_read_text() -> Result<String, String> {
     cb.get_text().map_err(|e| e.to_string())
 }
 
+/// 读剪贴板里的图片 → base64 PNG（桥接层解回 ArrayBuffer 给插件）。剪贴板无图片则 Err。
+/// 与 read_text 同为未门控能力（读剪贴板本就无需授权）。
+///
+/// 为何 base64 而非原始 Response 字节：插件页严格 CSP（connect-src 'self'）拦掉了 Tauri 的
+/// IPC 自定义协议，IPC 退化为 postMessage，此路径下 `Vec<u8>` 会被序列化成「数字数组」（体积 4×、极慢）。
+/// base64 字符串走 JSON 字符串路径无退化，比数字数组小得多，且不动作者刻意收紧的 CSP。
+#[tauri::command]
+pub fn plugin_read_image() -> Result<String, String> {
+    let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+    let img = cb.get_image().map_err(|e| format!("剪贴板没有图片: {e}"))?;
+    let png = rgba_to_png(img.width, img.height, &img.bytes)?;
+    Ok(png_to_b64(&png))
+}
+
+/// 把图片（PNG/JPEG/…任意 image 能解码的格式，base64）写入剪贴板为**真实图片**
+/// （非文本）。取代插件用 base64-过-剪贴板-文本 + 外部转换的老套路。
+#[tauri::command]
+pub fn plugin_write_image(b64: String) -> Result<(), String> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64.trim())
+        .map_err(|e| format!("base64 解码失败: {e}"))?;
+    let rgba = image::load_from_memory(&bytes)
+        .map_err(|e| format!("图片解码失败: {e}"))?
+        .to_rgba8();
+    let (w, h) = rgba.dimensions();
+    let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+    cb.set_image(arboard::ImageData {
+        width: w as usize,
+        height: h as usize,
+        bytes: std::borrow::Cow::Owned(rgba.into_raw()),
+    })
+    .map_err(|e| format!("写剪贴板图片失败: {e}"))
+}
+
+/// PNG 字节 → base64（IPC 回传给插件的载体，桥接层解回 ArrayBuffer）。
+pub(crate) fn png_to_b64(png: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(png)
+}
+
+/// RGBA8 → **BMP 字节**（无压缩，编码近乎瞬时；浏览器解码也快）。用于截图冻结图这类转瞬即用、
+/// 只求最快出图的场景——PNG 压缩（尤其带 filter）对 4K 整屏要 1 秒级，BMP 只是内存拷贝。
+pub(crate) fn rgba_to_bmp(width: usize, height: usize, rgba: &[u8]) -> Result<Vec<u8>, String> {
+    use image::codecs::bmp::BmpEncoder;
+    use image::ImageEncoder;
+    let mut out = Vec::with_capacity(54 + rgba.len());
+    BmpEncoder::new(&mut out)
+        .write_image(rgba, width as u32, height as u32, image::ExtendedColorType::Rgba8)
+        .map_err(|e| format!("BMP 编码失败: {e}"))?;
+    Ok(out)
+}
+
+/// RGBA8 像素缓冲 → PNG 字节。供 read_image 与截图类命令共用。
+pub(crate) fn rgba_to_png(width: usize, height: usize, rgba: &[u8]) -> Result<Vec<u8>, String> {
+    let buf = image::RgbaImage::from_raw(width as u32, height as u32, rgba.to_vec())
+        .ok_or_else(|| "图片尺寸与像素数据不符".to_string())?;
+    let mut out = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(buf)
+        .write_to(&mut out, image::ImageFormat::Png)
+        .map_err(|e| format!("PNG 编码失败: {e}"))?;
+    Ok(out.into_inner())
+}
+
 // ---------- 文件 ----------
 
 /// 读文件：限定在当前插件的沙盒目录 `<localAppData>/itools/plugin-data/<id>/files/` 内，
@@ -262,6 +339,20 @@ pub fn plugin_write_file(
     std::fs::write(&dest, content).map_err(|e| format!("写文件失败: {e}"))
 }
 
+/// 删除插件沙盒内的文件（相对路径，同 write/read 的沙盒约束）。不存在则视为成功（幂等）。
+#[tauri::command]
+pub fn plugin_remove_file(path: String, registry: State<'_, PluginRegistry>) -> Result<(), String> {
+    let id = current_plugin(&registry)?;
+    let sandbox = plugin_files_dir(&id);
+    let rel = sandbox_relative(&path)?;
+    let target = sandbox.join(rel);
+    match std::fs::remove_file(&target) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("删除文件失败: {e}")),
+    }
+}
+
 /// 校验并返回一个沙盒内相对路径：拒绝空、驱动器前缀(C:)、根(/ 或 \\)、上级(..)——
 /// 只允许 Normal / CurDir 组件。修 Windows 下 is_absolute 不认根相对/盘符相对路径的绕过。
 fn sandbox_relative(path: &str) -> Result<&Path, String> {
@@ -277,6 +368,34 @@ fn sandbox_relative(path: &str) -> Result<&Path, String> {
         return Err("只能访问插件沙盒内的相对路径（禁绝对路径/盘符/根/..）".to_string());
     }
     Ok(rel)
+}
+
+/// 保存图片（base64 PNG）到用户选择的位置：弹原生「另存为」对话框（用户显式选路径即授权，故不额外门控）。
+/// 默认目录为「图片」，默认文件名可传入。返回保存的绝对路径；用户取消返回 Ok(None)。
+#[tauri::command]
+pub async fn plugin_save_image(
+    b64: String,
+    default_name: Option<String>,
+) -> Result<Option<String>, String> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64.trim())
+        .map_err(|e| format!("base64 解码失败: {e}"))?;
+    let name = default_name.unwrap_or_else(|| "iTools截图.png".to_string());
+    let mut dlg = rfd::AsyncFileDialog::new()
+        .set_file_name(&name)
+        .add_filter("PNG 图片", &["png"]);
+    if let Some(dir) = dirs::picture_dir() {
+        dlg = dlg.set_directory(dir);
+    }
+    match dlg.save_file().await {
+        Some(handle) => {
+            let path = handle.path().to_path_buf();
+            std::fs::write(&path, &bytes).map_err(|e| format!("写文件失败: {e}"))?;
+            Ok(Some(path.to_string_lossy().into_owned()))
+        }
+        None => Ok(None),
+    }
 }
 
 // ---------- 系统 ----------
@@ -330,9 +449,16 @@ pub fn plugin_open_path(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn plugin_notify(body: String) {
-    // 首期：记录到日志（OS 原生通知后续接 notification 插件再补）。
+pub fn plugin_notify(app: AppHandle, body: String) {
+    use tauri_plugin_notification::NotificationExt;
     ilog!("[iTools][plugin] notify: {body}");
+    // 真·系统通知（失败不影响插件，已落日志兜底）
+    let _ = app
+        .notification()
+        .builder()
+        .title("iTools")
+        .body(&body)
+        .show();
 }
 
 /// 执行程序：显式 program + args，**不经 cmd.exe**（元字符 `&`/`|`/`>` 不会被解释，无 shell 注入面）。
@@ -467,7 +593,7 @@ pub fn plugin_db_keys(
 
 // ---------- 内部辅助 ----------
 
-fn current_plugin(registry: &PluginRegistry) -> Result<String, String> {
+pub(crate) fn current_plugin(registry: &PluginRegistry) -> Result<String, String> {
     registry
         .current
         .lock()

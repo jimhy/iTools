@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-capture-full"
+description = "Enables the plugin_capture_full command without any pre-configured scope."
+commands.allow = ["plugin_capture_full"]
+
+[[permission]]
+identifier = "deny-plugin-capture-full"
+description = "Denies the plugin_capture_full command without any pre-configured scope."
+commands.deny = ["plugin_capture_full"]

@@ -17,6 +17,7 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-autostart = "2"
+tauri-plugin-notification = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 walkdir = "2"
@@ -35,6 +36,12 @@ winreg = "0.55"
 rfd = "0.15"
 regex = "1"
 ureq = { version = "2", features = ["json"] }
+# 原生屏幕/窗口捕获（Windows.Graphics.Capture 底层，无 PowerShell/无杀软木马指纹）
+xcap = "0.9"
+# 已随 tauri 编译；直接声明以用 oneshot(框选结果) 与 time(隐藏面板延时)
+tokio = { version = "1", features = ["sync", "time"] }
+# 麦克风/系统声录音（WASAPI 底层）
+cpal = "0.15"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
@@ -43,8 +50,10 @@ windows-sys = { version = "0.59", features = [
     "Win32_Graphics_Gdi",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
     "Win32_Storage_FileSystem",
     "Win32_System_Com",
+    "Win32_System_LibraryLoader",
 ] }
 # 复用 tauri 已锁定的 windows 0.61.3（勿写 0.62+，否则与 tauri 分裂成两份）
 windows = { version = "0.61", features = [
@@ -53,6 +62,12 @@ windows = { version = "0.61", features = [
     "Win32_System_Search",
     "Win32_UI_Shell",
     "Win32_Graphics_Gdi",
+    # WinRT：离线 OCR（Windows.Media.Ocr）
+    "Foundation",
+    "Globalization",
+    "Graphics_Imaging",
+    "Media_Ocr",
+    "Storage_Streams",
 ] }
 
 [profile.release]

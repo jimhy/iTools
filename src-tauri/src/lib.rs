@@ -1,3 +1,4 @@
+// iTools 主库入口：命令注册、协议、托盘、窗口、插件系统。
 mod commands;
 mod hotkey;
 mod launch;
@@ -32,6 +33,7 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
+        .plugin(tauri_plugin_notification::init())
         // 自定义协议：itplugin://localhost/<id>/<path>（Windows 上为 http://itplugin.localhost）
         // 把插件目录下的 HTML/资源喂给插件窗口。运行时从 PluginRegistry 拿根（定位在 setup 用 app 完成）。
         .register_uri_scheme_protocol("itplugin", |ctx, request| {
@@ -42,6 +44,64 @@ pub fn run() {
                 .map(|r| r.root.clone())
                 .unwrap_or_default();
             plugin::serve(&root, &request)
+        })
+        // 截图框选覆盖层：itoverlay://localhost/overlay.html（内嵌页）+ /frozen.png（冻结的整屏）
+        .register_uri_scheme_protocol("itoverlay", |ctx, request| {
+            use tauri::Manager;
+            let ok = |mime: &str, body: Vec<u8>| {
+                tauri::http::Response::builder()
+                    .status(200)
+                    .header("Content-Type", mime)
+                    .header("Access-Control-Allow-Origin", "*")
+                    .header(
+                        "Content-Security-Policy",
+                        "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'",
+                    )
+                    .body(body)
+                    .unwrap()
+            };
+            if request.uri().path().ends_with("frozen.png") {
+                if let Some(flow) = ctx.app_handle().try_state::<plugin::capture::CaptureFlow>() {
+                    if let Some(bmp) = flow.frozen_png() {
+                        // 冻结图现为 BMP（编码近乎瞬时）；浏览器按 content-type 解码，与 <img> 无关扩展名
+                        return ok("image/bmp", bmp);
+                    }
+                }
+                return tauri::http::Response::builder().status(404).body(Vec::new()).unwrap();
+            }
+            ok(
+                "text/html; charset=utf-8",
+                include_str!("plugin/overlay.html").as_bytes().to_vec(),
+            )
+        })
+        // 贴图浮窗：itpin://localhost/view/<id>（pin 页）+ /img/<id>（按 id 取图）
+        .register_uri_scheme_protocol("itpin", |ctx, request| {
+            use tauri::Manager;
+            let ok = |mime: &str, body: Vec<u8>| {
+                tauri::http::Response::builder()
+                    .status(200)
+                    .header("Content-Type", mime)
+                    .header("Access-Control-Allow-Origin", "*")
+                    .header(
+                        "Content-Security-Policy",
+                        "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'",
+                    )
+                    .body(body)
+                    .unwrap()
+            };
+            let path = request.uri().path();
+            if let Some(id) = path.strip_prefix("/img/") {
+                if let Some(pins) = ctx.app_handle().try_state::<plugin::pin::Pins>() {
+                    if let Some(png) = pins.img(id) {
+                        return ok("image/png", png);
+                    }
+                }
+                return tauri::http::Response::builder().status(404).body(Vec::new()).unwrap();
+            }
+            ok(
+                "text/html; charset=utf-8",
+                include_str!("plugin/pin.html").as_bytes().to_vec(),
+            )
         })
         .setup(|app| {
             // 设置最先加载：搜索索引与视觉效果都依赖它
@@ -73,18 +133,43 @@ pub fn run() {
             app.manage(ProfileStore::load());
             // 插件运行期注册表（open_plugin_window / plugin_* 命令依赖）
             app.manage(plugin::PluginRegistry::new(plugins_root, loaded_plugins));
+            // 区域截图流程状态（冻结图 + 选区结果通道）
+            app.manage(plugin::capture::CaptureFlow::default());
+            // 插件全局热键注册表
+            app.manage(plugin::hotkey::PluginHotkeys::default());
+            // 贴图图片仓
+            app.manage(plugin::pin::Pins::default());
+            // 录音 / 录屏 运行期状态
+            app.manage(plugin::audio::AudioState::default());
+            app.manage(plugin::record::RecordState::default());
+            // 宿主内置截图（headless）的热键状态
+            app.manage(plugin::capture::ScreenshotState::default());
 
             // 全局快捷键：任意已注册热键的 Pressed 事件即切换主窗口
             app.handle().plugin(
                 tauri_plugin_global_shortcut::Builder::new()
-                    .with_handler(|app, _shortcut, event| {
+                    .with_handler(|app, shortcut, event| {
                         if event.state() == ShortcutState::Pressed {
-                            window::toggle(app);
+                            // 宿主截图热键最优先（原生 headless 截图）；
+                            // 否则命中插件热键则唤起插件；再否则切换主窗口
+                            if plugin::capture::is_screenshot_hotkey(app, shortcut.id()) {
+                                plugin::capture::trigger_screenshot(app, false);
+                            } else if !plugin::hotkey::dispatch(app, shortcut.id()) {
+                                window::toggle(app);
+                            }
                         }
                     })
                     .build(),
             )?;
             register_toggle_hotkey(app.handle(), &current.hotkey);
+            // 宿主内置截图热键（默认 ctrl+shift+a，可在设置里改；空 = 不注册）
+            if !current.screenshot_hotkey.trim().is_empty() {
+                if let Err(e) =
+                    plugin::capture::register_screenshot_hotkey(app.handle(), &current.screenshot_hotkey)
+                {
+                    ilog!("[iTools] 截图热键注册失败：{e}");
+                }
+            }
 
             // 主窗口毛玻璃（透明度来自设置）+ 圆角
             if let Some(win) = app.get_webview_window("main") {
@@ -169,8 +254,12 @@ pub fn run() {
             plugin::commands::plugin_set_height,
             plugin::commands::plugin_copy_text,
             plugin::commands::plugin_read_text,
+            plugin::commands::plugin_read_image,
+            plugin::commands::plugin_write_image,
+            plugin::commands::plugin_save_image,
             plugin::commands::plugin_read_file,
             plugin::commands::plugin_write_file,
+            plugin::commands::plugin_remove_file,
             plugin::commands::plugin_open_external,
             plugin::commands::plugin_open_path,
             plugin::commands::plugin_notify,
@@ -179,7 +268,23 @@ pub fn run() {
             plugin::commands::plugin_db_get,
             plugin::commands::plugin_db_set,
             plugin::commands::plugin_db_remove,
-            plugin::commands::plugin_db_keys
+            plugin::commands::plugin_db_keys,
+            plugin::capture::plugin_list_displays,
+            plugin::capture::plugin_capture_full,
+            plugin::capture::plugin_capture_region,
+            plugin::capture::capture_region_report,
+            plugin::capture::capture_overlay_ready,
+            plugin::hotkey::plugin_register_hotkey,
+            plugin::hotkey::plugin_unregister_hotkey,
+            plugin::pin::plugin_create_pin,
+            plugin::pin::pin_resize,
+            plugin::pin::pin_move,
+            plugin::pin::pin_close,
+            plugin::ocr::plugin_ocr,
+            plugin::audio::plugin_start_audio_record,
+            plugin::audio::plugin_stop_audio_record,
+            plugin::record::plugin_start_gif_record,
+            plugin::record::plugin_stop_gif_record
         ])
         .run(tauri::generate_context!())
         .expect("运行 iTools 失败");

@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>截图</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #000; cursor: crosshair; user-select: none; }
+  #shot { position: fixed; inset: 0; width: 100%; height: 100%; object-fit: fill; display: block; -webkit-user-drag: none; }
+  #cv { position: fixed; inset: 0; width: 100%; height: 100%; }
+  #tip { position: fixed; top: 30px; left: 50%; transform: translateX(-50%); padding: 7px 15px; background: rgba(17,24,39,.82); color: #fff; font: 13px/1.4 system-ui,"Segoe UI",sans-serif; border-radius: 8px; pointer-events: none; }
+  #size { position: fixed; padding: 3px 8px; background: rgba(17,24,39,.9); color: #fff; font: 12px/1.4 system-ui,sans-serif; border-radius: 5px; display: none; white-space: nowrap; pointer-events: none; z-index: 5; }
+  /* 悬浮工具栏（附着在选区边） */
+  #bar { position: fixed; display: none; z-index: 10; background: rgba(38,40,44,.98); border: 1px solid rgba(255,255,255,.08);
+         border-radius: 10px; padding: 5px 7px; box-shadow: 0 8px 30px rgba(0,0,0,.5); align-items: center; gap: 2px; flex-wrap: nowrap; }
+  #bar .tb { width: 30px; height: 30px; border: 1px solid transparent; background: none; border-radius: 7px; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+  #bar .tb svg { width: 17px; height: 17px; stroke: #d6d8dc; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  #bar .tb:hover { background: rgba(255,255,255,.09); }
+  #bar .tb.on { background: rgba(79,140,247,.28); }
+  #bar .tb.on svg { stroke: #6fa8ff; }
+  #bar .act { color: #d6d8dc; font: 12.5px system-ui,sans-serif; padding: 0 10px; height: 30px; border-radius: 7px; border: 1px solid transparent; background: none; cursor: pointer; display: flex; align-items: center; gap: 4px; }
+  #bar .act:hover { background: rgba(255,255,255,.09); }
+  #bar .act.primary { background: #3b82f6; color: #fff; }
+  #bar .act.primary:hover { background: #2f6ae0; }
+  #bar .sep { width: 1px; height: 20px; background: rgba(255,255,255,.14); margin: 0 5px; }
+  #bar .sw { width: 16px; height: 16px; border-radius: 50%; border: 2px solid #26282c; outline: 1px solid rgba(255,255,255,.25); cursor: pointer; }
+  #bar .sw.on { outline: 2px solid #6fa8ff; }
+  #wr { width: 60px; accent-color: #6fa8ff; }
+  /* 与 drawOp 的 "bold ...px" 一致，所见即所得 */
+  #tin { position: fixed; z-index: 20; display: none; min-width: 40px; background: transparent; border: 1px dashed #6fa8ff; outline: none; padding: 0; resize: none; overflow: hidden; line-height: 1.25; font-weight: bold; font-family: system-ui,"Microsoft YaHei",sans-serif; }
+</style>
+</head>
+<body>
+  <img id="shot" alt="" />
+  <canvas id="cv"></canvas>
+  <div id="size"></div>
+  <div id="tip">拖动框选截图区域 · 右键 / Esc 取消</div>
+  <div id="bar"></div>
+  <textarea id="tin" rows="1"></textarea>
+  <script>
+    "use strict";
+    var invoke = function (cmd, args) { return window.__TAURI_INTERNALS__.invoke(cmd, args || {}); };
+    var shot = document.getElementById("shot");
+    var cv = document.getElementById("cv"), ctx = cv.getContext("2d");
+    var sizeEl = document.getElementById("size"), tip = document.getElementById("tip"), bar = document.getElementById("bar"), tin = document.getElementById("tin");
+
+    var __t0 = performance.now();
+    var isFull = new URLSearchParams(location.search).get("full") === "1";
+    var natW = 0, natH = 0, sfx = 1, sfy = 1; // 冻结图自然像素 & client→native 比例
+    var phase = "select";                      // select | edit
+    var sel = null;                            // 选区（client px）{x,y,w,h}
+    var done = false;
+
+    // 编辑器状态
+    var tool = "";                             // '' = 选区模式；其余 = 标注工具
+    var color = "#fa3e3e", width = 3, ops = [], temp = null, stepN = 1, hist = [], hIdx = -1;
+    var COLORS = ["#fa3e3e", "#ff8f1f", "#ffd028", "#26c281", "#3b82f6", "#8b5cf6", "#111827", "#ffffff"];
+    var TOOLS = [
+      { id: "rect", t: "矩形", s: '<rect x="4" y="6" width="16" height="12" rx="1.5"/>' },
+      { id: "ellipse", t: "椭圆", s: '<ellipse cx="12" cy="12" rx="8" ry="6"/>' },
+      { id: "arrow", t: "箭头", s: '<path d="M5 19 17 7M17 7v6M17 7h-6"/>' },
+      { id: "line", t: "直线", s: '<path d="M5 19 19 5"/>' },
+      { id: "pen", t: "画笔", s: '<path d="M4 20l1-4L16 5l3 3L8 19l-4 1z"/>' },
+      { id: "marker", t: "荧光笔", s: '<path d="M6 15l8-8 3 3-8 8H6v-3z"/>' },
+      { id: "mosaic", t: "马赛克", s: '<path d="M4 4h5v5H4zM15 4h5v5h-5zM9.5 9.5h5v5h-5zM4 15h5v5H4zM15 15h5v5h-5z"/>' },
+      { id: "text", t: "文字", s: '<path d="M5 6h14M12 6v13"/>' },
+      { id: "step", t: "序号", s: '<circle cx="12" cy="12" r="8"/><path d="M11 9l2-1v8"/>' }
+    ];
+
+    function report(action) {
+      if (done) return;
+      done = true;
+      if (!action) { invoke("capture_region_report", { result: null }).catch(function () {}); return; }
+      var b64 = composite();
+      invoke("capture_region_report", { result: { b64: b64, action: action } }).catch(function () {});
+    }
+
+    shot.onload = function () {
+      natW = shot.naturalWidth; natH = shot.naturalHeight;
+      sfx = natW / window.innerWidth; sfy = natH / window.innerHeight;
+      cv.width = window.innerWidth; cv.height = window.innerHeight;
+      if (isFull) { sel = { x: 0, y: 0, w: window.innerWidth, h: window.innerHeight }; enterEdit(); }
+      render();
+      // 冻结图已就绪：现在才让后端显示覆盖窗（此前隐藏，避免黑屏）
+      invoke("capture_overlay_ready").catch(function () {});
+    };
+    shot.onerror = function () { invoke("capture_overlay_ready").catch(function () {}); }; // 加载失败也要显示，让用户能取消
+
+    /* ---------- 选区阶段 ---------- */
+    var dragging = false, selecting = false, sx = 0, sy = 0;
+    function clientPos(e) { return { x: Math.max(0, Math.min(window.innerWidth, e.clientX)), y: Math.max(0, Math.min(window.innerHeight, e.clientY)) }; }
+
+    cv.addEventListener("mousedown", function (e) {
+      if (e.button === 2) { report(null); return; } // 右键取消
+      if (e.button !== 0) return;
+      var p = clientPos(e);
+      if (phase === "edit" && tool !== "") { startDraw(p, e); return; }
+      // 选区/无工具态：先只记起点，等真的拖动超阈值再开新选区——避免「误点一下」清空已选区+标注
+      dragging = true; selecting = false; sx = p.x; sy = p.y;
+    });
+    window.addEventListener("mousemove", function (e) {
+      var p = clientPos(e);
+      if (dragging) {
+        if (!selecting) {
+          if (Math.abs(p.x - sx) < 4 && Math.abs(p.y - sy) < 4) return; // 还没超阈值：什么都不动
+          selecting = true; phase = "select"; bar.style.display = "none"; tip.style.display = "none"; sizeEl.style.display = "block";
+        }
+        sel = { x: Math.min(sx, p.x), y: Math.min(sy, p.y), w: Math.abs(p.x - sx), h: Math.abs(p.y - sy) };
+        updateSizeLabel(); render();
+      } else if (drawing && temp) {
+        if (temp.pts) temp.pts.push([p.x, p.y]); else { temp.x2 = p.x; temp.y2 = p.y; }
+        render();
+      }
+    });
+    window.addEventListener("mouseup", function (e) {
+      if (dragging) {
+        dragging = false;
+        if (!selecting) return; // 只是点了一下没拖：保持原选区/编辑态与工具栏不变
+        selecting = false;
+        if (!sel || sel.w < 5 || sel.h < 5) { sel = null; sizeEl.style.display = "none"; tip.style.display = "block"; render(); return; }
+        enterEdit();
+      } else if (drawing) {
+        endDraw();
+      }
+    });
+    window.addEventListener("contextmenu", function (e) { e.preventDefault(); });
+    window.addEventListener("keydown", function (e) {
+      if (tin.style.display === "block") return;
+      if (e.key === "Escape") { report(null); }
+      else if (e.ctrlKey && e.key.toLowerCase() === "z") { undo(); }
+      else if (e.ctrlKey && (e.key.toLowerCase() === "y")) { redo(); }
+      else if (e.key === "Enter" && phase === "edit") { report("copy"); }
+    });
+
+    function enterEdit() {
+      phase = "edit"; sizeEl.style.display = isFull ? "none" : "block";
+      if (hist.length === 0) pushHistory();
+      buildBar(); positionBar(); render();
+    }
+
+    /* ---------- 标注绘制 ---------- */
+    function startDraw(p, e) {
+      if (tool === "text") { openText(p); return; }
+      if (tool === "step") { ops.push({ t: "step", x: p.x, y: p.y, n: stepN++, c: color, w: width }); pushHistory(); render(); return; }
+      drawing = true;
+      if (tool === "pen" || tool === "marker") temp = { t: tool, pts: [[p.x, p.y]], c: color, w: width };
+      else temp = { t: tool, x1: p.x, y1: p.y, x2: p.x, y2: p.y, c: color, w: width };
+    }
+    var drawing = false;
+    function endDraw() {
+      drawing = false; if (!temp) return;
+      var t = temp; temp = null;
+      var small = !t.pts && Math.abs(t.x2 - t.x1) < 3 && Math.abs(t.y2 - t.y1) < 3;
+      if (!small) { ops.push(t); pushHistory(); }
+      render();
+    }
+    function pushHistory() { hist = hist.slice(0, hIdx + 1); hist.push(ops.map(function (o) { return Object.assign({}, o); })); if (hist.length > 40) hist.shift(); hIdx = hist.length - 1; }
+    function undo() { if (hIdx > 0) { hIdx--; ops = hist[hIdx].map(function (o) { return Object.assign({}, o); }); stepN = ops.filter(function (o) { return o.t === "step"; }).length + 1; render(); } }
+    function redo() { if (hIdx < hist.length - 1) { hIdx++; ops = hist[hIdx].map(function (o) { return Object.assign({}, o); }); stepN = ops.filter(function (o) { return o.t === "step"; }).length + 1; render(); } }
+
+    function nrect(o) { return { x: Math.min(o.x1, o.x2), y: Math.min(o.y1, o.y2), w: Math.abs(o.x2 - o.x1), h: Math.abs(o.y2 - o.y1) }; }
+    // 在给定 ctx 上画一个 op（sampleCanvas 供马赛克采样）
+    function drawOp(g, o, sampleCanvas, preview) {
+      g.save(); g.lineJoin = "round";
+      if (o.t === "rect") { var r = nrect(o); g.strokeStyle = o.c; g.lineWidth = o.w; g.strokeRect(r.x, r.y, r.w, r.h); }
+      else if (o.t === "ellipse") { var r2 = nrect(o); g.strokeStyle = o.c; g.lineWidth = o.w; g.beginPath(); g.ellipse(r2.x + r2.w / 2, r2.y + r2.h / 2, r2.w / 2, r2.h / 2, 0, 0, 6.2832); g.stroke(); }
+      else if (o.t === "line") { g.strokeStyle = o.c; g.lineWidth = o.w; g.lineCap = "round"; g.beginPath(); g.moveTo(o.x1, o.y1); g.lineTo(o.x2, o.y2); g.stroke(); }
+      else if (o.t === "arrow") {
+        var ang = Math.atan2(o.y2 - o.y1, o.x2 - o.x1), hl = Math.max(11, o.w * 3.5);
+        g.strokeStyle = o.c; g.fillStyle = o.c; g.lineWidth = o.w; g.lineCap = "round";
+        g.beginPath(); g.moveTo(o.x1, o.y1); g.lineTo(o.x2 - Math.cos(ang) * hl * .8, o.y2 - Math.sin(ang) * hl * .8); g.stroke();
+        g.beginPath(); g.moveTo(o.x2, o.y2); g.lineTo(o.x2 - Math.cos(ang - .42) * hl, o.y2 - Math.sin(ang - .42) * hl); g.lineTo(o.x2 - Math.cos(ang + .42) * hl, o.y2 - Math.sin(ang + .42) * hl); g.closePath(); g.fill();
+      }
+      else if (o.t === "pen" || o.t === "marker") {
+        g.strokeStyle = o.c; g.lineCap = "round";
+        if (o.t === "marker") { g.globalAlpha = .35; g.lineWidth = o.w * 4; } else g.lineWidth = o.w;
+        g.beginPath(); o.pts.forEach(function (p, i) { i ? g.lineTo(p[0], p[1]) : g.moveTo(p[0], p[1]); }); g.stroke();
+      }
+      else if (o.t === "text") { g.fillStyle = o.c; g.font = "bold " + o.size + 'px system-ui,"Microsoft YaHei",sans-serif'; g.textBaseline = "top"; o.text.split("\n").forEach(function (l, i) { g.fillText(l, o.x, o.y + i * o.size * 1.25); }); }
+      else if (o.t === "step") { var rr = 12 + o.w * 2; g.fillStyle = o.c; g.beginPath(); g.arc(o.x, o.y, rr, 0, 6.2832); g.fill(); g.fillStyle = o.c === "#ffffff" ? "#111" : "#fff"; g.font = "bold " + Math.round(rr * 1.1) + "px system-ui,sans-serif"; g.textAlign = "center"; g.textBaseline = "middle"; g.fillText(String(o.n), o.x, o.y + 1); }
+      else if (o.t === "mosaic") {
+        var r3 = nrect(o);
+        if (preview) { g.strokeStyle = "#aaa"; g.setLineDash([6, 4]); g.lineWidth = 1.5; g.strokeRect(r3.x, r3.y, r3.w, r3.h); }
+        else if (r3.w >= 2 && r3.h >= 2 && sampleCanvas) {
+          var px = Math.max(6, Math.round(sampleCanvas.width / 130)), sw = Math.max(1, Math.round(r3.w / px)), sh = Math.max(1, Math.round(r3.h / px));
+          var tmp = document.createElement("canvas"); tmp.width = sw; tmp.height = sh; var tc = tmp.getContext("2d"); tc.imageSmoothingEnabled = false;
+          tc.drawImage(sampleCanvas, r3.x, r3.y, r3.w, r3.h, 0, 0, sw, sh);
+          g.imageSmoothingEnabled = false; g.drawImage(tmp, 0, 0, sw, sh, r3.x, r3.y, r3.w, r3.h);
+        }
+      }
+      g.restore();
+    }
+
+    /* ---------- 渲染（屏幕上：蒙版 + 选区 + 标注） ---------- */
+    function render() {
+      ctx.clearRect(0, 0, cv.width, cv.height);
+      // 暗化蒙版，选区处挖空（显示下面亮的 #shot）
+      ctx.fillStyle = "rgba(0,0,0,0.42)";
+      if (!sel) { ctx.fillRect(0, 0, cv.width, cv.height); return; }
+      var r = sel;
+      ctx.fillRect(0, 0, cv.width, r.y);
+      ctx.fillRect(0, r.y + r.h, cv.width, cv.height - r.y - r.h);
+      ctx.fillRect(0, r.y, r.x, r.h);
+      ctx.fillRect(r.x + r.w, r.y, cv.width - r.x - r.w, r.h);
+      // 选区内的标注：马赛克要采样「冻结图对应区域」——先把 #shot 画到一个临时全屏 canvas 供采样
+      if (ops.length || temp) {
+        ctx.save();
+        ctx.beginPath(); ctx.rect(r.x, r.y, r.w, r.h); ctx.clip();
+        var sample = mosaicSample();
+        ops.forEach(function (o) { drawOp(ctx, o, sample, false); });
+        if (temp) drawOp(ctx, temp, sample, true);
+        ctx.restore();
+      }
+      // 选区边框
+      ctx.strokeStyle = "#4c9dff"; ctx.lineWidth = 1.5; ctx.strokeRect(r.x + .5, r.y + .5, r.w, r.h);
+    }
+    var _sampleCanvas = null;
+    function mosaicSample() {
+      // 屏幕坐标下的冻结图（用于马赛克采样）：缓存一张与 client 尺寸一致的 #shot
+      if (!_sampleCanvas) { _sampleCanvas = document.createElement("canvas"); _sampleCanvas.width = cv.width; _sampleCanvas.height = cv.height; _sampleCanvas.getContext("2d").drawImage(shot, 0, 0, cv.width, cv.height); }
+      return _sampleCanvas;
+    }
+
+    function updateSizeLabel() {
+      if (!sel) return;
+      var pxW = Math.round(sel.w * sfx), pxH = Math.round(sel.h * sfy);
+      sizeEl.textContent = pxW + " × " + pxH;
+      var ly = sel.y - 24; if (ly < 2) ly = sel.y + 6;
+      sizeEl.style.left = sel.x + "px"; sizeEl.style.top = ly + "px";
+    }
+
+    /* ---------- 合成最终 PNG（原生分辨率 + 标注） ---------- */
+    function composite() {
+      var r = sel, ow = Math.max(1, Math.round(r.w * sfx)), oh = Math.max(1, Math.round(r.h * sfy));
+      var oc = document.createElement("canvas"); oc.width = ow; oc.height = oh; var og = oc.getContext("2d");
+      // 冻结图裁剪到选区（原生像素）
+      og.drawImage(shot, r.x * sfx, r.y * sfy, r.w * sfx, r.h * sfy, 0, 0, ow, oh);
+      // 标注：client 坐标 → 原生（平移到选区左上 + 缩放）。马赛克采样用 oc 自身（已含冻结图）
+      og.save(); og.scale(sfx, sfy); og.translate(-r.x, -r.y);
+      // 为马赛克提供一个「client 尺寸、已画好冻结图」的采样源
+      var sample = mosaicSample();
+      ops.forEach(function (o) {
+        if (o.t === "mosaic") {
+          // 直接在 client 坐标系里像素化冻结图对应块，再画到 og（已 scale/translate）
+          drawOp(og, o, sample, false);
+        } else drawOp(og, o, null, false);
+      });
+      og.restore();
+      return oc.toDataURL("image/png").split(",")[1];
+    }
+
+    /* ---------- 工具栏 ---------- */
+    function buildBar() {
+      if (bar.dataset.built) { bar.style.display = "flex"; return; }
+      bar.dataset.built = "1";
+      TOOLS.forEach(function (t) {
+        var b = document.createElement("button"); b.className = "tb"; b.id = "tb_" + t.id; b.title = t.t;
+        b.innerHTML = '<svg viewBox="0 0 24 24">' + t.s + "</svg>";
+        b.onclick = function () { setTool(tool === t.id ? "" : t.id); };
+        bar.appendChild(b);
+      });
+      bar.insertAdjacentHTML("beforeend", '<span class="sep"></span>');
+      COLORS.forEach(function (c) { var s = document.createElement("span"); s.className = "sw"; s.style.background = c; s.dataset.c = c; s.onclick = function () { setColor(c); }; bar.appendChild(s); });
+      bar.insertAdjacentHTML("beforeend", '<input type="range" id="wr" min="1" max="12" value="3" title="粗细" />' +
+        '<span class="sep"></span>' +
+        '<button class="tb" id="tb_undo" title="撤销"><svg viewBox="0 0 24 24"><path d="M9 14 4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/></svg></button>' +
+        '<span class="sep"></span>' +
+        '<button class="act" id="ac_ocr">OCR</button>' +
+        '<button class="act" id="ac_pin">📌 贴图</button>' +
+        '<button class="act" id="ac_save">保存</button>' +
+        '<button class="act primary" id="ac_copy">复制 ✓</button>');
+      document.getElementById("wr").oninput = function (e) { width = +e.target.value; };
+      document.getElementById("tb_undo").onclick = undo;
+      document.getElementById("ac_ocr").onclick = function () { report("ocr"); };
+      document.getElementById("ac_pin").onclick = function () { report("pin"); };
+      document.getElementById("ac_save").onclick = function () { report("save"); };
+      document.getElementById("ac_copy").onclick = function () { report("copy"); };
+      setColor(color);
+      bar.style.display = "flex";
+    }
+    function setTool(id) { commitText(); tool = id; TOOLS.forEach(function (t) { document.getElementById("tb_" + t.id).classList.toggle("on", t.id === id); }); document.body.style.cursor = id === "" ? "crosshair" : (id === "text" ? "text" : "crosshair"); }
+    function setColor(c) { color = c; Array.prototype.forEach.call(bar.querySelectorAll(".sw"), function (s) { s.classList.toggle("on", s.dataset.c === c); }); }
+    function positionBar() {
+      var r = sel; bar.style.left = "0px"; bar.style.top = "-9999px"; bar.style.display = "flex";
+      var bw = bar.offsetWidth, bh = bar.offsetHeight;
+      var left = Math.min(Math.max(4, r.x + r.w - bw), window.innerWidth - bw - 4);
+      var top = r.y + r.h + 8;
+      if (top + bh > window.innerHeight - 4) top = Math.max(4, r.y - bh - 8);
+      if (top < 4) top = 4;
+      bar.style.left = left + "px"; bar.style.top = top + "px";
+    }
+
+    /* ---------- 文字输入 ---------- */
+    var tinPos = null, tinSize = 0;
+    function openText(p) {
+      commitText(); tinPos = p; tinSize = 14 + width * 3;
+      // 抵消 1px 边框，使输入文字左上角与提交后 fillText(textBaseline=top) 的落点对齐
+      tin.style.left = (p.x - 1) + "px"; tin.style.top = (p.y - 1) + "px"; tin.style.fontSize = tinSize + "px"; tin.style.color = color; tin.style.display = "block"; tin.value = "";
+      setTimeout(function () { tin.focus(); }, 0);
+    }
+    function commitText() {
+      if (tin.style.display !== "block") return;
+      var text = tin.value.replace(/\s+$/, ""); tin.style.display = "none";
+      if (text && tinPos) { ops.push({ t: "text", x: tinPos.x, y: tinPos.y, text: text, c: color, size: tinSize }); pushHistory(); render(); }
+      tinPos = null;
+    }
+    tin.addEventListener("keydown", function (e) { e.stopPropagation(); if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); commitText(); } if (e.key === "Escape") { tin.value = ""; tin.style.display = "none"; tinPos = null; } });
+    tin.addEventListener("blur", commitText);
+    tin.addEventListener("input", function () { tin.style.height = "auto"; tin.style.height = tin.scrollHeight + "px"; });
+
+    /* ---------- 开始一次截图（首帧初始化 + 复用覆盖窗时被 Rust eval 调用） ---------- */
+    // 常驻覆盖窗：每次截图重置全部状态并重载新冻结图（cache-bust），页面保持热态，省去重建 WebView 的几百 ms。
+    window.__begin = function (full, bust) {
+      isFull = !!full;
+      phase = "select"; sel = null; ops = []; hist = []; hIdx = -1; stepN = 1; temp = null; tool = "";
+      done = false; dragging = false; selecting = false; _sampleCanvas = null;
+      if (bar.dataset.built) { TOOLS.forEach(function (t) { var b = document.getElementById("tb_" + t.id); if (b) b.classList.remove("on"); }); }
+      bar.style.display = "none"; tip.style.display = "block"; sizeEl.style.display = "none"; tin.style.display = "none";
+      document.body.style.cursor = "crosshair";
+      __t0 = performance.now();
+      shot.src = "/frozen.png?" + bust; // cache-bust 强制拉本次的新冻结图
+    };
+    // 首次加载：用 URL 的 full/b 参数发起
+    window.__begin(isFull, new URLSearchParams(location.search).get("b") || "0");
+  </script>
+</body>
+</html>

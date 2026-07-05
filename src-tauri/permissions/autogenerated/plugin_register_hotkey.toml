@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-register-hotkey"
+description = "Enables the plugin_register_hotkey command without any pre-configured scope."
+commands.allow = ["plugin_register_hotkey"]
+
+[[permission]]
+identifier = "deny-plugin-register-hotkey"
+description = "Denies the plugin_register_hotkey command without any pre-configured scope."
+commands.deny = ["plugin_register_hotkey"]
