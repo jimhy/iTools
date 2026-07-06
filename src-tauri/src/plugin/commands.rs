@@ -7,9 +7,11 @@ use std::path::{Path, PathBuf};
 
 use tauri::{AppHandle, Manager, State};
 
+use crate::account::AccountStore;
 use crate::launch;
 use crate::logging::ilog;
 use crate::settings::SettingsStore;
+use crate::sync::{DataStore, SyncResult};
 
 use super::{EnterInfo, PluginRegistry};
 
@@ -64,6 +66,7 @@ pub async fn open_plugin(
             code: code.to_string(),
             kind,
             query: query.clone(),
+            plugin_id: plugin_id.to_string(),
         });
     }
     if let Ok(mut g) = registry.current.lock() {
@@ -589,6 +592,94 @@ pub fn plugin_db_keys(
         .filter(|k| pre.is_empty() || k.starts_with(&pre))
         .cloned()
         .collect())
+}
+
+// ---------- 账号态 & 本地优先数据（带云同步） ----------
+
+/// 给插件的精简账号态：只暴露「是否登录 / 云端是否已配置 / 是否开启同步」，
+/// **不含用户名 / token**（第三方插件不应拿到 PII 与凭据）。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginAccountState {
+    /// 是否已登录云账号（插件据此决定是否走云同步 / 展示登录引导）。
+    pub logged_in: bool,
+    /// 云端服务是否已配置（false = 云端未接入，只能本地）。
+    pub cloud_configured: bool,
+    /// 是否开启「登录后自动同步」。
+    pub sync_enabled: bool,
+}
+
+/// 插件查询账号态（如「是否已登录」以决定要不要云同步）。
+#[tauri::command]
+pub fn plugin_account_state(account: State<'_, AccountStore>) -> PluginAccountState {
+    PluginAccountState {
+        logged_in: account.is_logged_in(),
+        cloud_configured: crate::account::cloud_configured(),
+        sync_enabled: account.sync_enabled(),
+    }
+}
+
+/// 当前插件的数据命名空间（按插件 id 隔离，互不可见）。
+fn plugin_ns(id: &str) -> String {
+    format!("plugin:{id}")
+}
+
+/// 读一条同步型数据（本地优先）。返回 JSON 文本（桥接层再 JSON.parse），无则 None。
+#[tauri::command]
+pub fn plugin_data_get(
+    key: String,
+    registry: State<'_, PluginRegistry>,
+    data: State<'_, DataStore>,
+) -> Result<Option<String>, String> {
+    let ns = plugin_ns(&current_plugin(&registry)?);
+    Ok(data.get(&ns, &key).map(|v| v.to_string()))
+}
+
+/// 写一条同步型数据：**先落本地**（标记待上行）。`value` 为 JSON 文本（桥接层已 stringify）。
+#[tauri::command]
+pub fn plugin_data_set(
+    key: String,
+    value: String,
+    registry: State<'_, PluginRegistry>,
+    data: State<'_, DataStore>,
+) -> Result<(), String> {
+    let ns = plugin_ns(&current_plugin(&registry)?);
+    // value 应为合法 JSON；解析失败则按纯字符串存，保证不丢数据。
+    let parsed = serde_json::from_str(&value).unwrap_or(serde_json::Value::String(value));
+    data.set(&ns, &key, parsed)
+}
+
+/// 删一条同步型数据（本地删除）。
+#[tauri::command]
+pub fn plugin_data_remove(
+    key: String,
+    registry: State<'_, PluginRegistry>,
+    data: State<'_, DataStore>,
+) -> Result<(), String> {
+    let ns = plugin_ns(&current_plugin(&registry)?);
+    data.remove(&ns, &key)
+}
+
+/// 列本插件同步型数据的 key（可前缀过滤）。
+#[tauri::command]
+pub fn plugin_data_keys(
+    prefix: Option<String>,
+    registry: State<'_, PluginRegistry>,
+    data: State<'_, DataStore>,
+) -> Result<Vec<String>, String> {
+    let ns = plugin_ns(&current_plugin(&registry)?);
+    Ok(data.keys(&ns, &prefix.unwrap_or_default()))
+}
+
+/// 把本插件的数据同步到云端。诚实降级：未配置 / 未登录返回 `{ synced:false, reason }`（数据仍在本地）。
+#[tauri::command]
+pub fn plugin_data_sync(
+    registry: State<'_, PluginRegistry>,
+    data: State<'_, DataStore>,
+    account: State<'_, AccountStore>,
+) -> Result<SyncResult, String> {
+    let ns = plugin_ns(&current_plugin(&registry)?);
+    Ok(data.sync_gated(&ns, &account))
 }
 
 // ---------- 内部辅助 ----------

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-launch-installer-and-quit"
+description = "Enables the launch_installer_and_quit command without any pre-configured scope."
+commands.allow = ["launch_installer_and_quit"]
+
+[[permission]]
+identifier = "deny-launch-installer-and-quit"
+description = "Denies the launch_installer_and_quit command without any pre-configured scope."
+commands.deny = ["launch_installer_and_quit"]

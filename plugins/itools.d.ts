@@ -21,6 +21,17 @@ interface IToolsDB {
   keys(prefix?: string): Promise<string[]>;
 }
 
+/** 插件设置（只读）：值由用户在 iTools「插件管理 → 本插件 → 设置」里配置，
+ *  schema 由插件目录的 settings.json 声明。值 = schema 默认 + 用户覆盖。 */
+interface IToolsSettings {
+  /** 读单项设置值；不存在返回 null */
+  get(key: string): Promise<any | null>;
+  /** 读全部设置值（{ key: value, ... }） */
+  all(): Promise<Record<string, any>>;
+  /** 用户在管理中心改本插件设置时回调，cb 收到最新全量设置对象 */
+  onChange(cb: (values: Record<string, any>) => void): void;
+}
+
 interface ITools {
   // —— 生命周期 ——
   /** 进入插件时回调（读剪贴板预填、初始化都放这）。注册即触发（若进入信息已就绪）。 */
@@ -51,7 +62,7 @@ interface ITools {
   openExternal(url: string): Promise<void>;
   /** 用默认程序打开本地路径（拒绝可执行/脚本类文件） */
   openPath(path: string): Promise<void>;
-  /** 通知（首期落日志，OS 原生通知后续接） */
+  /** 通知（真·系统通知） */
   notify(body: string): Promise<void>;
   /** 执行程序（program + 参数数组，不经 shell）；高危，需声明并授权 `runCommand` */
   runCommand(program: string, args?: string[]): Promise<void>;
@@ -61,8 +72,11 @@ interface ITools {
     init?: { method?: string; headers?: Record<string, string>; body?: string },
   ): Promise<{ status: number; ok: boolean; body: string }>;
 
-  // —— 存储（按插件隔离的 KV）——
+  // —— 存储（按插件隔离的 KV，纯本地）——
   db: IToolsDB;
+
+  // —— 插件设置（只读）：值由用户在 iTools「插件管理」里配置，schema 见插件目录 settings.json ——
+  settings: IToolsSettings;
 
   // —— UI ——
   /** 轻量提示（纯前端 Toast，无需 await） */

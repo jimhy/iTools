@@ -1,4 +1,5 @@
 // iTools 主库入口：命令注册、协议、托盘、窗口、插件系统。
+mod account;
 mod commands;
 mod hotkey;
 mod launch;
@@ -8,6 +9,8 @@ mod profile;
 mod search;
 mod settings;
 mod store;
+mod sync;
+mod updater;
 mod window;
 
 use tauri::{
@@ -19,10 +22,12 @@ use tauri_plugin_global_shortcut::{
     Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState,
 };
 
+use account::AccountStore;
 use logging::ilog;
 use profile::ProfileStore;
 use search::SearchIndex;
 use settings::SettingsStore;
+use sync::DataStore;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -131,6 +136,9 @@ pub fn run() {
             app.manage(settings_store);
             // 账号资料（个人中心）——home_data 等命令依赖它，必须在 setup 里 manage
             app.manage(ProfileStore::load());
+            // 云账号登录态（本地优先）+ 本地优先数据层（云同步引擎）
+            app.manage(AccountStore::load());
+            app.manage(DataStore::load());
             // 插件运行期注册表（open_plugin_window / plugin_* 命令依赖）
             app.manage(plugin::PluginRegistry::new(plugins_root, loaded_plugins));
             // 区域截图流程状态（冻结图 + 选区结果通道）
@@ -144,6 +152,8 @@ pub fn run() {
             app.manage(plugin::record::RecordState::default());
             // 宿主内置截图（headless）的热键状态
             app.manage(plugin::capture::ScreenshotState::default());
+            // 宿主内置贴图（headless）的热键状态
+            app.manage(plugin::pin::PinHotkeyState::default());
 
             // 全局快捷键：任意已注册热键的 Pressed 事件即切换主窗口
             app.handle().plugin(
@@ -154,6 +164,8 @@ pub fn run() {
                             // 否则命中插件热键则唤起插件；再否则切换主窗口
                             if plugin::capture::is_screenshot_hotkey(app, shortcut.id()) {
                                 plugin::capture::trigger_screenshot(app, false);
+                            } else if plugin::pin::is_pin_hotkey(app, shortcut.id()) {
+                                plugin::pin::trigger_pin(app);
                             } else if !plugin::hotkey::dispatch(app, shortcut.id()) {
                                 window::toggle(app);
                             }
@@ -168,6 +180,12 @@ pub fn run() {
                     plugin::capture::register_screenshot_hotkey(app.handle(), &current.screenshot_hotkey)
                 {
                     ilog!("[iTools] 截图热键注册失败：{e}");
+                }
+            }
+            // 宿主内置贴图热键（默认 f3，可在设置里改；空 = 不注册）
+            if !current.pin_hotkey.trim().is_empty() {
+                if let Err(e) = plugin::pin::register_pin_hotkey(app.handle(), &current.pin_hotkey) {
+                    ilog!("[iTools] 贴图热键注册失败：{e}");
                 }
             }
 
@@ -230,7 +248,10 @@ pub fn run() {
             commands::get_profile,
             commands::set_nickname,
             commands::set_avatar,
+            commands::account_state,
+            commands::account_login,
             commands::set_data_sync,
+            commands::sync_now,
             commands::logout_account,
             commands::delete_account,
             commands::pick_launch_files,
@@ -242,6 +263,11 @@ pub fn run() {
             commands::open_admin_window,
             commands::close_admin_window,
             commands::set_settings_persist,
+            updater::check_update,
+            updater::get_app_version,
+            updater::open_release_page,
+            updater::download_update,
+            updater::launch_installer_and_quit,
             plugin::commands::open_plugin_window,
             plugin::commands::plugin_take_enter,
             plugin::commands::rescan_plugins,
@@ -249,6 +275,11 @@ pub fn run() {
             plugin::commands::set_plugin_enabled,
             plugin::commands::set_plugin_permission,
             plugin::commands::delete_plugin,
+            plugin::settings::plugin_readme,
+            plugin::settings::plugin_settings_schema,
+            plugin::settings::plugin_settings_values,
+            plugin::settings::plugin_settings_set,
+            plugin::settings::plugin_settings_reset,
             plugin::commands::plugin_hide,
             plugin::commands::plugin_exit,
             plugin::commands::plugin_set_height,
@@ -269,6 +300,8 @@ pub fn run() {
             plugin::commands::plugin_db_set,
             plugin::commands::plugin_db_remove,
             plugin::commands::plugin_db_keys,
+            plugin::settings::plugin_get_settings,
+            plugin::settings::plugin_get_setting,
             plugin::capture::plugin_list_displays,
             plugin::capture::plugin_capture_full,
             plugin::capture::plugin_capture_region,
@@ -284,7 +317,13 @@ pub fn run() {
             plugin::audio::plugin_start_audio_record,
             plugin::audio::plugin_stop_audio_record,
             plugin::record::plugin_start_gif_record,
-            plugin::record::plugin_stop_gif_record
+            plugin::record::plugin_stop_gif_record,
+            plugin::commands::plugin_account_state,
+            plugin::commands::plugin_data_get,
+            plugin::commands::plugin_data_set,
+            plugin::commands::plugin_data_remove,
+            plugin::commands::plugin_data_keys,
+            plugin::commands::plugin_data_sync
         ])
         .run(tauri::generate_context!())
         .expect("运行 iTools 失败");

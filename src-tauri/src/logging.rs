@@ -12,6 +12,12 @@ static LOG_FILE: OnceLock<Mutex<Option<File>>> = OnceLock::new();
 /// 初始化日志文件：在 exe 同目录下以追加方式打开 `itools.log`。
 /// 目录不可写（如装进 Program Files）时静默回退——仅输出 stderr，不影响启动。
 pub fn init() {
+    // release 版不落文件日志：文件日志本意只给 debug/测试版（见模块头注释）。
+    // 直接返回后 LOG_FILE 保持未初始化，write() 里 LOG_FILE.get() 恒为 None，
+    // 所有 ilog! 只走 stderr（GUI release 下无控制台，等于静默，不产 itools.log）。
+    if !cfg!(debug_assertions) {
+        return;
+    }
     let file = std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(|dir| dir.join("itools.log")))

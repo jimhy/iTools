@@ -7,12 +7,14 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
+use crate::account::{AccountState, AccountStore};
 use crate::launch;
 use crate::logging::ilog;
 use crate::profile::{ProfileStore, ProfileView};
 use crate::search::{icon, SearchIndex, SearchItem};
 use crate::settings::{AppSettings, LaunchItem, SettingsStore};
 use crate::store::UsageStore;
+use crate::sync::{DataStore, SyncResult};
 
 /// 前端查询入口。
 /// 默认应用搜索给足数量（网格「展开 (N)」要显示全部匹配）；/f 文件搜索保持精简列表。
@@ -119,25 +121,22 @@ pub fn save_settings(
             crate::window::apply_opacity(&win, next.opacity);
         }
     }
+    // 全局热键换绑：主唤起热键改动会 unregister_all()（撤掉一切键，含插件热键），需完整重建；
+    // 否则只对变化的截图/贴图热键做增量换绑。
     if old.hotkey != next.hotkey {
         let _ = app.global_shortcut().unregister_all();
         crate::register_toggle_hotkey(&app, &next.hotkey);
-        // unregister_all 把截图热键也撤了 → 补注册回来
-        if !next.screenshot_hotkey.trim().is_empty() {
-            let _ =
-                crate::plugin::capture::register_screenshot_hotkey(&app, next.screenshot_hotkey.trim());
+        // 补注册本体截图/贴图热键（各自先清状态再按 next 注册，空 = 只清不注册）
+        crate::plugin::capture::resync_screenshot_hotkey(&app, next.screenshot_hotkey.trim());
+        crate::plugin::pin::resync_pin_hotkey(&app, next.pin_hotkey.trim());
+        // 补注册所有插件热键（unregister_all 把它们也撤了，不补则插件全局键会静默失效）
+        crate::plugin::hotkey::reregister_all(&app);
+    } else {
+        if old.screenshot_hotkey != next.screenshot_hotkey {
+            crate::plugin::capture::resync_screenshot_hotkey(&app, next.screenshot_hotkey.trim());
         }
-    } else if old.screenshot_hotkey != next.screenshot_hotkey {
-        // 只改了截图热键：换绑（空 = 撤销）
-        let t = next.screenshot_hotkey.trim();
-        if t.is_empty() {
-            if let Some(st) = app.try_state::<crate::plugin::capture::ScreenshotState>() {
-                if let Some(sc) = st.shortcut.lock().unwrap().take() {
-                    let _ = app.global_shortcut().unregister(sc);
-                }
-            }
-        } else {
-            let _ = crate::plugin::capture::register_screenshot_hotkey(&app, t);
+        if old.pin_hotkey != next.pin_hotkey {
+            crate::plugin::pin::resync_pin_hotkey(&app, next.pin_hotkey.trim());
         }
     }
     if old.custom_apps != next.custom_apps {
@@ -300,40 +299,71 @@ fn save_avatar_copy(src: &str) -> Result<String, String> {
     Ok(dest.to_string_lossy().into_owned())
 }
 
-/// 数据同步开关（模拟），返回最新资料
+// ---------- 云账号 & 数据同步（本地优先 + 配置化云端 + 诚实降级） ----------
+
+/// 当前账号态：登录态 / 用户名 / 云端是否已配置 / 是否开启自动同步。
 #[tauri::command]
-pub fn set_data_sync(enabled: bool, profile: State<'_, ProfileStore>) -> ProfileView {
-    profile.update(|p| p.data_sync_enabled = enabled);
-    profile.view()
+pub fn account_state(account: State<'_, AccountStore>) -> AccountState {
+    account.state()
 }
 
-/// 退出账号（本地重置为游客态），返回最新资料。`all_devices` 仅用于还原退出账号交互，无真实副作用。
+/// 登录云账号：**云端已配置才可能成功**，否则诚实报错（不假装登录）。
+#[tauri::command]
+pub fn account_login(
+    username: String,
+    password: String,
+    app: AppHandle,
+    account: State<'_, AccountStore>,
+) -> Result<AccountState, String> {
+    let state = account.login(&username, &password)?;
+    let _ = app.emit("account-changed", ());
+    Ok(state)
+}
+
+/// 退出登录：清本地会话；云端登出尽力而为。`all_devices` **真实传给云端**（吊销全部设备会话）。
+/// 同时把本地资料重置为游客态。
 #[tauri::command]
 pub fn logout_account(
     all_devices: bool,
     app: AppHandle,
+    account: State<'_, AccountStore>,
     profile: State<'_, ProfileStore>,
-) -> ProfileView {
-    let _ = all_devices;
+) -> AccountState {
+    let state = account.logout(all_devices);
     profile.reset_to_guest();
+    let _ = app.emit("account-changed", ());
     let _ = app.emit("profile-changed", ());
-    profile.view()
+    state
 }
 
-/// 账号注销（模拟）：本地重置为游客态。用户名/密码仅做交互校验展示，不做真实鉴权。
+/// 注销账号：**需云端已配置**，走真实鉴权 + 服务端删除；成功后清本地账号态与资料。
+/// 未配置端点时诚实报错，不本地伪装删除「服务器数据」。
 #[tauri::command]
 pub fn delete_account(
     username: String,
     password: String,
     app: AppHandle,
+    account: State<'_, AccountStore>,
     profile: State<'_, ProfileStore>,
-) -> Result<ProfileView, String> {
-    if username.trim().is_empty() || password.trim().is_empty() {
-        return Err("请填写用户名和密码".to_string());
-    }
+) -> Result<AccountState, String> {
+    let state = account.delete_account(&username, &password)?;
     profile.reset_to_guest();
+    let _ = app.emit("account-changed", ());
     let _ = app.emit("profile-changed", ());
-    Ok(profile.view())
+    Ok(state)
+}
+
+/// 「登录后自动同步」开关：真实控制同步引擎是否在数据变更时上行。
+#[tauri::command]
+pub fn set_data_sync(enabled: bool, account: State<'_, AccountStore>) -> AccountState {
+    account.set_sync_enabled(enabled)
+}
+
+/// 立即把核心 App 数据（命名空间 `app`）同步到云端。
+/// 诚实降级：云端未配置 / 未登录时返回 `{ synced:false, reason }`，数据留在本地。
+#[tauri::command]
+pub fn sync_now(account: State<'_, AccountStore>, data: State<'_, DataStore>) -> SyncResult {
+    data.sync_gated("app", &account)
 }
 
 // ---------- 本地启动 ----------

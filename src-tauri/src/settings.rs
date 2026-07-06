@@ -74,6 +74,13 @@ pub struct AppSettings {
     // ---------- 截图（宿主内置，原生覆盖层，无界面/像 PixPin） ----------
     /// 截图全局快捷键（默认 "ctrl+shift+a"，可改；空 = 不注册）
     pub screenshot_hotkey: String,
+    /// 贴图全局快捷键（宿主内置原生贴图：读剪贴板图片贴成置顶浮窗；默认 "f3"，空 = 不注册）
+    #[serde(default = "default_pin_hotkey")]
+    pub pin_hotkey: String,
+}
+
+fn default_pin_hotkey() -> String {
+    "f3".to_string()
 }
 
 impl Default for AppSettings {
@@ -96,6 +103,7 @@ impl Default for AppSettings {
             disabled_plugins: Vec::new(),
             plugin_permissions: HashMap::new(),
             screenshot_hotkey: "ctrl+shift+a".to_string(),
+            pin_hotkey: "f3".to_string(),
         }
     }
 }

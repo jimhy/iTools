@@ -39,6 +39,14 @@
     "allow-plugin-start-audio-record",
     "allow-plugin-stop-audio-record",
     "allow-plugin-start-gif-record",
-    "allow-plugin-stop-gif-record"
+    "allow-plugin-stop-gif-record",
+    "allow-plugin-account-state",
+    "allow-plugin-data-get",
+    "allow-plugin-data-set",
+    "allow-plugin-data-remove",
+    "allow-plugin-data-keys",
+    "allow-plugin-data-sync",
+    "allow-plugin-get-settings",
+    "allow-plugin-get-setting"
   ]
 }

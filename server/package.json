@@ -1,0 +1,21 @@
+{
+  "name": "itools-sync-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "iTools 云同步服务端：账号鉴权 + 本地优先数据的云端存储/合并。实现客户端约定的 REST 契约。",
+  "type": "commonjs",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx test/api.test.ts"
+  },
+  "dependencies": {
+    "fastify": "^5.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}

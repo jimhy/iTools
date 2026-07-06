@@ -185,7 +185,8 @@ export function bindHotkeyRecorder(
     if (e.altKey) mods.push("alt");
     if (e.shiftKey) mods.push("shift");
     if (e.metaKey) mods.push("win");
-    if (mods.length === 0) return; // 全局热键至少要一个修饰键
+    // 全局热键至少要一个修饰键——除功能键 F1-F12 外（与后端 parse_hotkey 的放行规则一致）
+    if (mods.length === 0 && !/^F([1-9]|1[0-2])$/.test(key)) return;
     setValue([...mods, key].join("+"));
     input.blur();
   });

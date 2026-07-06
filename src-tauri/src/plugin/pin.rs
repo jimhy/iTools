@@ -72,7 +72,7 @@ pub fn create_pin_bytes(
         .parse()
         .map_err(|e| format!("URL 解析失败: {e}"))?;
     let label = format!("pin-{pin_id}");
-    tauri::WebviewWindowBuilder::new(app, &label, tauri::WebviewUrl::External(url))
+    let built = tauri::WebviewWindowBuilder::new(app, &label, tauri::WebviewUrl::External(url))
         .title("贴图")
         .inner_size(vw.max(24.0), vh.max(24.0))
         .decorations(false)
@@ -81,8 +81,12 @@ pub fn create_pin_bytes(
         .skip_taskbar(true)
         .resizable(false)
         .maximizable(false)
-        .build()
-        .map_err(|e| format!("创建贴图窗失败: {e}"))?;
+        .build();
+    if built.is_err() {
+        // build 失败：撤掉刚插入的图片，避免孤儿泄漏（Destroyed 清理不会触发）
+        pins.imgs.lock().unwrap().remove(&pin_id);
+    }
+    built.map_err(|e| format!("创建贴图窗失败: {e}"))?;
     // 窗口被任何方式销毁都清掉其图片缓存（不止 pin_close 一条路），避免内存泄漏
     if let Some(win) = app.get_webview_window(&label) {
         let app2 = app.clone();
@@ -126,4 +130,71 @@ pub fn pin_close(window: WebviewWindow, pins: State<'_, Pins>) {
         }
     }
     let _ = window.close();
+}
+
+// ============ 宿主贴图全局热键（headless：读剪贴板图片贴成置顶浮窗） ============
+
+/// 宿主贴图热键状态（供全局 handler 辨认 + 换绑时撤旧）。
+#[derive(Default)]
+pub struct PinHotkeyState {
+    pub shortcut: Mutex<Option<tauri_plugin_global_shortcut::Shortcut>>,
+}
+
+/// 该 shortcut id 是否是宿主贴图热键。
+pub fn is_pin_hotkey(app: &AppHandle, id: u32) -> bool {
+    app.try_state::<PinHotkeyState>()
+        .and_then(|s| s.shortcut.lock().ok().and_then(|g| g.map(|sc| sc.id() == id)))
+        .unwrap_or(false)
+}
+
+/// 注册/换绑宿主贴图全局热键（默认 f3，可在 iTools 设置里改）。
+pub fn register_pin_hotkey(app: &AppHandle, accel: &str) -> Result<(), String> {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+    let sc = crate::hotkey::parse_hotkey(accel).ok_or_else(|| format!("无效快捷键：{accel}"))?;
+    let st = app.state::<PinHotkeyState>();
+    // 撤旧键（换绑）
+    if let Some(old) = st.shortcut.lock().unwrap().take() {
+        if old.id() != sc.id() {
+            let _ = app.global_shortcut().unregister(old);
+        }
+    }
+    app.global_shortcut()
+        .register(sc)
+        .map_err(|e| format!("注册贴图热键失败（可能被占用）：{e}"))?;
+    *st.shortcut.lock().unwrap() = Some(sc);
+    Ok(())
+}
+
+/// 把贴图热键重同步到 accel：先撤旧键+清状态，accel 非空则注册新键（空 = 只清）。
+/// 供 save_settings 在主唤起热键改动（unregister_all）后统一重建，避免僵尸状态。
+pub fn resync_pin_hotkey(app: &AppHandle, accel: &str) {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+    if let Some(st) = app.try_state::<PinHotkeyState>() {
+        if let Some(old) = st.shortcut.lock().unwrap().take() {
+            let _ = app.global_shortcut().unregister(old);
+        }
+    }
+    if !accel.trim().is_empty() {
+        let _ = register_pin_hotkey(app, accel.trim());
+    }
+}
+
+/// 后台异步从剪贴板贴图（热键 handler 调用，不阻塞）。
+pub fn trigger_pin(app: &AppHandle) {
+    let app2 = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = pin_from_clipboard(&app2) {
+            crate::logging::ilog!("[pin] 贴图失败：{e}");
+        }
+    });
+}
+
+/// 读剪贴板图片贴成置顶浮窗（无图片则忽略）。透明度用默认 1.0。
+fn pin_from_clipboard(app: &AppHandle) -> Result<(), String> {
+    let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+    let img = cb.get_image().map_err(|_| "剪贴板没有图片".to_string())?;
+    let png = crate::plugin::commands::rgba_to_png(img.width, img.height, &img.bytes)?;
+    let pins = app.state::<Pins>();
+    create_pin_bytes(app, &pins, png, 1.0)?;
+    Ok(())
 }

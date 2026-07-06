@@ -1,7 +1,8 @@
-//! 账号资料：纯本地模拟的「个人中心」数据层（落盘 `%LOCALAPPDATA%\itools\profile.json`）。
+//! 账号资料（本地优先）：个人中心的**显示型**数据层（落盘 `%LOCALAPPDATA%\itools\profile.json`）。
 //!
-//! 不接真实服务器：昵称/头像本地持久化，手机号/微信绑定/数据同步/注销/退出只是还原
-//! 拟真的账号交互样式。陪伴天数从首次使用（`first_use_ts`）累计。
+//! 只存展示资料：昵称、头像、已绑定手机号（**默认空**）、首次使用时间。
+//! 登录态 / 同步开关 / 会话由 [`crate::account::AccountStore`] 负责；云同步由 [`crate::sync::DataStore`] 负责。
+//! 陪伴天数从首次使用（`first_use_ts`）累计。
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -19,37 +20,18 @@ fn now_secs() -> u64 {
 
 /// 账号资料。加 `serde(default)`：老配置缺字段时用默认值补齐。
 /// 序列化结构与前端 `Profile`（src/types.ts）保持一致。
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Profile {
     /// 昵称（空则前端回退系统用户名）
     pub nickname: String,
     /// 头像绝对路径（None = 用默认字母头像）
     pub avatar_path: Option<String>,
-    /// 手机号（脱敏展示，模拟）
+    /// 已绑定的手机号（脱敏展示）。**默认空**——未绑定不展示，不写死假号（准则第 8 条）。
+    /// 登录后由云端资料回填，或经真实绑定流程写入。
     pub phone: String,
     /// 首次使用时间戳（秒）；0 表示尚未记录，加载时补当前时间
     pub first_use_ts: u64,
-    /// 数据同步开关（模拟）
-    pub data_sync_enabled: bool,
-    /// 是否已绑定微信（模拟）
-    pub wechat_bound: bool,
-    /// 是否已登录（退出/注销后置 false）
-    pub logged_in: bool,
-}
-
-impl Default for Profile {
-    fn default() -> Self {
-        Self {
-            nickname: String::new(),
-            avatar_path: None,
-            phone: "139****1030".to_string(),
-            first_use_ts: 0,
-            data_sync_enabled: true,
-            wechat_bound: false,
-            logged_in: true,
-        }
-    }
 }
 
 impl Profile {
@@ -65,12 +47,12 @@ impl Profile {
         days.max(1)
     }
 
-    /// 重置为游客态：清昵称/头像、解绑微信、置未登录；保留 `first_use_ts`（陪伴天数不清零）。
+    /// 重置为游客态：清昵称 / 头像 / 手机号；保留 `first_use_ts`（陪伴天数不清零）。
+    /// 登录态由 [`crate::account::AccountStore`] 单独清除。
     fn reset_to_guest(&mut self) {
         self.nickname = String::new();
         self.avatar_path = None;
-        self.wechat_bound = false;
-        self.logged_in = false;
+        self.phone = String::new();
     }
 }
 
@@ -168,32 +150,30 @@ mod tests {
         let path = std::env::temp_dir().join("itools-test-profile.json");
         let _ = std::fs::remove_file(&path);
 
-        // 首次加载：补 first_use_ts、默认值
+        // 首次加载：补 first_use_ts、默认值。手机号默认空（不写死假号）
         let store = ProfileStore::load_from(path.clone());
         let p = store.get();
-        assert_eq!(p.phone, "139****1030");
-        assert!(p.data_sync_enabled);
-        assert!(p.logged_in);
+        assert_eq!(p.phone, "", "手机号默认应为空");
         assert!(p.first_use_ts > 0, "首次加载应补 first_use_ts");
         assert!(store.view().companion_days >= 1, "陪伴天数至少 1");
 
-        // 改昵称 + 头像并落盘
+        // 改昵称 + 头像 + 手机号并落盘
         store.update(|p| {
-            p.nickname = "海风哥".to_string();
+            p.nickname = "测试用户".to_string();
             p.avatar_path = Some(r"C:\a.png".to_string());
-            p.wechat_bound = true;
+            p.phone = "138****0000".to_string();
         });
         let reloaded = ProfileStore::load_from(path.clone());
-        assert_eq!(reloaded.get().nickname, "海风哥");
+        assert_eq!(reloaded.get().nickname, "测试用户");
+        assert_eq!(reloaded.get().phone, "138****0000");
         let first_use = reloaded.get().first_use_ts;
 
-        // 重置游客：清昵称/头像/微信、未登录，保留 first_use_ts
+        // 重置游客：清昵称/头像/手机号，保留 first_use_ts
         reloaded.reset_to_guest();
         let g = reloaded.get();
         assert_eq!(g.nickname, "");
         assert!(g.avatar_path.is_none());
-        assert!(!g.wechat_bound);
-        assert!(!g.logged_in);
+        assert_eq!(g.phone, "", "游客态手机号应清空");
         assert_eq!(g.first_use_ts, first_use, "陪伴天数基准不应清零");
 
         let _ = std::fs::remove_file(&path);

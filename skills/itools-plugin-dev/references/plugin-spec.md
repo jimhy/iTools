@@ -7,11 +7,13 @@
 ├── plugin.json     # 唯一必需的清单
 ├── index.html      # UI 入口（约定文件名，勿改；缺它则该目录不被视为插件）
 ├── logo.png        # 图标（约定名，可选）；也可用 plugin.json 的 icon 字段指定其它文件名
+├── settings.json   # 插件设置声明（可选）；有它则「插件管理 → 设置」tab 自动渲染配置界面
 └── assets/         # 静态资源（可选，index.html 里相对路径引用）
 ```
 
 - **目录名必须等于 `plugin.json` 的 `name`**（加载器按此校验；不一致会被跳过并告警）。
 - 只要目录含 `plugin.json` + `index.html` 就会被加载。
+- `settings.json` 是**可选**文件：声明本插件有哪些可配置项，iTools 自动渲染设置界面并存值，插件运行时用 `itools.settings`（只读）读取。写法详见 `plugin-settings-spec.md`。
 - 坏插件（清单解析失败 / 缺文件 / 无有效触发）只告警跳过，不影响其它插件。
 
 ## plugin.json 字段

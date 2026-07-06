@@ -3,6 +3,7 @@ import type { AdminCtx } from "./main";
 import type { PluginInfo } from "../types";
 import { h, makeSwitch } from "./ui";
 import * as api from "./api";
+import { renderPluginDetail } from "./plugin-detail";
 
 const PLUGIN_GLYPH =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2v4M15 2v4"/><path d="M7 6h10v4a5 5 0 0 1-10 0z"/><path d="M12 15v5"/></svg>';
@@ -35,8 +36,16 @@ export async function renderPlugins(root: HTMLElement, ctx: AdminCtx): Promise<v
     return h("span", { class: "plugin-logo plugin-logo-fallback", html: PLUGIN_GLYPH });
   }
 
+  // 进入插件详情页；返回时重渲染列表（root 由详情页/此处负责清空）
+  async function openDetail(p: PluginInfo): Promise<void> {
+    await renderPluginDetail(root, ctx, p, () => {
+      root.innerHTML = "";
+      void renderPlugins(root, ctx);
+    });
+  }
+
   function renderCard(p: PluginInfo): HTMLElement {
-    const card = h("div", { class: "plugin-card" + (p.enabled ? "" : " disabled") });
+    const card = h("div", { class: "plugin-card clickable" + (p.enabled ? "" : " disabled") });
 
     const meta = h(
       "div",
@@ -122,6 +131,11 @@ export async function renderPlugins(root: HTMLElement, ctx: AdminCtx): Promise<v
     });
 
     card.append(logoFor(p), meta, h("div", { class: "plugin-actions" }, delBtn, sw));
+    // 点卡片主体进详情；点开关/权限/删除等交互控件区不触发
+    card.addEventListener("click", (e) => {
+      if ((e.target as HTMLElement).closest(".plugin-actions, .plugin-perms")) return;
+      void openDetail(p);
+    });
     return card;
   }
 

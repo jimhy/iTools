@@ -32,7 +32,10 @@
     "allow-get-profile",
     "allow-set-nickname",
     "allow-set-avatar",
+    "allow-account-state",
+    "allow-account-login",
     "allow-set-data-sync",
+    "allow-sync-now",
     "allow-logout-account",
     "allow-delete-account",
     "allow-pick-launch-files",
@@ -44,11 +47,21 @@
     "allow-open-admin-window",
     "allow-close-admin-window",
     "allow-set-settings-persist",
+    "allow-check-update",
+    "allow-get-app-version",
+    "allow-open-release-page",
+    "allow-download-update",
+    "allow-launch-installer-and-quit",
     "allow-open-plugin-window",
     "allow-rescan-plugins",
     "allow-list-plugins",
     "allow-set-plugin-enabled",
     "allow-set-plugin-permission",
-    "allow-delete-plugin"
+    "allow-delete-plugin",
+    "allow-plugin-readme",
+    "allow-plugin-settings-schema",
+    "allow-plugin-settings-values",
+    "allow-plugin-settings-set",
+    "allow-plugin-settings-reset"
   ]
 }

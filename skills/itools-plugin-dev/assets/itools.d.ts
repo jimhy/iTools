@@ -37,6 +37,54 @@ interface IToolsDB {
   keys(prefix?: string): Promise<string[]>;
 }
 
+/** 云账号态（只读，脱敏；不含用户名/token） */
+interface IToolsAccountState {
+  /** 是否已登录云账号 */
+  loggedIn: boolean;
+  /** 云端是否已接入（false = 只能本地） */
+  cloudConfigured: boolean;
+  /** 是否开启「登录后自动同步」 */
+  syncEnabled: boolean;
+}
+
+/** 账号态（只读） */
+interface IToolsAccount {
+  state(): Promise<IToolsAccountState>;
+  /** 便捷：是否已登录云账号 */
+  isLoggedIn(): Promise<boolean>;
+}
+
+/** data.sync() 结果；synced=false 时看 reason */
+interface IToolsSyncResult {
+  synced: boolean;
+  /** 未同步原因：cloud_not_configured | not_logged_in | offline | error */
+  reason?: string;
+  pushed: number;
+  pulled: number;
+  message?: string;
+}
+
+/** 本地优先 + 可云同步的数据（与 db 同为 KV，区别是 data 参与云同步、db 纯本地） */
+interface IToolsData {
+  get(key: string): Promise<any | null>;
+  set(key: string, value: any): Promise<void>;
+  remove(key: string): Promise<void>;
+  keys(prefix?: string): Promise<string[]>;
+  /** 手动触发同步到云端（诚实降级，见 reason） */
+  sync(): Promise<IToolsSyncResult>;
+}
+
+/** 插件设置（只读）：值由用户在 iTools「插件管理 → 本插件 → 设置」里配置，
+ *  schema 由插件目录的 settings.json 声明。值 = schema 默认 + 用户覆盖。 */
+interface IToolsSettings {
+  /** 读单项设置值；不存在返回 null */
+  get(key: string): Promise<any | null>;
+  /** 读全部设置值（{ key: value, ... }） */
+  all(): Promise<Record<string, any>>;
+  /** 用户在管理中心改本插件设置时回调，cb 收到最新全量设置对象 */
+  onChange(cb: (values: Record<string, any>) => void): void;
+}
+
 interface ITools {
   // —— 生命周期 ——
   /** 进入插件时回调（读剪贴板预填、初始化都放这）。注册即触发（若进入信息已就绪）。 */
@@ -116,8 +164,17 @@ interface ITools {
     init?: { method?: string; headers?: Record<string, string>; body?: string },
   ): Promise<{ status: number; ok: boolean; body: string }>;
 
-  // —— 存储（按插件隔离的 KV）——
+  // —— 存储（按插件隔离的 KV，纯本地）——
   db: IToolsDB;
+
+  // —— 账号态（只读；仅 loggedIn/cloudConfigured/syncEnabled，无用户名/token）——
+  account: IToolsAccount;
+
+  // —— 本地优先数据（与 db 同为 KV，但参与云同步）——
+  data: IToolsData;
+
+  // —— 插件设置（只读）：值由用户在 iTools「插件管理」里配置，schema 见插件目录 settings.json ——
+  settings: IToolsSettings;
 
   // —— UI ——
   /** 轻量提示（纯前端 Toast，无需 await） */

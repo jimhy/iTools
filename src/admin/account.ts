@@ -1,8 +1,12 @@
-//! 我的账号（纯本地模拟）：首页 banner + 账号操作列表；
-//! 「修改账号」覆盖页（6 子导航）与「退出账号」居中弹窗。
+//! 我的账号（本地优先 + 配置化云端 + 诚实降级）：
+//! 首页 banner + 账号操作；「修改账号」覆盖页（修改头像/昵称/数据同步/账号注销）；登录/退出弹窗。
+//!
+//! 诚信约束（doc/开发准则.md 第 7 条）：数据始终先落本地、离线可用；登录云账号后才可选同步到云端。
+//! 未接入云端（未配置 ITOOLS_SYNC_ENDPOINT）或未登录时，UI **如实标注**「云端未接入 / 未登录」，
+//! 不出现「备份到云端 / 多设备同步 / 会员权益」等对用户暗示服务端却不兑现的文案，不展示写死的假手机号。
 
 import type { AdminCtx } from "./main";
-import type { ProfileView } from "../types";
+import type { ProfileView, AccountState, SyncResult } from "../types";
 import { h, makeSwitch } from "./ui";
 import { setDropZone, clearDropZone } from "./dnd";
 import * as api from "./api";
@@ -32,17 +36,58 @@ function displayName(name: string): string {
   return name.trim() || "游客";
 }
 
+/** 一个信息框（标题 + 若干段正文）。 */
+function noticeBox(cls: string, title: string, ...lines: string[]): HTMLElement {
+  return h(
+    "div",
+    { class: `info-box ${cls}` },
+    h("div", { class: "info-title", text: title }),
+    ...lines.map((t) => h("div", { text: t })),
+  );
+}
+
+/** 文本/密码输入框。 */
+function field(placeholder: string, type = "text"): HTMLInputElement {
+  return h("input", { class: "field-input", type, placeholder });
+}
+
+/** 把同步结果翻译成给用户看的一句话（诚实：未同步说明原因，不谎报成功）。 */
+function syncResultMsg(r: SyncResult): string {
+  if (r.synced) return `已同步（上行 ${r.pushed} 条，下行 ${r.pulled} 条）`;
+  switch (r.reason) {
+    case "cloud_not_configured":
+      return "云端服务未接入，数据已保存在本地";
+    case "not_logged_in":
+      return "未登录，数据已保存在本地";
+    case "offline":
+      return "无法连接云端，请稍后重试";
+    default:
+      return r.message || "同步失败";
+  }
+}
+
 export async function renderAccount(root: HTMLElement, ctx: AdminCtx): Promise<void> {
   let profile: ProfileView;
+  let account: AccountState;
   try {
-    profile = await api.getProfile();
+    [profile, account] = await Promise.all([api.getProfile(), api.accountState()]);
   } catch (err) {
-    console.error("get_profile failed", err);
+    console.error("load account failed", err);
     root.appendChild(h("div", { class: "panel-error", text: "账号信息加载失败" }));
     return;
   }
 
-  /** 构造一个圆形头像元素：有头像路径则异步载入，否则显示首字母。 */
+  /** 重新拉取资料 + 账号态并重绘（登录/退出/注销后调用）。 */
+  async function refreshAll(): Promise<void> {
+    try {
+      [profile, account] = await Promise.all([api.getProfile(), api.accountState()]);
+    } catch (err) {
+      console.error("refresh account failed", err);
+    }
+    paint();
+  }
+
+  /** 构造圆形头像：有头像路径则异步载入，否则显示首字母。 */
   function avatarEl(size: number): HTMLElement {
     const el = h("div", { class: "avatar-img", text: initial(profile.nickname) });
     el.style.width = `${size}px`;
@@ -66,30 +111,46 @@ export async function renderAccount(root: HTMLElement, ctx: AdminCtx): Promise<v
   function paint(): void {
     root.innerHTML = "";
 
+    // 状态行：已登录显示用户名（+ 已绑定手机号），未登录如实标注「未登录」。
+    const statusLabel = account.loggedIn
+      ? account.username || "已登录"
+      : "未登录（本地）";
+    const subParts = [statusLabel];
+    if (profile.phone) subParts.push(profile.phone);
+    subParts.push(`iTools 已陪伴你 ${profile.companion_days} 天`);
+
     const banner = h(
       "div",
       { class: "acc-banner" },
-      h("div", { class: "acc-watermark", text: "¥" }),
       avatarEl(64),
       h(
         "div",
         { class: "acc-banner-info" },
         h("div", { class: "acc-name-row" }, h("span", { class: "acc-name", text: displayName(profile.nickname) })),
-        h("div", {
-          class: "acc-sub",
-          text: `${profile.phone}　|　iTools 已陪伴你 ${profile.companion_days} 天`,
-        }),
+        h("div", { class: "acc-sub", text: subParts.join("　|　") }),
       ),
     );
 
-    const list = h(
-      "div",
-      { class: "acc-list card" },
-      accRow("修改账号", openEdit),
-      accRow("退出账号", openLogout),
-    );
+    // 云端未接入时给一条诚实提示（顶部横幅），避免用户误以为有云账号体系。
+    const rows: HTMLElement[] = [accRow("修改账号", openEdit)];
+    if (account.loggedIn) {
+      rows.push(accRow("退出账号", openLogout));
+    } else {
+      rows.push(accRow(account.cloudConfigured ? "登录账号" : "登录账号（云端未接入）", openLogin));
+    }
+    const list = h("div", { class: "acc-list card" }, ...rows);
 
-    root.append(banner, list);
+    root.append(banner);
+    if (!account.cloudConfigured) {
+      root.append(
+        noticeBox(
+          "info-box-warn",
+          "云端账号未接入",
+          "当前版本未配置云端服务，账号与数据仅保存在本地、离线可用。接入云端后即可登录并跨设备同步。",
+        ),
+      );
+    }
+    root.append(list);
   }
 
   function accRow(label: string, onClick: () => void): HTMLElement {
@@ -109,7 +170,7 @@ export async function renderAccount(root: HTMLElement, ctx: AdminCtx): Promise<v
     const subs: Array<{ label: string; icon: string; render: (inner: HTMLElement) => void }> = [
       { label: "修改头像", icon: IC_FACE, render: renderAvatarPane },
       { label: "修改昵称", icon: IC_PEN, render: renderNickPane },
-      { label: "关闭数据同步", icon: IC_SYNC, render: renderSyncPane },
+      { label: "数据同步", icon: IC_SYNC, render: renderSyncPane },
       { label: "账号注销", icon: IC_BAN, render: renderDeletePane },
     ];
 
@@ -177,7 +238,7 @@ export async function renderAccount(root: HTMLElement, ctx: AdminCtx): Promise<v
           { class: "pane-avatar" },
           current,
           drop,
-          h("div", { class: "pane-tip", text: "支持拖入本地图片，自动裁剪为方形头像" }),
+          h("div", { class: "pane-tip", text: "支持拖入本地图片，自动裁剪为方形头像（本地保存）" }),
         ),
       );
       setDropZone(drop, (paths) => {
@@ -231,35 +292,104 @@ export async function renderAccount(root: HTMLElement, ctx: AdminCtx): Promise<v
     }
 
     function renderSyncPane(inner: HTMLElement): void {
-      const info = h(
-        "div",
-        { class: "info-box info-box-blue" },
-        h("div", { class: "info-title", text: "数据同步" }),
-        h("div", {
-          text: "1. 本地磁盘存储的数据，重装操作系统或使用安全软件清理误删文件等行为会导致数据丢失。开启数据同步可将本地磁盘数据备份到 iTools 云端服务器，将很大提高您数据的安全性！",
-        }),
-        h("div", { text: "2. 开启数据同步，数据可在您多台电脑之间无缝同步协同！" }),
-        h("div", { text: "3. 数据同步是 iTools 会员专属权益！" }),
+      inner.appendChild(
+        noticeBox(
+          "info-box-blue",
+          "数据同步",
+          "iTools 采用本地优先存储：你的数据始终先保存在本机、离线可用。",
+          "登录云账号后可将数据同步到云端、在多台设备间共享；未登录或云端未接入时，数据只保留在本地。",
+        ),
       );
-      const sw = makeSwitch(profile.data_sync_enabled, async (checked) => {
+
+      if (!account.cloudConfigured) {
+        inner.appendChild(
+          noticeBox(
+            "info-box-warn",
+            "云端服务未接入",
+            "当前版本未配置云端服务（ITOOLS_SYNC_ENDPOINT），暂无法同步，数据仅保存在本地。",
+          ),
+        );
+        return;
+      }
+      if (!account.loggedIn) {
+        inner.appendChild(noticeBox("info-box-warn", "未登录", "登录云账号后可开启登录同步。"));
+        inner.appendChild(
+          h("button", {
+            class: "btn btn-primary btn-block",
+            text: "去登录",
+            onClick: () => {
+              closeEdit();
+              openLogin();
+            },
+          }),
+        );
+        return;
+      }
+
+      // 已登录 + 已配置：真实开关 + 立即同步
+      const sw = makeSwitch(account.syncEnabled, async (checked) => {
         try {
-          profile = await api.setDataSync(checked);
-          ctx.toast(checked ? "已开启数据同步" : "已关闭数据同步");
+          account = await api.setDataSync(checked);
+          ctx.toast(checked ? "已开启登录同步" : "已关闭登录同步");
         } catch (err) {
           console.error("set_data_sync failed", err);
           ctx.toast("操作失败");
         }
       });
-      inner.append(info, h("div", { class: "sync-row card" }, h("span", { text: "账号数据同步功能" }), sw));
+      const syncBtn = h("button", { class: "btn btn-primary btn-block", text: "立即同步" });
+      syncBtn.addEventListener("click", async () => {
+        syncBtn.disabled = true;
+        syncBtn.textContent = "同步中…";
+        try {
+          const r = await api.syncNow();
+          ctx.toast(syncResultMsg(r));
+        } catch (err) {
+          console.error("sync_now failed", err);
+          ctx.toast("同步失败");
+        } finally {
+          syncBtn.disabled = false;
+          syncBtn.textContent = "立即同步";
+        }
+      });
+      inner.append(
+        h("div", { class: "sync-row card" }, h("span", { text: "登录后自动同步" }), sw),
+        syncBtn,
+      );
     }
 
     function renderDeletePane(inner: HTMLElement): void {
-      const warn = h("div", {
-        class: "info-box info-box-warn",
-        text: "删除服务器上的账号数据，同时 iTools 将切换到「游客」数据，该行为无法撤销，请谨慎操作！",
-      });
-      const user = h("input", { class: "field-input", type: "text", placeholder: "用户名" });
-      const pass = h("input", { class: "field-input", type: "password", placeholder: "密码" });
+      if (!account.cloudConfigured) {
+        inner.appendChild(
+          noticeBox(
+            "info-box-warn",
+            "云端服务未接入",
+            "当前未配置云端服务，没有云端账号可注销。你的数据都在本地，可自行管理。",
+          ),
+        );
+        return;
+      }
+      if (!account.loggedIn) {
+        inner.appendChild(noticeBox("info-box-warn", "未登录", "注销云端账号需先登录。"));
+        inner.appendChild(
+          h("button", {
+            class: "btn btn-primary btn-block",
+            text: "去登录",
+            onClick: () => {
+              closeEdit();
+              openLogin();
+            },
+          }),
+        );
+        return;
+      }
+
+      const warn = noticeBox(
+        "info-box-warn",
+        "注销云端账号",
+        "将通过鉴权删除云端账号数据，本机随后切换为「游客」。该操作不可撤销，请谨慎操作！",
+      );
+      const user = field("用户名");
+      const pass = field("密码", "password");
       const btn = h("button", { class: "btn btn-danger btn-block", text: "注销账号" });
       btn.disabled = true;
       const refresh = (): void => {
@@ -269,9 +399,10 @@ export async function renderAccount(root: HTMLElement, ctx: AdminCtx): Promise<v
       pass.addEventListener("input", refresh);
       btn.addEventListener("click", async () => {
         try {
-          profile = await api.deleteAccount(user.value.trim(), pass.value.trim());
+          account = await api.deleteAccount(user.value.trim(), pass.value.trim());
           ctx.toast("账号已注销，已切换为游客");
           closeEdit();
+          void refreshAll();
         } catch (err) {
           console.error("delete_account failed", err);
           ctx.toast(typeof err === "string" ? err : "注销失败");
@@ -294,7 +425,83 @@ export async function renderAccount(root: HTMLElement, ctx: AdminCtx): Promise<v
     selectSub(0);
   }
 
-  // ---------- 退出账号弹窗（无 profile 参数：noUnusedParameters） ----------
+  // ---------- 登录弹窗 ----------
+  function openLogin(): void {
+    const mask = h("div", { class: "modal-mask" });
+    const content = h("div", { class: "pane-form" });
+
+    if (!account.cloudConfigured) {
+      content.appendChild(
+        noticeBox(
+          "info-box-blue",
+          "云端服务未接入",
+          "当前版本未配置云端服务（ITOOLS_SYNC_ENDPOINT），暂时只能本地使用，无法登录云账号。",
+        ),
+      );
+    } else {
+      const user = field("用户名");
+      const pass = field("密码", "password");
+      const btn = h("button", { class: "btn btn-primary btn-block", text: "登录" });
+      btn.disabled = true;
+      const refresh = (): void => {
+        btn.disabled = user.value.trim() === "" || pass.value.trim() === "";
+      };
+      user.addEventListener("input", refresh);
+      pass.addEventListener("input", refresh);
+      btn.addEventListener("click", async () => {
+        btn.disabled = true;
+        try {
+          account = await api.accountLogin(user.value.trim(), pass.value);
+          ctx.toast("已登录");
+          closeModal();
+          void refreshAll();
+        } catch (err) {
+          console.error("account_login failed", err);
+          ctx.toast(typeof err === "string" ? err : "登录失败");
+          btn.disabled = false;
+        }
+      });
+      content.append(
+        h("label", { class: "field-label", text: "用户名" }),
+        user,
+        h("label", { class: "field-label", text: "密码" }),
+        pass,
+        btn,
+      );
+    }
+
+    const modal = h(
+      "div",
+      { class: "modal" },
+      h(
+        "div",
+        { class: "modal-title-row" },
+        h("div", { class: "modal-title", text: "登录云账号" }),
+        h("button", { class: "edit-close", html: IC_X, onClick: closeModal }),
+      ),
+      content,
+    );
+    mask.appendChild(modal);
+    mask.addEventListener("mousedown", (e) => {
+      if (e.target === mask) closeModal();
+    });
+    document.body.appendChild(mask);
+
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        closeModal();
+      }
+    };
+    document.addEventListener("keydown", onKey, true);
+
+    function closeModal(): void {
+      document.removeEventListener("keydown", onKey, true);
+      mask.remove();
+    }
+  }
+
+  // ---------- 退出账号弹窗 ----------
   function openLogout(): void {
     const allCheck = h("input", { type: "checkbox" });
     const mask = h("div", { class: "modal-mask" });
@@ -302,7 +509,7 @@ export async function renderAccount(root: HTMLElement, ctx: AdminCtx): Promise<v
       "div",
       { class: "modal" },
       h("div", { class: "modal-title", text: "确认退出当前账号？" }),
-      h("div", { class: "modal-warn", text: "退出后，本设备上的该账号数据将无法继续访问。" }),
+      h("div", { class: "modal-warn", text: "退出后将切换为本地游客态；本机已缓存的账号资料会被清除。" }),
       h("label", { class: "modal-check" }, allCheck, h("span", { text: "同时退出所有已登录设备" })),
       h(
         "div",
@@ -331,10 +538,10 @@ export async function renderAccount(root: HTMLElement, ctx: AdminCtx): Promise<v
     }
     async function doLogout(): Promise<void> {
       try {
-        profile = await api.logoutAccount(allCheck.checked);
+        account = await api.logoutAccount(allCheck.checked);
         ctx.toast("已退出账号");
         closeModal();
-        paint();
+        void refreshAll();
       } catch (err) {
         console.error("logout_account failed", err);
         ctx.toast("退出失败");

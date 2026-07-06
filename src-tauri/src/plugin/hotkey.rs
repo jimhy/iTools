@@ -144,3 +144,19 @@ pub fn plugin_unregister_hotkey(
         None => Ok(()), // 本就未注册：幂等成功，且不碰宿主/其它注册
     }
 }
+
+/// 重注册所有已登记的插件热键。主唤起热键改动时 `save_settings` 会 `unregister_all()`
+/// 撤掉一切键（含插件热键），须调用本函数补回，否则插件全局键会在 OS 层静默失效
+/// （PluginHotkeys.map 仍留绑定，dispatch 却永远收不到）。id 由 accelerator 确定性生成，
+/// 重注册后 dispatch 仍能按原 id 匹配。
+pub fn reregister_all(app: &AppHandle) {
+    if let Some(hk) = app.try_state::<PluginHotkeys>() {
+        if let Ok(map) = hk.map.lock() {
+            for binding in map.values() {
+                if let Some(sc) = crate::hotkey::parse_hotkey(&binding.accelerator) {
+                    let _ = app.global_shortcut().register(sc);
+                }
+            }
+        }
+    }
+}

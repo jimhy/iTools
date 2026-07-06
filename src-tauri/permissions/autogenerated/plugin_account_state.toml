@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-account-state"
+description = "Enables the plugin_account_state command without any pre-configured scope."
+commands.allow = ["plugin_account_state"]
+
+[[permission]]
+identifier = "deny-plugin-account-state"
+description = "Denies the plugin_account_state command without any pre-configured scope."
+commands.deny = ["plugin_account_state"]

@@ -53,6 +53,54 @@ await itools.db.set("opts", { len: 16, symbol: true });
 const opts = await itools.db.get("opts"); // → { len: 16, symbol: true } 或 null
 ```
 
+## 账号态（只读）
+
+查询用户的云账号登录态，用于决定「是否走云同步 / 是否引导登录」。**只暴露状态，不含用户名/token**（隐私）。
+
+- `itools.account.state(): Promise<{ loggedIn: boolean; cloudConfigured: boolean; syncEnabled: boolean }>`
+  - `loggedIn` — 是否已登录云账号。
+  - `cloudConfigured` — 云端服务是否已接入（`false` = 未接入，只能本地）。
+  - `syncEnabled` — 用户是否开启了「登录后自动同步」。
+- `itools.account.isLoggedIn(): Promise<boolean>` — 便捷判断是否已登录。
+
+## 同步型数据（本地优先 + 云同步）
+
+与 `db` 一样是按插件隔离的 KV（值自动 JSON 序列化），**区别是 `data` 参与云同步**：写入**先落本地**（离线始终可用），用户已登录且云端已接入时可经 `sync()` 上行云端并回拉合并。
+
+- `itools.data.get(key: string): Promise<any | null>`
+- `itools.data.set(key: string, value: any): Promise<void>` — 先写本地、标记待同步。
+- `itools.data.remove(key: string): Promise<void>`
+- `itools.data.keys(prefix?: string): Promise<string[]>`
+- `itools.data.sync(): Promise<{ synced: boolean; reason?: string; pushed: number; pulled: number; message?: string }>`
+  - **诚实降级**：`synced=false` 时 `reason ∈ "cloud_not_configured" | "not_logged_in" | "offline" | "error"`，数据仍安全保留在本地。
+
+```js
+// 本地优先：随时读写，离线也可用
+await itools.data.set("note", { text: "hello" });
+// 登录后可同步；未登录/未接云端时诚实返回 reason，不谎报
+const r = await itools.data.sync();
+if (!r.synced) itools.showToast(r.reason === "not_logged_in" ? "登录后可云端同步" : "已保存在本地");
+```
+
+> `db` = 纯本地永久 KV；`data` = 本地优先 + 可云同步。只在本机用选 `db`，想跨设备同步选 `data`。
+
+## 设置（settings，只读）
+
+读取用户在 iTools「插件管理 → 点开插件 → 设置」里为本插件配置的值。设置项由插件目录根的可选文件 `settings.json` 声明（schema），iTools 据此自动渲染设置界面并保存用户改动。运行时读到的**值 = schema 默认 + 用户覆盖**（iTools 已合并好）。**只读**：值只能由用户在管理中心改，插件没有 `set`。
+
+- `itools.settings.get(key: string): Promise<any | null>` — 读单项；`key` 是 `settings.json` 里某项的 `key`，不存在返回 `null`。
+- `itools.settings.all(): Promise<Record<string, any>>` — 读全部，返回 `{ key: value, ... }`。
+- `itools.settings.onChange(cb: (values: Record<string, any>) => void): void` — 用户在管理中心改了本插件设置时回调，`cb` 收到最新的**全量**设置对象；用于实时重新应用（如启停全局热键）。
+
+```js
+const cfg = await itools.settings.all();        // { instantShot: true, ... }
+const prefix = await itools.settings.get("filenamePrefix"); // 不存在 → null
+itools.settings.onChange((v) => { /* 重新应用最新配置 */ });
+```
+
+> ⚠️ 插件自己的**业务状态**（历史记录、上次选中项等）用 `db` / `data`，**不要**塞进 settings。
+> `settings.json` 的完整写法、控件类型（text/textarea/number/boolean/select/path/color/hotkey）见 `plugin-settings-spec.md`。
+
 ## 系统
 
 - `itools.openExternal(url: string): Promise<void>` — 用默认浏览器打开网址（**仅 http/https/mailto**）。

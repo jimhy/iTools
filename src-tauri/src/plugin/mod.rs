@@ -17,6 +17,7 @@ pub mod native_overlay;
 pub mod ocr;
 pub mod pin;
 pub mod record;
+pub mod settings;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, RwLock};
@@ -318,6 +319,9 @@ pub struct EnterInfo {
     #[serde(rename = "type")]
     pub kind: String,
     pub query: String,
+    /// 当前插件 id（桥接层内部用于 `settings.onChange` 过滤；不透给业务 `onEnter` 回调）。
+    #[serde(rename = "pluginId")]
+    pub plugin_id: String,
 }
 
 /// 插件运行期注册表（managed state）。plugins 用 RwLock 以支持热重载运行时替换。
@@ -443,6 +447,8 @@ impl PluginRegistry {
                     enabled: !disabled.iter().any(|d| d == &m.name),
                     permissions: m.permissions.clone(),
                     granted: granted_map.get(&m.name).cloned().unwrap_or_default(),
+                    has_readme: p.dir.join("README.md").exists(),
+                    has_settings: p.dir.join("settings.json").exists(),
                 }
             })
             .collect()
@@ -466,6 +472,10 @@ pub struct PluginInfo {
     pub permissions: Vec<String>,
     /// 已授权的能力
     pub granted: Vec<String>,
+    /// 是否有 README.md（详情页「说明」tab 是否可用）
+    pub has_readme: bool,
+    /// 是否有 settings.json（详情页「设置」tab 是否可用）
+    pub has_settings: bool,
 }
 
 /// 解析插件根目录（可写）：

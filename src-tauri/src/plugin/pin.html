@@ -58,10 +58,11 @@
       invoke("pin_resize", { width: w, height: Math.round(w * natH / natW) }).catch(function () {});
     }, { passive: false });
 
-    // 双击：正常态 + Ctrl → 变缩略图；缩略图态 → 还原
+    // 双击：普通双击 → 关闭贴图；Ctrl+双击 → 变缩略图；缩略图态双击 → 还原
     window.addEventListener("dblclick", function (e) {
       if (state === "thumb") { restore(); }
       else if (e.ctrlKey) { toThumb(); }
+      else { invoke("pin_close").catch(function () {}); }
     });
     function toThumb() {
       fullW = window.innerWidth; fullH = window.innerHeight;

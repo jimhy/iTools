@@ -83,7 +83,7 @@ function armKeyAction(action: () => void): void {
 }
 
 /**
- * 关闭（Esc/执行后/分离后）：清状态回主界面并藏窗——下次呼出是主界面。
+ * 关闭（Esc/执行后）：清状态回主界面并藏窗——下次呼出是主界面。
  * 与「失焦隐藏」(hideKeepState) 区分：那个保留状态，呼出恢复原界面。
  */
 async function hide(): Promise<void> {
@@ -802,7 +802,7 @@ let suppressHideUntil = 0;
 let justHidden = true;
 
 // 临时界面架构：失焦只藏窗、状态保留——再呼出恢复原界面；
-// 回主界面的时机只有 Esc / 执行动作 / Ctrl+D 分离（它们走 hide()）。
+// 回主界面的时机只有 Esc / 执行动作（它们走 hide()）。
 appWindow.onFocusChanged(({ payload: focused }) => {
   if (focused) {
     cancelAutoClear(); // 呼出即取消待清除

@@ -288,6 +288,20 @@ pub fn register_screenshot_hotkey(app: &tauri::AppHandle, accel: &str) -> Result
     Ok(())
 }
 
+/// 把截图热键重同步到 accel：先撤旧键+清状态，accel 非空则注册新键（空 = 只清）。
+/// 供 save_settings 在主唤起热键改动（unregister_all）后统一重建，避免僵尸状态。
+pub fn resync_screenshot_hotkey(app: &tauri::AppHandle, accel: &str) {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+    if let Some(st) = app.try_state::<ScreenshotState>() {
+        if let Some(old) = st.shortcut.lock().unwrap().take() {
+            let _ = app.global_shortcut().unregister(old);
+        }
+    }
+    if !accel.trim().is_empty() {
+        let _ = register_screenshot_hotkey(app, accel.trim());
+    }
+}
+
 /// 后台异步跑一次截图（热键 handler 调用，不阻塞）。
 pub fn trigger_screenshot(app: &tauri::AppHandle, full: bool) {
     let app2 = app.clone();
