@@ -61,6 +61,8 @@ function syncResultMsg(r: SyncResult): string {
       return "未登录，数据已保存在本地";
     case "offline":
       return "无法连接云端，请稍后重试";
+    case "session_expired":
+      return "云端会话已失效，请重新登录";
     default:
       return r.message || "同步失败";
   }
@@ -292,21 +294,48 @@ export async function renderAccount(root: HTMLElement, ctx: AdminCtx): Promise<v
     }
 
     function renderSyncPane(inner: HTMLElement): void {
+      // 云同步服务器地址：用户**手动填写**（不随程序内置、不写死在代码里）。填了才接入云端、可登录同步。
+      const epInput = h("input", { class: "field-input", type: "text", placeholder: "如 https://api.jimhy.cn:7010" });
+      const epSave = h("button", { class: "btn btn-primary btn-block", text: "保存并接入" });
+      epSave.addEventListener("click", async () => {
+        epSave.disabled = true;
+        try {
+          const s = await api.getSettings();
+          s.sync_endpoint = epInput.value.trim();
+          await api.saveSettings(s);
+          account = await api.accountState();
+          ctx.toast(s.sync_endpoint ? "已保存服务器地址" : "已清除服务器地址");
+          inner.innerHTML = "";
+          renderSyncPane(inner); // 重绘以反映接入状态
+        } catch (err) {
+          console.error("save sync_endpoint failed", err);
+          ctx.toast("保存失败");
+          epSave.disabled = false;
+        }
+      });
       inner.appendChild(
-        noticeBox(
-          "info-box-blue",
-          "数据同步",
-          "iTools 采用本地优先存储：你的数据始终先保存在本机、离线可用。",
-          "登录云账号后可将数据同步到云端、在多台设备间共享；未登录或云端未接入时，数据只保留在本地。",
+        h(
+          "div",
+          { class: "pane-form" },
+          noticeBox(
+            "info-box-blue",
+            "云同步服务器",
+            "iTools 本地优先：数据始终先存本机、离线可用。填入你自建的同步服务器地址（含端口）后即可登录并跨设备同步。",
+            "地址只保存在本机、不随程序内置；留空即为「仅本地」。",
+          ),
+          h("label", { class: "field-label", text: "服务器地址" }),
+          epInput,
+          epSave,
         ),
       );
+      void api.getSettings().then((s) => (epInput.value = s.sync_endpoint || "")).catch(() => {});
 
       if (!account.cloudConfigured) {
         inner.appendChild(
           noticeBox(
             "info-box-warn",
             "云端服务未接入",
-            "当前版本未配置云端服务（ITOOLS_SYNC_ENDPOINT），暂无法同步，数据仅保存在本地。",
+            "还没填写服务器地址（在上方填入并保存），暂无法同步，数据仅保存在本地。",
           ),
         );
         return;
@@ -343,6 +372,11 @@ export async function renderAccount(root: HTMLElement, ctx: AdminCtx): Promise<v
         try {
           const r = await api.syncNow();
           ctx.toast(syncResultMsg(r));
+          if (r.reason === "session_expired") {
+            // 后端已自愈清本地会话：关掉编辑页并刷新账号态，UI 诚实转为未登录。
+            closeEdit();
+            void refreshAll();
+          }
         } catch (err) {
           console.error("sync_now failed", err);
           ctx.toast("同步失败");
@@ -431,12 +465,38 @@ export async function renderAccount(root: HTMLElement, ctx: AdminCtx): Promise<v
     const content = h("div", { class: "pane-form" });
 
     if (!account.cloudConfigured) {
-      content.appendChild(
+      // 未接入：就地给出服务器地址配置——填入保存即接入，随后即可登录（不再是死胡同）。
+      const epInput = field("如 http://127.0.0.1:8787 或 https://你的域名:7010");
+      const epSave = h("button", { class: "btn btn-primary btn-block", text: "保存并接入" });
+      epSave.disabled = true;
+      epInput.addEventListener("input", () => {
+        epSave.disabled = epInput.value.trim() === "";
+      });
+      epSave.addEventListener("click", async () => {
+        epSave.disabled = true;
+        try {
+          const s = await api.getSettings();
+          s.sync_endpoint = epInput.value.trim();
+          await api.saveSettings(s);
+          account = await api.accountState();
+          ctx.toast("已接入云端");
+          closeModal();
+          openLogin(); // 重开：此时已配置 → 显示用户名 / 密码登录
+        } catch (err) {
+          console.error("save sync_endpoint failed", err);
+          ctx.toast("保存失败");
+          epSave.disabled = false;
+        }
+      });
+      content.append(
         noticeBox(
           "info-box-blue",
-          "云端服务未接入",
-          "当前版本未配置云端服务（ITOOLS_SYNC_ENDPOINT），暂时只能本地使用，无法登录云账号。",
+          "先配置云同步服务器",
+          "iTools 不写死服务器地址（安全红线）。填入你的云同步服务器地址（含端口）即可登录并跨设备同步；地址只保存在本机。",
         ),
+        h("label", { class: "field-label", text: "服务器地址" }),
+        epInput,
+        epSave,
       );
     } else {
       const user = field("用户名");

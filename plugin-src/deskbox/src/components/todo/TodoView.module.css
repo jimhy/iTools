@@ -1,0 +1,176 @@
+.view {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+/* ---------- 左分类栏 ---------- */
+.sidebar {
+  flex: 0 0 240px;
+  border-right: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  padding: 16px 14px;
+  gap: 12px;
+  min-height: 0;
+}
+
+.newBtn {
+  border: 0;
+  background: var(--grad);
+  color: var(--on-accent);
+  padding: 11px;
+  font-size: 13.5px;
+  font-weight: 600;
+  border-radius: var(--r-md);
+  box-shadow: var(--glow);
+  transition: box-shadow 0.12s;
+}
+
+.newBtn:hover {
+  box-shadow: 0 3px 20px #38e1c960;
+}
+
+.divider {
+  height: 1px;
+  background: var(--line);
+  flex: 0 0 auto;
+}
+
+/* ---------- 主区 ---------- */
+.main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  padding: 20px 24px 14px;
+}
+
+.title {
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
+
+.date {
+  font: 12px var(--mono);
+  color: var(--faint);
+  letter-spacing: 0.3px;
+}
+
+/* ---------- 进度条 ---------- */
+.progress {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 24px 14px;
+}
+
+.progLabel {
+  font: 12.5px var(--mono);
+  color: var(--sub);
+  white-space: nowrap;
+}
+
+.bar {
+  flex: 1;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--inset);
+  overflow: hidden;
+}
+
+.fill {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--grad);
+  box-shadow: 0 0 8px #38e1c955;
+  transition: width 0.3s;
+}
+
+/* ---------- 输入框 ---------- */
+.add {
+  display: flex;
+  gap: 8px;
+  padding: 0 24px 12px;
+}
+
+.addInput {
+  flex: 1;
+  height: 38px;
+  border: 1px solid var(--line);
+  background: var(--inset);
+  padding: 0 14px;
+  font-size: 14px;
+  border-radius: var(--r-md);
+  outline: none;
+  transition: border-color 0.12s;
+}
+
+.addInput::placeholder {
+  color: var(--faint);
+}
+
+.addInput:focus {
+  border-color: var(--accent);
+}
+
+.addBtn {
+  border: 0;
+  background: var(--grad);
+  color: var(--on-accent);
+  padding: 9px 18px;
+  font-size: 13px;
+  font-weight: 600;
+  border-radius: var(--r-md);
+  box-shadow: var(--glow);
+  transition: box-shadow 0.12s, opacity 0.12s;
+}
+
+.addBtn:hover {
+  box-shadow: 0 3px 20px #38e1c960;
+  opacity: 0.95;
+}
+
+/* ---------- 列表 ---------- */
+.list {
+  flex: 1;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-height: 0;
+  padding: 0 24px 16px;
+}
+
+.empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 10px;
+  color: var(--sub);
+  font-size: 13px;
+  text-align: center;
+  padding: 20px;
+  user-select: none;
+}
+
+.emptyBig {
+  color: var(--faint);
+}
+
+.emptyBig svg {
+  width: 34px;
+  height: 34px;
+}

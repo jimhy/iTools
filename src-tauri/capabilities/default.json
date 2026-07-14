@@ -20,6 +20,7 @@
     "core:event:default",
     "allow-search",
     "allow-execute",
+    "allow-record-usage",
     "allow-load-icons",
     "allow-home-data",
     "allow-toggle-pin",

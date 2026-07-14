@@ -18,6 +18,7 @@ pub mod ocr;
 pub mod pin;
 pub mod record;
 pub mod settings;
+pub mod watch;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, RwLock};
@@ -333,6 +334,8 @@ pub struct PluginRegistry {
     pub pending_enter: Mutex<Option<EnterInfo>>,
     /// 当前插件窗展示的插件 id，供 db/文件命令按插件隔离作用域。
     pub current: Mutex<Option<String>>,
+    /// 上次进入信息的留存（供插件热更新自动重载窗口时重放 onEnter；区别于「取走即清」的 pending_enter）。
+    pub last_enter: Mutex<Option<EnterInfo>>,
 }
 
 impl PluginRegistry {
@@ -342,6 +345,7 @@ impl PluginRegistry {
             plugins: RwLock::new(plugins),
             pending_enter: Mutex::new(None),
             current: Mutex::new(None),
+            last_enter: Mutex::new(None),
         }
     }
 
@@ -412,6 +416,17 @@ impl PluginRegistry {
             *g = loaded;
         }
         self.commands(disabled)
+    }
+
+    /// 插件热更新自动重载窗口前调用：把「上次进入信息」重新放回待取队列，
+    /// 使重载后的插件页 `onEnter` 无缝拿到原 code/query（否则 pending 已被取走，onEnter 收不到上下文）。
+    /// 仅在当前无待取信息时重放，避免顶掉一次真实的新打开。
+    pub fn reseed_enter(&self) {
+        if let (Ok(last), Ok(mut pending)) = (self.last_enter.lock(), self.pending_enter.lock()) {
+            if pending.is_none() {
+                *pending = last.clone();
+            }
+        }
     }
 
     /// 列出已装插件信息（供「插件管理」页），enabled 依据禁用清单、granted 依据授权表。
@@ -498,28 +513,18 @@ pub fn resolve_plugins_root(app: &tauri::AppHandle) -> PathBuf {
             }
         }
     }
-    // 打包：可写目录，首启从随包资源播种（内置示例插件随安装包分发）。
-    // 幂等闸门用 marker(.seed_version) 而非「目录是否存在」：仅【完整】播种成功才落 marker，
-    // 失败/半拷贝不落 → 下次启动重试补齐；构建版本变化 → 补种新增/更新的内置插件。
+    // 打包：可写目录，**每次启动都「缺啥补啥」合并播种**内置插件（随安装包分发）。
+    // copy_dir_merge 只补缺失文件、不覆盖用户改动；不再用版本号 marker 作跳过闸门——否则同版本
+    // 新增的内置插件（如 deskbox / pixshot）会因 marker 已存在而永远补不上（曾致其加载不了）。
     let writable = dirs::data_local_dir()
         .unwrap_or_else(std::env::temp_dir)
         .join("itools")
         .join("plugins");
-    let marker = writable.join(".seed_version");
-    let cur_ver = env!("CARGO_PKG_VERSION");
-    let need_seed = std::fs::read_to_string(&marker)
-        .map(|v| v.trim() != cur_ver)
-        .unwrap_or(true);
-    if need_seed {
-        if let Ok(res) = app.path().resource_dir() {
-            let seed = res.join("plugins");
-            if seed.is_dir() {
-                match copy_dir_merge(&seed, &writable) {
-                    Ok(()) => {
-                        let _ = std::fs::write(&marker, cur_ver);
-                    }
-                    Err(e) => ilog!("[iTools] 播种失败（下次启动将重试）: {e}"),
-                }
+    if let Ok(res) = app.path().resource_dir() {
+        let seed = res.join("plugins");
+        if seed.is_dir() {
+            if let Err(e) = copy_dir_merge(&seed, &writable) {
+                ilog!("[iTools] 内置插件播种（缺啥补啥）部分失败: {e}");
             }
         }
     }
@@ -597,12 +602,18 @@ pub fn serve(root: &Path, request: &tauri::http::Request<Vec<u8>>) -> tauri::htt
     // 联网【不经 CSP 放开】——所有插件共享同一源(http://itplugin.localhost)，同源下 per-document CSP 不是隔离边界，
     // 会被同源 iframe 借道绕过；改由原生 itools.fetch 代理按【当前活动插件的 network 授权】放行（见 plugin_fetch）。
     // img/media 放开 blob:——插件用 URL.createObjectURL 显示原生截图/贴图/录屏结果（blob: 同源、页面自建，安全）。
-    const CSP: &str = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; connect-src 'self'; form-action 'self'; base-uri 'self'; frame-ancestors 'none'";
+    // connect-src 放行 http://ipc.localhost：这是 Tauri 的 IPC 端点（invoke 经它调后端命令）。不放行则被 CSP 拦、
+    // IPC 退化为 postMessage——每次加载报 CSP 错，且 Vec<u8> 返回值退化成「数字数组」(4× 体积、极慢)。它只是本机
+    // Tauri runtime 的受控 IPC 通道（非任意外联），不放宽联网攻击面（联网仍走 itools.fetch 原生代理 + network 授权门禁）。
+    const CSP: &str = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; connect-src 'self' http://ipc.localhost; form-action 'self'; base-uri 'self'; frame-ancestors 'none'";
     tauri::http::Response::builder()
         .status(200)
         .header("Content-Type", mime)
         .header("Content-Security-Policy", CSP)
         .header("Access-Control-Allow-Origin", "*")
+        // 插件资源【不缓存】：改了插件 JS/HTML 后，下次打开/重载窗口即读最新盘上文件，
+        // 不被 WebView2 的启发式缓存卡住旧版本（配合插件热更新，真正「改完即生效」）。
+        .header("Cache-Control", "no-store")
         .body(bytes)
         .unwrap()
 }

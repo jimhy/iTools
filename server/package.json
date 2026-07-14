@@ -11,7 +11,8 @@
     "test": "tsx test/api.test.ts"
   },
   "dependencies": {
-    "fastify": "^5.2.0"
+    "fastify": "^5.2.0",
+    "mysql2": "^3.11.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

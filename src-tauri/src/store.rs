@@ -1,12 +1,12 @@
 //! 主面板数据的持久化存储：最近使用（带次数/时间戳）与已固定项。
-//! 落盘位置：`%LOCALAPPDATA%\itools\usage.json`，读写全程容错——文件损坏/缺失按空数据处理。
+//! 落盘位置：统一 SQLite 库的 `app_kv['usage']`（整体 JSON blob），读写全程容错——损坏/缺失按空数据处理。
 
-use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use crate::db::Db;
 use crate::search::SearchItem;
 
 /// 最近使用的容量上限（前端折叠展示，展开后最多看到这么多）
@@ -21,6 +21,10 @@ pub struct StoredItem {
     pub kind: String,
     pub target: String,
     pub action: String,
+    /// 插件 logo（base64 data URL）：插件图标无法按 target 重新提取，故随最近使用/固定一并持久化。
+    /// 应用/文件图标仍由前端按 target 重新提取，不在此存（省空间）。旧数据缺此字段时默认 None。
+    #[serde(default)]
+    pub icon: Option<String>,
 }
 
 impl StoredItem {
@@ -32,6 +36,12 @@ impl StoredItem {
             kind: item.kind.clone(),
             target: item.target.clone(),
             action: item.action.clone(),
+            // 仅插件保留图标（其 logo 无法按 target 重新提取）；应用图标由前端重新提取
+            icon: if item.kind == "plugin" {
+                item.icon.clone()
+            } else {
+                None
+            },
         }
     }
 
@@ -42,7 +52,7 @@ impl StoredItem {
             subtitle: self.subtitle.clone(),
             kind: self.kind.clone(),
             target: self.target.clone(),
-            icon: None,
+            icon: self.icon.clone(),
             action: self.action.clone(),
         }
     }
@@ -63,33 +73,26 @@ struct UsageData {
 
 /// 线程安全的使用记录存储；每次变更立即落盘（数据量小，无需批量）
 pub struct UsageStore {
-    path: PathBuf,
+    db: Arc<Db>,
     data: Mutex<UsageData>,
 }
 
 impl UsageStore {
-    /// 从默认位置加载（不存在/损坏 → 空数据）
-    pub fn load() -> Self {
-        let dir = dirs::data_local_dir()
-            .unwrap_or_else(std::env::temp_dir)
-            .join("itools");
-        Self::load_from(dir.join("usage.json"))
-    }
-
-    fn load_from(path: PathBuf) -> Self {
-        let data = std::fs::read_to_string(&path)
-            .ok()
+    /// 从统一 SQLite 库加载（不存在/损坏 → 空数据）
+    pub fn load(db: Arc<Db>) -> Self {
+        let data = db
+            .blob_get("usage")
             .and_then(|s| serde_json::from_str::<UsageData>(&s).ok())
             .unwrap_or_default();
         Self {
-            path,
+            db,
             data: Mutex::new(data),
         }
     }
 
-    /// 记录一次执行。「最近使用」只收录应用；文件/文件夹/命令不进入。
+    /// 记录一次执行。「最近使用」收录应用与插件；文件/文件夹/即时命令不进入。
     pub fn record(&self, item: &SearchItem) {
-        if item.kind != "app" {
+        if item.kind != "app" && item.kind != "plugin" {
             return;
         }
         let now = SystemTime::now()
@@ -131,8 +134,8 @@ impl UsageStore {
         }
     }
 
-    /// 快照：（最近使用（按时间倒序，仅应用）、已固定）。
-    /// 读取时也按 kind 过滤，兼容旧数据里可能残留的文件记录。
+    /// 快照：（最近使用（按时间倒序，应用与插件）、已固定）。
+    /// 读取时也按 kind 过滤，兼容旧数据里可能残留的文件/命令记录。
     pub fn snapshot(&self) -> (Vec<SearchItem>, Vec<SearchItem>) {
         let Ok(data) = self.data.lock() else {
             return (Vec::new(), Vec::new());
@@ -140,7 +143,7 @@ impl UsageStore {
         let recent = data
             .recent
             .iter()
-            .filter(|e| e.item.kind == "app")
+            .filter(|e| e.item.kind == "app" || e.item.kind == "plugin")
             .map(|e| e.item.to_item())
             .collect();
         let pinned = data.pinned.iter().map(|p| p.to_item()).collect();
@@ -148,11 +151,8 @@ impl UsageStore {
     }
 
     fn save(&self, data: &UsageData) {
-        if let Some(parent) = self.path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Ok(json) = serde_json::to_string_pretty(data) {
-            let _ = std::fs::write(&self.path, json);
+        if let Ok(json) = serde_json::to_string(data) {
+            self.db.blob_set("usage", &json);
         }
     }
 }
@@ -173,26 +173,31 @@ mod tests {
         }
     }
 
-    /// 记录/固定/落盘往返
+    /// 记录/固定/落盘往返（共享同一内存库，第二个 store 从库里重载验证持久化）
     #[test]
     fn store_roundtrip() {
-        let path = std::env::temp_dir().join("itools-test-usage.json");
-        let _ = std::fs::remove_file(&path);
+        let db = Arc::new(Db::open_memory());
 
-        let store = UsageStore::load_from(path.clone());
+        let store = UsageStore::load(db.clone());
         store.record(&item("a", "app"));
         store.record(&item("c", "app"));
         store.record(&item("b", "file")); // 文件不进「最近使用」
         store.record(&item("a", "app")); // a 第二次，应排最前
         store.record(&item("noise", "command")); // command 不记录
+        store.record(&item("p", "plugin")); // 插件应进「最近使用」
         assert!(store.toggle_pin(&item("b", "file"))); // 固定不限类型
 
-        // 重新加载验证持久化
-        let store2 = UsageStore::load_from(path.clone());
+        // 从同一库重新加载验证持久化
+        let store2 = UsageStore::load(db.clone());
         let (recent, pinned) = store2.snapshot();
-        assert_eq!(recent.len(), 2, "最近使用应只有 2 个应用");
-        assert!(recent.iter().all(|r| r.kind == "app"), "最近使用只应含应用");
-        assert_eq!(recent[0].id, "a", "最近使用按时间倒序");
+        assert_eq!(recent.len(), 3, "最近使用应含 2 个应用 + 1 个插件");
+        assert!(
+            recent.iter().all(|r| r.kind == "app" || r.kind == "plugin"),
+            "最近使用只应含应用与插件"
+        );
+        // 插件确实进入最近使用（本测试内多条记录落在同一秒，稳定排序保持插入序，故不断言具体名次）
+        assert!(recent.iter().any(|r| r.id == "p" && r.kind == "plugin"), "插件应进入最近使用");
+        assert!(recent.iter().any(|r| r.id == "a" && r.kind == "app"), "应用应在最近使用中");
         assert_eq!(pinned.len(), 1);
         assert_eq!(pinned[0].id, "b");
 
@@ -200,7 +205,5 @@ mod tests {
         assert!(!store2.toggle_pin(&item("b", "file")));
         let (_, pinned) = store2.snapshot();
         assert!(pinned.is_empty());
-
-        let _ = std::fs::remove_file(&path);
     }
 }

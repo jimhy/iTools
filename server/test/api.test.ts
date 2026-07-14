@@ -3,33 +3,30 @@
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { promises as fs } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import type { FastifyInstance } from "fastify";
 
 import { loadConfig } from "../src/config";
-import { JsonStore } from "../src/store";
+import { MariaDbStore } from "../src/store";
 import { buildServer } from "../src/server";
 
-const dataFile = join(tmpdir(), `itools-sync-test-${process.pid}.json`);
+// 连接真实 MariaDB（连接参数取自 SYNC_DB_* 环境变量）。
 let app: FastifyInstance;
+let store: MariaDbStore;
 let token = "";
 
 before(async () => {
-  await fs.rm(dataFile, { force: true });
-  await fs.rm(`${dataFile}.tmp`, { force: true });
-  const config = { ...loadConfig({}), dataFile, logger: false };
-  const store = new JsonStore(dataFile);
-  await store.load();
+  const config = { ...loadConfig(), logger: false };
+  store = new MariaDbStore(config.db);
+  await store.init();
+  // 清理上次可能残留的测试账号，保证干净起点。
+  await store.deleteUser("haifeng");
   app = buildServer(store, config);
   await app.ready();
 });
 
 after(async () => {
   await app.close();
-  await fs.rm(dataFile, { force: true });
-  await fs.rm(`${dataFile}.tmp`, { force: true });
+  await store.close();
 });
 
 function post(url: string, payload: unknown, tok?: string) {

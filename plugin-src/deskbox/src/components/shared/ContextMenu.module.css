@@ -1,0 +1,35 @@
+.menu {
+  position: fixed;
+  z-index: 100;
+  min-width: 150px;
+  background: var(--panel);
+  border: 1px solid var(--line-glow);
+  border-radius: var(--r-md);
+  padding: 4px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
+}
+
+.item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  padding: 8px 12px;
+  font-size: 13px;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+
+.item:hover {
+  background: var(--hover);
+}
+
+.danger {
+  color: var(--danger);
+}
+
+.danger:hover {
+  background: rgba(255, 107, 107, 0.12);
+}

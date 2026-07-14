@@ -4,7 +4,7 @@ import { defineConfig } from "vite";
 export default defineConfig({
   clearScreen: false,
   server: {
-    port: 1420,
+    port: 5180,
     strictPort: true,
     watch: {
       // 忽略 Rust 侧，避免前端 dev-server 无谓重载

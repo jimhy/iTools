@@ -4,10 +4,12 @@
 //! writeFile 限定插件沙盒目录；runCommand 受全局开关 [`ALLOW_RUN_COMMAND`] 控制。
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use tauri::{AppHandle, Manager, State};
 
 use crate::account::AccountStore;
+use crate::db::Db;
 use crate::launch;
 use crate::logging::ilog;
 use crate::settings::SettingsStore;
@@ -61,14 +63,32 @@ pub async fn open_plugin(
     // 判定本次是被关键字还是 regex 命中，回传真实触发类型与 query
     let kind = registry.trigger_kind(plugin_id, code, &query);
 
+    let enter = EnterInfo {
+        code: code.to_string(),
+        kind,
+        query: query.clone(),
+        plugin_id: plugin_id.to_string(),
+    };
     if let Ok(mut g) = registry.pending_enter.lock() {
-        *g = Some(EnterInfo {
-            code: code.to_string(),
-            kind,
-            query: query.clone(),
-            plugin_id: plugin_id.to_string(),
-        });
+        *g = Some(enter.clone());
     }
+    // 记住本次进入信息：插件热更新自动重载窗口时用它无缝重放 onEnter。
+    if let Ok(mut g) = registry.last_enter.lock() {
+        *g = Some(enter);
+    }
+    // 切换插件前：把「上一个插件」的当前窗口尺寸记住，供其下次打开时还原。
+    if let Some(win) = app.get_webview_window("plugin") {
+        if let Some(prev) = registry.current.lock().ok().and_then(|g| g.clone()) {
+            if prev != plugin_id {
+                let scale = win.scale_factor().unwrap_or(1.0);
+                if let Ok(sz) = win.inner_size() {
+                    app.state::<SettingsStore>()
+                        .set_plugin_window(&prev, [sz.width as f64 / scale, sz.height as f64 / scale]);
+                }
+            }
+        }
+    }
+
     if let Ok(mut g) = registry.current.lock() {
         *g = Some(plugin_id.to_string());
     }
@@ -76,8 +96,16 @@ pub async fn open_plugin(
     let url_str = format!("http://itplugin.localhost/{plugin_id}/index.html");
     let url: tauri::Url = url_str.parse().map_err(|e| format!("URL 解析失败: {e}"))?;
 
+    // 该插件的目标窗口尺寸：优先用它上次保存的，否则用默认 960×660。
+    let saved = app.state::<SettingsStore>().get_plugin_window(plugin_id);
+    let (win_w, win_h) = saved.map(|s| (s[0], s[1])).unwrap_or((960.0, 660.0));
+
     if let Some(win) = app.get_webview_window("plugin") {
         win.navigate(url).map_err(|e| e.to_string())?;
+        // 还原该插件上次的窗口尺寸（有记录才调整；无记录保持当前，避免跳变）
+        if saved.is_some() {
+            let _ = win.set_size(tauri::LogicalSize::new(win_w, win_h));
+        }
         // hidden 时不显示——若面板本就隐藏则保持隐藏（热键截图不闪）；本就显示的则不强抢焦点
         if !hidden {
             let _ = win.show();
@@ -92,9 +120,12 @@ pub async fn open_plugin(
         );
         tauri::WebviewWindowBuilder::new(&app, "plugin", tauri::WebviewUrl::External(url))
             .title(format!("{plugin_id} - iTools 插件"))
-            .inner_size(760.0, 560.0)
+            .inner_size(win_w, win_h)
             .min_inner_size(360.0, 240.0)
             .resizable(true)
+            // 禁用 Tauri 的 OS 级拖放拦截：否则它会吞掉插件页内的 HTML5 拖拽（draggable），
+            // 导致笔记拖入文件夹、待办拖动排序等失效。插件不需要「拖文件进窗口」的能力。
+            .disable_drag_drop_handler()
             // 热键截图：隐藏建窗，页面照常加载并 onEnter 触发截图，面板全程不露脸
             .visible(!hidden)
             .initialization_script(&init)
@@ -201,8 +232,26 @@ pub fn delete_plugin(
 
 // ---------- 窗口 ----------
 
+/// 快照当前插件窗口尺寸并存入 settings（供下次打开该插件时还原）。
+/// 用户 Esc 隐藏 / 关闭面板时调用，配合 open_plugin 的「切换前保存」覆盖所有离开时机。
+fn save_current_window_size(app: &AppHandle) {
+    let Some(win) = app.get_webview_window("plugin") else {
+        return;
+    };
+    let registry = app.state::<PluginRegistry>();
+    let Some(id) = registry.current.lock().ok().and_then(|g| g.clone()) else {
+        return;
+    };
+    let scale = win.scale_factor().unwrap_or(1.0);
+    if let Ok(sz) = win.inner_size() {
+        app.state::<SettingsStore>()
+            .set_plugin_window(&id, [sz.width as f64 / scale, sz.height as f64 / scale]);
+    }
+}
+
 #[tauri::command]
 pub fn plugin_hide(app: AppHandle) {
+    save_current_window_size(&app);
     if let Some(win) = app.get_webview_window("plugin") {
         let _ = win.hide();
     }
@@ -210,6 +259,7 @@ pub fn plugin_hide(app: AppHandle) {
 
 #[tauri::command]
 pub fn plugin_exit(app: AppHandle) {
+    save_current_window_size(&app);
     if let Some(win) = app.get_webview_window("plugin") {
         let _ = win.close();
     }
@@ -401,6 +451,40 @@ pub async fn plugin_save_image(
     }
 }
 
+/// 读取本地图片文件 → base64（供「文件路径粘贴 / 资源管理器拖入路径」把外部图片**本地化前**取字节）。
+/// 只读、且按图片扩展名白名单放行（黑名单不可靠，同 open_path 思路），拒 UNC/远程与超大文件；
+/// 不落任何执行/写入面。与 read_image（剪贴板）同属未门控的低危读能力，但仅限图片类型。
+#[tauri::command]
+pub fn plugin_read_local_image(path: String) -> Result<String, String> {
+    use base64::Engine as _;
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("路径为空".to_string());
+    }
+    if trimmed.starts_with("\\\\") || trimmed.starts_with("//") {
+        return Err("不支持 UNC/远程路径".to_string());
+    }
+    let p = Path::new(trimmed);
+    const ALLOWED: &[&str] = &["png", "jpg", "jpeg", "gif", "bmp", "webp", "svg", "ico", "tif", "tiff"];
+    let ext = p
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    if !ALLOWED.contains(&ext.as_str()) {
+        return Err("只支持读取图片文件（png/jpg/jpeg/gif/bmp/webp/svg/ico/tiff）".to_string());
+    }
+    if !p.is_file() {
+        return Err("文件不存在".to_string());
+    }
+    let bytes = std::fs::read(p).map_err(|e| format!("读文件失败: {e}"))?;
+    // 防御：单张上限 ~30MB，避免超大文件撑爆 IPC / 内存。
+    if bytes.len() > 30 * 1024 * 1024 {
+        return Err("图片过大（>30MB）".to_string());
+    }
+    Ok(base64::engine::general_purpose::STANDARD.encode(&bytes))
+}
+
 // ---------- 系统 ----------
 
 /// 打开外部链接：只放行 http/https/mailto，拒绝 cmd:/file: 等（防经 open_detached 的 cmd: 分支执行命令）。
@@ -555,9 +639,13 @@ pub async fn plugin_fetch(
 // ---------- 存储（KV，按插件隔离） ----------
 
 #[tauri::command]
-pub fn plugin_db_get(key: String, registry: State<'_, PluginRegistry>) -> Result<Option<String>, String> {
-    let map = load_db(&current_plugin(&registry)?)?;
-    Ok(map.get(&key).and_then(|v| v.as_str()).map(|s| s.to_string()))
+pub fn plugin_db_get(
+    key: String,
+    registry: State<'_, PluginRegistry>,
+    db: State<'_, Arc<Db>>,
+) -> Result<Option<String>, String> {
+    let id = current_plugin(&registry)?;
+    Ok(db.pkv_get(&id, &key))
 }
 
 #[tauri::command]
@@ -565,33 +653,30 @@ pub fn plugin_db_set(
     key: String,
     value: String,
     registry: State<'_, PluginRegistry>,
+    db: State<'_, Arc<Db>>,
 ) -> Result<(), String> {
     let id = current_plugin(&registry)?;
-    let mut map = load_db(&id)?;
-    map.insert(key, serde_json::Value::String(value));
-    save_db(&id, &map)
+    db.pkv_set(&id, &key, &value)
 }
 
 #[tauri::command]
-pub fn plugin_db_remove(key: String, registry: State<'_, PluginRegistry>) -> Result<(), String> {
+pub fn plugin_db_remove(
+    key: String,
+    registry: State<'_, PluginRegistry>,
+    db: State<'_, Arc<Db>>,
+) -> Result<(), String> {
     let id = current_plugin(&registry)?;
-    let mut map = load_db(&id)?;
-    map.remove(&key);
-    save_db(&id, &map)
+    db.pkv_remove(&id, &key)
 }
 
 #[tauri::command]
 pub fn plugin_db_keys(
     prefix: Option<String>,
     registry: State<'_, PluginRegistry>,
+    db: State<'_, Arc<Db>>,
 ) -> Result<Vec<String>, String> {
-    let map = load_db(&current_plugin(&registry)?)?;
-    let pre = prefix.unwrap_or_default();
-    Ok(map
-        .keys()
-        .filter(|k| pre.is_empty() || k.starts_with(&pre))
-        .cloned()
-        .collect())
+    let id = current_plugin(&registry)?;
+    Ok(db.pkv_keys(&id, &prefix.unwrap_or_default()))
 }
 
 // ---------- 账号态 & 本地优先数据（带云同步） ----------
@@ -640,13 +725,17 @@ pub fn plugin_data_get(
 pub fn plugin_data_set(
     key: String,
     value: String,
+    app: AppHandle,
     registry: State<'_, PluginRegistry>,
     data: State<'_, DataStore>,
 ) -> Result<(), String> {
     let ns = plugin_ns(&current_plugin(&registry)?);
     // value 应为合法 JSON；解析失败则按纯字符串存，保证不丢数据。
     let parsed = serde_json::from_str(&value).unwrap_or(serde_json::Value::String(value));
-    data.set(&ns, &key, parsed)
+    data.set(&ns, &key, parsed)?;
+    // 开启「登录后自动同步」且已登录时：数据变更后防抖自动上行（未开 / 未登录则静默跳过）。
+    crate::sync::schedule_auto_sync(&app, &ns);
+    Ok(())
 }
 
 /// 删一条同步型数据（本地删除）。
@@ -703,25 +792,4 @@ fn plugin_data_dir(id: &str) -> PathBuf {
 
 fn plugin_files_dir(id: &str) -> PathBuf {
     plugin_data_dir(id).join("files")
-}
-
-fn db_path(id: &str) -> PathBuf {
-    plugin_data_dir(id).join("kv.json")
-}
-
-fn load_db(id: &str) -> Result<serde_json::Map<String, serde_json::Value>, String> {
-    let path = db_path(id);
-    match std::fs::read_to_string(&path) {
-        Ok(text) => serde_json::from_str(&text).map_err(|e| format!("插件存储损坏: {e}")),
-        Err(_) => Ok(serde_json::Map::new()),
-    }
-}
-
-fn save_db(id: &str, map: &serde_json::Map<String, serde_json::Value>) -> Result<(), String> {
-    let path = db_path(id);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let text = serde_json::to_string(&serde_json::Value::Object(map.clone())).map_err(|e| e.to_string())?;
-    std::fs::write(&path, text).map_err(|e| format!("写插件存储失败: {e}"))
 }

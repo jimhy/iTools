@@ -1,11 +1,12 @@
-//! 应用设置：数据模型 + 持久化（`%LOCALAPPDATA%\itools\settings.json`）。
-//! 读写全程容错——文件损坏/缺失回退默认值。
+//! 应用设置：数据模型 + 持久化（统一 SQLite 库的 `app_kv['settings']`，整体 JSON blob）。
+//! 读写全程容错——数据损坏/缺失回退默认值。
 
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
+
+use crate::db::Db;
 
 /// 「从不」自动清除搜索框的哨兵值（与前端 `AUTO_CLEAR_NEVER` 对齐）。
 pub const AUTO_CLEAR_NEVER: u32 = u32::MAX;
@@ -70,6 +71,9 @@ pub struct AppSettings {
     pub disabled_plugins: Vec<String>,
     /// 按插件已授权的高危能力：插件名 → 已授权能力（如 ["runCommand","network"]）
     pub plugin_permissions: HashMap<String, Vec<String>>,
+    /// 每个插件上次的窗口尺寸（逻辑像素 [宽, 高]）：下次打开该插件时还原到此尺寸。
+    #[serde(default)]
+    pub plugin_window_sizes: HashMap<String, [f64; 2]>,
 
     // ---------- 截图（宿主内置，原生覆盖层，无界面/像 PixPin） ----------
     /// 截图全局快捷键（默认 "ctrl+shift+a"，可改；空 = 不注册）
@@ -77,6 +81,12 @@ pub struct AppSettings {
     /// 贴图全局快捷键（宿主内置原生贴图：读剪贴板图片贴成置顶浮窗；默认 "f3"，空 = 不注册）
     #[serde(default = "default_pin_hotkey")]
     pub pin_hotkey: String,
+
+    // ---------- 云同步 ----------
+    /// 云同步服务器地址（用户在「账号 → 数据同步」里手动填写，如 https://api.jimhy.cn:7010）。
+    /// **绝不写死在源码、也不随仓库上传**；release 未填 = 云端未接入（诚实降级为纯本地）。空 = 未接入。
+    #[serde(default)]
+    pub sync_endpoint: String,
 }
 
 fn default_pin_hotkey() -> String {
@@ -102,33 +112,28 @@ impl Default for AppSettings {
             local_launch_items: Vec::new(),
             disabled_plugins: Vec::new(),
             plugin_permissions: HashMap::new(),
+            plugin_window_sizes: HashMap::new(),
             screenshot_hotkey: "ctrl+shift+a".to_string(),
             pin_hotkey: "f3".to_string(),
+            sync_endpoint: String::new(),
         }
     }
 }
 
 /// 线程安全的设置存储；每次保存立即落盘
 pub struct SettingsStore {
-    path: PathBuf,
+    db: Arc<Db>,
     data: Mutex<AppSettings>,
 }
 
 impl SettingsStore {
-    pub fn load() -> Self {
-        let dir = dirs::data_local_dir()
-            .unwrap_or_else(std::env::temp_dir)
-            .join("itools");
-        Self::load_from(dir.join("settings.json"))
-    }
-
-    fn load_from(path: PathBuf) -> Self {
-        let data = std::fs::read_to_string(&path)
-            .ok()
+    pub fn load(db: Arc<Db>) -> Self {
+        let data = db
+            .blob_get("settings")
             .and_then(|s| serde_json::from_str::<AppSettings>(&s).ok())
             .unwrap_or_default();
         Self {
-            path,
+            db,
             data: Mutex::new(data),
         }
     }
@@ -144,12 +149,27 @@ impl SettingsStore {
         if let Ok(mut guard) = self.data.lock() {
             *guard = next.clone();
         }
-        if let Some(parent) = self.path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+        if let Ok(json) = serde_json::to_string(&next) {
+            self.db.blob_set("settings", &json);
         }
-        if let Ok(json) = serde_json::to_string_pretty(&next) {
-            let _ = std::fs::write(&self.path, json);
+    }
+
+    /// 读某插件上次保存的窗口尺寸（逻辑像素 [宽,高]）。无记录返回 None。
+    pub fn get_plugin_window(&self, id: &str) -> Option<[f64; 2]> {
+        self.data
+            .lock()
+            .ok()
+            .and_then(|g| g.plugin_window_sizes.get(id).copied())
+    }
+
+    /// 保存某插件当前窗口尺寸（下次打开还原）。只在尺寸有效（>0）时写。
+    pub fn set_plugin_window(&self, id: &str, size: [f64; 2]) {
+        if size[0] < 1.0 || size[1] < 1.0 {
+            return;
         }
+        let mut s = self.get();
+        s.plugin_window_sizes.insert(id.to_string(), size);
+        self.set(s);
     }
 }
 
@@ -157,13 +177,12 @@ impl SettingsStore {
 mod tests {
     use super::*;
 
-    /// 设置保存/加载往返 + 缺字段回退默认
+    /// 设置保存/加载往返 + 缺字段回退默认（共享内存库）
     #[test]
     fn settings_roundtrip() {
-        let path = std::env::temp_dir().join("itools-test-settings.json");
-        let _ = std::fs::remove_file(&path);
+        let db = Arc::new(Db::open_memory());
 
-        let store = SettingsStore::load_from(path.clone());
+        let store = SettingsStore::load(db.clone());
         assert_eq!(store.get().opacity, 180, "默认透明度 180");
         assert_eq!(store.get().hotkey, "alt+space");
         // 新增字段默认值
@@ -186,7 +205,7 @@ mod tests {
         });
         store.set(s);
 
-        let store2 = SettingsStore::load_from(path.clone());
+        let store2 = SettingsStore::load(db.clone());
         let loaded = store2.get();
         assert_eq!(loaded.opacity, 120);
         assert_eq!(loaded.hotkey, "ctrl+alt+k");
@@ -195,12 +214,10 @@ mod tests {
         assert_eq!(loaded.local_launch_items.len(), 1);
         assert_eq!(loaded.local_launch_items[0].name, "a.exe");
 
-        // 损坏文件回退默认
-        std::fs::write(&path, "not json").ok();
-        let store3 = SettingsStore::load_from(path.clone());
+        // 损坏数据回退默认
+        db.blob_set("settings", "not json");
+        let store3 = SettingsStore::load(db.clone());
         assert_eq!(store3.get().opacity, 180);
         assert_eq!(store3.get().theme, "system");
-
-        let _ = std::fs::remove_file(&path);
     }
 }

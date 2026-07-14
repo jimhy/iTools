@@ -1,0 +1,39 @@
+.bar {
+  flex: 0 0 auto;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+  font: 11px var(--mono);
+  color: var(--faint);
+  letter-spacing: 0.3px;
+}
+
+.left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.left b {
+  color: var(--sub);
+  font-weight: 600;
+}
+
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 6px var(--accent);
+}
+
+.right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--sub);
+}

@@ -1,0 +1,398 @@
+/* 编辑区：头部（面包屑 / 标题 / 元信息 / 操作）+ 富文本工具栏 + TipTap 正文。对标 Pencil「DeskBox Tech · Main Area」。 */
+.pane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--bg);
+}
+
+/* ---- 空态 ---- */
+.empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 10px;
+  color: var(--sub);
+  font-size: 13px;
+  text-align: center;
+  padding: 20px;
+  user-select: none;
+}
+.big {
+  color: var(--faint);
+}
+
+/* ---- 头部 ---- */
+.head {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 22px 28px 18px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+.topRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  overflow: hidden;
+}
+.crumbIco {
+  display: grid;
+  place-items: center;
+  color: var(--accent-2);
+  flex: 0 0 auto;
+}
+.crumbFolder {
+  font-size: 12px;
+  color: var(--sub);
+  white-space: nowrap;
+}
+.crumbSep {
+  display: grid;
+  place-items: center;
+  color: var(--faint);
+  flex: 0 0 auto;
+}
+.crumbCur {
+  font-size: 12px;
+  color: var(--faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.actions {
+  display: flex;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+.actBtn {
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--sub);
+  display: grid;
+  place-items: center;
+  border-radius: var(--r-md);
+  transition: color 0.12s, border-color 0.12s;
+}
+.actBtn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.actStar {
+  color: var(--warn);
+  border-color: rgba(240, 178, 74, 0.5);
+}
+.actStar:hover {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+.title {
+  border: 0;
+  background: transparent;
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1.25;
+  color: var(--text);
+  outline: none;
+  padding: 0;
+  width: 100%;
+}
+.title::placeholder {
+  color: var(--faint);
+}
+.metaRow {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  flex-wrap: wrap;
+}
+.metaItem {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font: 11px var(--mono);
+  color: var(--faint);
+}
+.metaItem svg {
+  flex: 0 0 auto;
+}
+.tags {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.tag {
+  border: 1px solid var(--line-glow);
+  background: var(--bg);
+  color: var(--accent);
+  border-radius: var(--r-sm);
+  padding: 3px 9px;
+  font: 11px var(--mono);
+}
+.tag:nth-child(even) {
+  color: var(--accent-2);
+}
+
+/* ---- 格式栏 ---- */
+.formatBar {
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 16px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+.fmtGroups {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+.fmtGroup {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.fmtDiv {
+  width: 1px;
+  height: 18px;
+  background: var(--line-glow);
+  margin: 0 6px;
+  flex: 0 0 auto;
+}
+.fmtBtn {
+  width: 30px;
+  height: 30px;
+  border: 0;
+  background: transparent;
+  color: var(--sub);
+  display: grid;
+  place-items: center;
+  border-radius: 7px;
+  transition: color 0.12s, background 0.12s;
+}
+.fmtBtn:hover {
+  background: var(--hover);
+  color: var(--accent);
+}
+.fmtOn {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.fmtBtn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.fmtBtn:disabled:hover {
+  background: transparent;
+  color: var(--sub);
+}
+.wysiwygTag {
+  flex: 0 0 auto;
+  font: 11px var(--mono);
+  color: var(--faint);
+  padding: 3px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+}
+
+/* ---- 正文（TipTap / ProseMirror）---- */
+.bodyWrap {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  background: var(--bg);
+}
+.editorHost {
+  min-height: 100%;
+  display: flex;
+}
+.prose {
+  flex: 1;
+  min-height: 100%;
+  padding: 26px 40px;
+  outline: none;
+  color: var(--text);
+  font-size: 16px;
+  line-height: 1.7;
+  caret-color: var(--accent);
+  user-select: text;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.prose :global(p) {
+  margin: 10px 0;
+}
+.prose :global(h1) {
+  font-size: 22px;
+  font-weight: 700;
+  margin: 18px 0 10px;
+}
+.prose :global(h2) {
+  font-size: 18px;
+  font-weight: 700;
+  margin: 16px 0 8px;
+  padding-left: 12px;
+  border-left: 3px solid var(--accent);
+}
+.prose :global(h2:nth-of-type(even)) {
+  border-left-color: var(--accent-2);
+}
+.prose :global(h3) {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 12px 0 6px;
+}
+.prose :global(strong) {
+  font-weight: 700;
+}
+.prose :global(em) {
+  font-style: italic;
+}
+.prose :global(s) {
+  opacity: 0.65;
+}
+.prose :global(u) {
+  text-decoration: underline;
+}
+.prose :global(a) {
+  color: var(--accent);
+  text-decoration: none;
+  cursor: pointer;
+}
+.prose :global(a:hover) {
+  text-decoration: underline;
+}
+.prose :global(ul),
+.prose :global(ol) {
+  margin: 8px 0 8px 22px;
+}
+.prose :global(li) {
+  margin: 4px 0;
+}
+.prose :global(blockquote) {
+  border-left: 3px solid var(--accent);
+  background: var(--accent-soft);
+  padding: 8px 14px;
+  margin: 12px 0;
+  border-radius: 0 8px 8px 0;
+  color: var(--sub);
+}
+.prose :global(code) {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 1px 5px;
+  font: 12.5px var(--mono);
+  color: var(--accent);
+}
+.prose :global(pre) {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  padding: 14px;
+  margin: 12px 0;
+  overflow: auto;
+}
+.prose :global(pre code) {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  color: var(--sub);
+  font: 12.5px/1.6 var(--mono);
+}
+.prose :global(hr) {
+  border: 0;
+  border-top: 1px solid var(--line);
+  margin: 16px 0;
+}
+
+/* 任务清单（TipTap TaskList / TaskItem） */
+.prose :global(ul[data-type="taskList"]) {
+  list-style: none;
+  margin: 8px 0;
+  padding: 0;
+}
+.prose :global(ul[data-type="taskList"] li) {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 6px 0;
+}
+.prose :global(ul[data-type="taskList"] li > label) {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  user-select: none;
+}
+.prose :global(ul[data-type="taskList"] li > div) {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+/* 任务项内段落清零 margin，使复选框与文字垂直居中对齐 */
+.prose :global(ul[data-type="taskList"] li > div > p) {
+  margin: 0;
+}
+.prose :global(ul[data-type="taskList"] input[type="checkbox"]) {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.prose :global(ul[data-type="taskList"] li[data-checked="true"] > div) {
+  color: var(--faint);
+  text-decoration: line-through;
+}
+
+/* 图片节点（imageExtension 的 NodeView） */
+.prose :global(.noteImg) {
+  position: relative;
+  margin: 10px 0;
+  max-width: 100%;
+}
+.prose :global(.noteImg img) {
+  max-width: 100%;
+  max-height: 460px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  cursor: zoom-in;
+  display: block;
+}
+.prose :global(.noteImg img[data-broken="1"]) {
+  min-width: 120px;
+  min-height: 60px;
+  padding: 20px;
+  color: var(--faint);
+  background: var(--panel);
+  cursor: default;
+}
+.prose :global(.ProseMirror-selectednode .noteImg img),
+.prose :global(.noteImg.ProseMirror-selectednode img) {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* 空文档占位符 */
+.prose :global(p.is-editor-empty:first-child::before) {
+  content: attr(data-placeholder);
+  float: left;
+  height: 0;
+  color: var(--faint);
+  pointer-events: none;
+}

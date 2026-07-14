@@ -1,14 +1,15 @@
-//! 账号资料（本地优先）：个人中心的**显示型**数据层（落盘 `%LOCALAPPDATA%\itools\profile.json`）。
+//! 账号资料（本地优先）：个人中心的**显示型**数据层（落盘统一 SQLite 库的 `app_kv['profile']`）。
 //!
 //! 只存展示资料：昵称、头像、已绑定手机号（**默认空**）、首次使用时间。
 //! 登录态 / 同步开关 / 会话由 [`crate::account::AccountStore`] 负责；云同步由 [`crate::sync::DataStore`] 负责。
 //! 陪伴天数从首次使用（`first_use_ts`）累计。
 
-use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+
+use crate::db::Db;
 
 /// 当前 Unix 时间（秒）。系统时钟异常时回退 0（视为「刚开始使用」）。
 fn now_secs() -> u64 {
@@ -67,21 +68,14 @@ pub struct ProfileView {
 
 /// 线程安全的账号存储；每次变更立即落盘。
 pub struct ProfileStore {
-    path: PathBuf,
+    db: Arc<Db>,
     data: Mutex<Profile>,
 }
 
 impl ProfileStore {
-    pub fn load() -> Self {
-        let dir = dirs::data_local_dir()
-            .unwrap_or_else(std::env::temp_dir)
-            .join("itools");
-        Self::load_from(dir.join("profile.json"))
-    }
-
-    fn load_from(path: PathBuf) -> Self {
-        let mut data = std::fs::read_to_string(&path)
-            .ok()
+    pub fn load(db: Arc<Db>) -> Self {
+        let mut data = db
+            .blob_get("profile")
             .and_then(|s| serde_json::from_str::<Profile>(&s).ok())
             .unwrap_or_default();
         // 首次使用时间戳缺失时补齐（用于陪伴天数计算），并立即落盘固化。
@@ -91,7 +85,7 @@ impl ProfileStore {
             needs_persist = true;
         }
         let store = Self {
-            path,
+            db,
             data: Mutex::new(data),
         };
         if needs_persist {
@@ -100,14 +94,11 @@ impl ProfileStore {
         store
     }
 
-    /// 把当前内存态写盘（容错：目录创建/写入失败均忽略）。
+    /// 把当前内存态写盘（容错：写入失败忽略）。
     fn persist(&self) {
-        if let Some(parent) = self.path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
         if let Ok(guard) = self.data.lock() {
-            if let Ok(json) = serde_json::to_string_pretty(&*guard) {
-                let _ = std::fs::write(&self.path, json);
+            if let Ok(json) = serde_json::to_string(&*guard) {
+                self.db.blob_set("profile", &json);
             }
         }
     }
@@ -147,11 +138,10 @@ mod tests {
 
     #[test]
     fn profile_roundtrip_and_reset() {
-        let path = std::env::temp_dir().join("itools-test-profile.json");
-        let _ = std::fs::remove_file(&path);
+        let db = Arc::new(Db::open_memory());
 
         // 首次加载：补 first_use_ts、默认值。手机号默认空（不写死假号）
-        let store = ProfileStore::load_from(path.clone());
+        let store = ProfileStore::load(db.clone());
         let p = store.get();
         assert_eq!(p.phone, "", "手机号默认应为空");
         assert!(p.first_use_ts > 0, "首次加载应补 first_use_ts");
@@ -163,7 +153,7 @@ mod tests {
             p.avatar_path = Some(r"C:\a.png".to_string());
             p.phone = "138****0000".to_string();
         });
-        let reloaded = ProfileStore::load_from(path.clone());
+        let reloaded = ProfileStore::load(db.clone());
         assert_eq!(reloaded.get().nickname, "测试用户");
         assert_eq!(reloaded.get().phone, "138****0000");
         let first_use = reloaded.get().first_use_ts;
@@ -175,7 +165,5 @@ mod tests {
         assert!(g.avatar_path.is_none());
         assert_eq!(g.phone, "", "游客态手机号应清空");
         assert_eq!(g.first_use_ts, first_use, "陪伴天数基准不应清零");
-
-        let _ = std::fs::remove_file(&path);
     }
 }

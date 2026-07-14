@@ -1,0 +1,19 @@
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(6, 10, 16, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line-glow);
+  border-radius: 14px;
+  width: 360px;
+  max-width: calc(100vw - 40px);
+  padding: 22px;
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.5);
+}

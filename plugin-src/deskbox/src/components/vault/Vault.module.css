@@ -1,0 +1,515 @@
+/* 密码库两栏：分类侧栏 + 主区（Header + Password Card 列表）。编辑走模态弹框。深色科技风，对标 Pencil「DeskBox 密码」。 */
+
+.body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+/* ---------- 分类侧栏 ---------- */
+.sidebar {
+  flex: 0 0 240px;
+  border-right: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  padding: 16px 14px;
+  gap: 12px;
+  min-height: 0;
+}
+.newBtn {
+  border: 0;
+  background: var(--grad);
+  color: var(--on-accent);
+  padding: 11px;
+  font-size: 13.5px;
+  font-weight: 600;
+  border-radius: var(--r-md);
+  box-shadow: var(--glow);
+  transition: box-shadow 0.12s;
+}
+.newBtn:hover {
+  box-shadow: 0 3px 20px #38e1c960;
+}
+.divider {
+  height: 1px;
+  background: var(--line);
+  flex: 0 0 auto;
+}
+.catList {
+  flex: 1;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-height: 0;
+  padding-top: 4px;
+}
+.catItem {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 9px 12px;
+  border-radius: var(--r-md);
+  cursor: pointer;
+  border: 1px solid transparent;
+  color: var(--sub);
+  font-size: 13.5px;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+.catItem:hover {
+  background: var(--hover);
+}
+.catItem.active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--text);
+}
+.catIco {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+}
+.catName {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.catCount {
+  font: 11px var(--mono);
+  color: var(--faint);
+}
+.catItem.active .catCount {
+  color: var(--accent);
+}
+
+/* ---------- 主区 ---------- */
+.mainCol {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--bg);
+}
+.pageHead {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 18px 24px 14px;
+}
+.pageHeadText {
+  min-width: 0;
+}
+.pageHead h1 {
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
+.pageSub {
+  margin-top: 4px;
+  font-size: 12.5px;
+  color: var(--sub);
+}
+.pageSub .mono,
+.mono {
+  font-family: var(--mono);
+}
+.lockBtn {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--sub);
+  padding: 7px 12px;
+  font-size: 12.5px;
+  border-radius: var(--r-md);
+  transition: color 0.12s, border-color 0.12s;
+}
+.lockBtn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.headDivider {
+  height: 1px;
+  background: var(--line);
+  flex: 0 0 auto;
+}
+.list {
+  flex: 1;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 20px 16px;
+  min-height: 0;
+}
+.listEmpty {
+  padding: 28px 8px;
+  color: var(--sub);
+  font-size: 12.5px;
+  text-align: center;
+}
+
+/* ---------- Password Card ---------- */
+.card {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px;
+  cursor: pointer;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  transition: border-color 0.12s, background 0.12s;
+}
+.card:hover {
+  border-color: var(--line-glow);
+  background: #18213a;
+}
+.badge {
+  width: 44px;
+  height: 44px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  font: 700 16px var(--font);
+  border-radius: 12px;
+}
+.info {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.name {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.user {
+  font: 12px var(--mono);
+  color: var(--sub);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mask {
+  font: 11px var(--mono);
+  color: var(--faint);
+  letter-spacing: 1px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: text;
+}
+.cardActs {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+.actIcons {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.act {
+  width: 26px;
+  height: 26px;
+  border: 0;
+  background: transparent;
+  color: var(--faint);
+  display: grid;
+  place-items: center;
+  border-radius: var(--r-sm);
+  transition: color 0.12s, background 0.12s;
+}
+.act:hover {
+  color: var(--accent);
+  background: var(--hover);
+}
+.strength {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+.stStrong {
+  background: #34d399;
+  box-shadow: 0 0 6px #34d399aa;
+}
+.stMedium {
+  background: #f0b24a;
+  box-shadow: 0 0 6px #f0b24aaa;
+}
+.stWeak {
+  background: #ff6b6b;
+  box-shadow: 0 0 6px #ff6b6baa;
+}
+
+/* ---------- 编辑弹框（模态内容）---------- */
+.dialog {
+  display: flex;
+  flex-direction: column;
+}
+.dlgHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+.dlgHead h3 {
+  font-size: 16px;
+  font-weight: 700;
+}
+.dlgClose {
+  width: 28px;
+  height: 28px;
+  border: 0;
+  background: transparent;
+  color: var(--sub);
+  border-radius: var(--r-sm);
+  font-size: 14px;
+  transition: color 0.12s, background 0.12s;
+}
+.dlgClose:hover {
+  color: var(--accent);
+  background: var(--hover);
+}
+.dlgBody {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px 14px;
+  max-height: 56vh;
+  overflow: auto;
+  margin: 0 -2px;
+  padding: 0 2px;
+}
+.spanAll {
+  grid-column: 1 / -1;
+}
+.dlgFoot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 16px;
+}
+.footSpacer {
+  flex: 1;
+}
+.meta {
+  color: var(--sub);
+  font-size: 11.5px;
+}
+
+/* ---------- 表单字段 ---------- */
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.field label {
+  font-size: 11.5px;
+  color: var(--sub);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+}
+.ctl {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.field input {
+  flex: 1;
+  min-width: 0;
+  height: 36px;
+  border: 1px solid var(--line);
+  background: var(--inset);
+  padding: 0 12px;
+  font-size: 13.5px;
+  border-radius: var(--r-md);
+  outline: none;
+  user-select: text;
+  transition: border-color 0.12s;
+}
+.field textarea {
+  border: 1px solid var(--line);
+  background: var(--inset);
+  padding: 10px 12px;
+  font-size: 13px;
+  border-radius: var(--r-md);
+  outline: none;
+  resize: vertical;
+  min-height: 60px;
+  user-select: text;
+  transition: border-color 0.12s;
+}
+.field input:focus,
+.field textarea:focus {
+  border-color: var(--accent);
+}
+.field input::placeholder,
+.field textarea::placeholder {
+  color: var(--faint);
+}
+.mini {
+  width: 36px;
+  height: 36px;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--sub);
+  display: grid;
+  place-items: center;
+  border-radius: var(--r-md);
+  flex: 0 0 auto;
+  transition: color 0.12s, border-color 0.12s;
+}
+.mini:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.catSel {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.catOpt {
+  padding: 5px 12px;
+  border-radius: 20px;
+  border: 1px solid var(--line);
+  background: var(--inset);
+  color: var(--sub);
+  font-size: 12px;
+  cursor: pointer;
+  transition: color 0.12s, border-color 0.12s, background 0.12s;
+}
+.catOpt:hover {
+  border-color: var(--line-glow);
+}
+.catOpt.on {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* ---------- 分类：新增按钮 + 图标选择器 ---------- */
+.addCat {
+  margin-top: 6px;
+  border: 1px dashed var(--line-glow);
+  background: transparent;
+  color: var(--sub);
+  padding: 8px 12px;
+  font-size: 12.5px;
+  border-radius: var(--r-md);
+  text-align: left;
+  transition: color 0.12s, border-color 0.12s;
+}
+.addCat:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.iconGrid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.iconOpt {
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--line);
+  background: var(--inset);
+  color: var(--sub);
+  display: grid;
+  place-items: center;
+  border-radius: var(--r-md);
+  transition: color 0.12s, border-color 0.12s, background 0.12s;
+}
+.iconOpt:hover {
+  border-color: var(--line-glow);
+  color: var(--text);
+}
+.iconOn {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* ---------- gate（未解锁遮罩卡片）---------- */
+.gate {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-image:
+    linear-gradient(rgba(138, 151, 180, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(138, 151, 180, 0.05) 1px, transparent 1px);
+  background-size: 22px 22px;
+}
+.gateCard {
+  text-align: center;
+  padding: 32px 36px;
+  border: 1px solid var(--line-glow);
+  background: var(--panel);
+  border-radius: 16px;
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.45);
+}
+.gateIco {
+  color: var(--accent);
+}
+.gateCard h3 {
+  margin: 12px 0 6px;
+  font-size: 16px;
+}
+.gateCard p {
+  color: var(--sub);
+  font-size: 12.5px;
+  margin-bottom: 16px;
+  max-width: 260px;
+}
+
+/* ---------- 共享按钮 ---------- */
+.primary {
+  border: 0;
+  background: var(--grad);
+  color: var(--on-accent);
+  padding: 9px 18px;
+  font-size: 13px;
+  font-weight: 600;
+  border-radius: var(--r-md);
+  box-shadow: var(--glow);
+  transition: box-shadow 0.12s, opacity 0.12s;
+}
+.primary:hover {
+  box-shadow: 0 3px 20px #38e1c960;
+  opacity: 0.95;
+}
+.ghost {
+  border: 1px solid var(--line-glow);
+  background: transparent;
+  color: var(--sub);
+  padding: 9px 18px;
+  font-size: 13px;
+  border-radius: var(--r-md);
+  transition: color 0.12s, border-color 0.12s;
+}
+.ghost:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.ghost.danger:hover {
+  border-color: var(--danger);
+  color: var(--danger);
+}

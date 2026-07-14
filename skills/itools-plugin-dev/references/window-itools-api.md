@@ -72,7 +72,7 @@ const opts = await itools.db.get("opts"); // → { len: 16, symbol: true } 或 n
 - `itools.data.remove(key: string): Promise<void>`
 - `itools.data.keys(prefix?: string): Promise<string[]>`
 - `itools.data.sync(): Promise<{ synced: boolean; reason?: string; pushed: number; pulled: number; message?: string }>`
-  - **诚实降级**：`synced=false` 时 `reason ∈ "cloud_not_configured" | "not_logged_in" | "offline" | "error"`，数据仍安全保留在本地。
+  - **诚实降级**：`synced=false` 时 `reason ∈ "cloud_not_configured" | "not_logged_in" | "offline" | "session_expired" | "error"`，数据仍安全保留在本地。
 
 ```js
 // 本地优先：随时读写，离线也可用

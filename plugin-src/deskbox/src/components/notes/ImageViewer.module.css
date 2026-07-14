@@ -1,0 +1,59 @@
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 3000;
+  background: rgba(4, 7, 14, 0.88);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  user-select: none;
+}
+
+.img {
+  max-width: 88%;
+  max-height: 88%;
+  border-radius: 4px;
+  box-shadow: 0 12px 60px rgba(0, 0, 0, 0.55);
+  cursor: grab;
+  will-change: transform;
+}
+.img:active {
+  cursor: grabbing;
+}
+
+.toolbar {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  z-index: 3001;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  padding: 6px 10px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
+}
+.toolbar button {
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--text);
+  min-width: 28px;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: var(--r-sm);
+  font-size: 13px;
+  transition: color 0.12s, border-color 0.12s;
+}
+.toolbar button:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.toolbar span {
+  color: var(--sub);
+  font: 11px var(--mono);
+  min-width: 44px;
+  text-align: center;
+}

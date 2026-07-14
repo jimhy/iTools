@@ -42,6 +42,8 @@ export interface AppSettings {
   screenshot_hotkey: string;
   /** 贴图全局快捷键（宿主内置原生贴图：读剪贴板贴成浮窗，空 = 不启用） */
   pin_hotkey: string;
+  /** 云同步服务器地址（用户手填，如 https://api.jimhy.cn:7010）。空 = 云端未接入。不随程序内置。 */
+  sync_endpoint: string;
 }
 
 /** 已装插件信息，与 Rust 侧 `PluginInfo` 保持一致 */
@@ -139,7 +141,8 @@ export interface AccountState {
 }
 
 /** 数据同步结果，与 Rust 侧 `SyncResult`（camelCase）一致。
- *  `synced=false` 时 `reason` ∈ cloud_not_configured | not_logged_in | offline | error。 */
+ *  `synced=false` 时 `reason` ∈ cloud_not_configured | not_logged_in | offline | session_expired | error。
+ *  （session_expired：会话失效，已自愈清本地登录态，需重新登录。） */
 export interface SyncResult {
   synced: boolean;
   reason?: string;

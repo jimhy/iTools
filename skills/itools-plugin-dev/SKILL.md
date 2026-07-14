@@ -141,7 +141,7 @@ iTools 是一款 Windows 上的 macOS 风格效率启动器（Tauri + Rust 后�
 4. **纯前端能算的就前端算**（编解码、格式化、进制、颜色、正则、时间、UUID、哈希等都是纯 JS，不需要任何权限，别声明）。
 5. **目录名 == `plugin.json.name`**；必须有 `index.html`；**关键字用裸字符串，text/regex 用对象**（见第三节）。
 6. 适配深浅色（`prefers-color-scheme`），进入时在 `onEnter` 里初始化（见下方惯用模式，**不必**总是读剪贴板）。
-7. **禁止顶层声明 `const itools = window.itools;`**（或 let/var 同名）。iTools 用 `Object.defineProperty(window,'itools',{configurable:false})` 注入，对不可配置全局属性做同名顶层声明会让**整个 `<script>` 抛 `SyntaxError: Identifier 'itools' has already been declared`、一行都不执行**（页面渲染正常但按钮全灭，普通浏览器里测不出来）。直接裸引用 `itools.xxx` 或起别名 `const api = window.itools`。同理别用 `ipc`/`isTauri`/`__TAURI_INTERNALS__` 等做顶层声明。
+7. **顶层别与宿主注入的全局同名声明**。首选裸引用 `itools.xxx` 或起别名 `const api = window.itools`。背景：旧版 iTools 曾用 `Object.defineProperty(window,'itools',{configurable:false})` 注入，顶层 `const itools = …` 会让**整个 `<script>` 抛 `SyntaxError: Identifier 'itools' has already been declared`、一行都不执行**（页面渲染正常但按钮全灭，普通浏览器里测不出来）；现已改为普通属性注入，`const itools = window.itools;` 不再致命，但为兼容旧版 iTools 仍建议避开。`__TAURI_INTERNALS__` 等 Tauri 自有全局照旧**禁止**同名顶层声明。另外 `itools` 对象是 `Object.freeze` 过的，别给 `itools.xxx` 赋值（严格模式下抛 TypeError）。
 8. **可配置项统一用 `settings.json` 声明，别自绘设置 UI**：插件目录放可选的 `settings.json` 声明设置项，iTools 在「插件管理 → 设置」tab 自动渲染并存值；运行时用 `itools.settings`（只读）读取（值 = schema 默认 + 用户覆盖）。声明了就要真读取生效（假控件违反诚信红线）。写法见 `references/plugin-settings-spec.md`。
 
 ## 五点五、onEnter 与面板尺寸
@@ -199,6 +199,42 @@ window.itools.onEnter(async (info) => {
 3. 主搜索栏输入你的关键词 → 出现插件磁贴 → 回车打开面板。
 4. 若声明了高危能力：到「插件管理」页把对应授权开关打开。
 5. 搜不到就看 iTools exe 同目录的 `itools.log`（搜「插件」有加载/告警日志）。
+
+## 八点五、复杂插件：React + Vite 脚手架（进阶）
+
+**何时用**：功能复杂（多状态、多可复用组件，如 deskbox 的笔记树 / 待办 / 密码库）时，vanilla 单文件会失控——**严禁把 HTML+CSS+JS 全堆进一个文件**。改用 React + Vite 组件化 + 分层。简单工具（编解码 / 格式化）仍用第二节的 vanilla 单文件，更省。
+
+**关键约束**：插件页是严格 CSP（`script-src 'self'`），**不能用 CDN**。用 Vite 把 React 打包成 bundle 放进插件目录，`index.html` 用相对路径引用（`'self'` 放行）。已验证：module script + CSS 在插件 CSP 下正常加载运行（自定义协议 `serve()` 返回 `Access-Control-Allow-Origin:*` 满足 `crossorigin` 的 CORS）。
+
+**脚手架结构**（照抄 `plugin-src/deskbox/`）：
+```
+plugin-src/<id>/            # 源码（与加载目录分离；node_modules 走全局 .gitignore）
+  package.json              # react + react-dom + zustand；devDeps: vite + @vitejs/plugin-react + typescript
+  vite.config.ts            # base:'./' + build.outDir 指向 ../../plugins/<id> + emptyOutDir:false + 固定 bundle 名
+  tsconfig.json             # strict
+  index.html                # 只有 <div id="root"> + <script type="module" src="/src/main.tsx">
+  src/
+    services/               # 唯一接触 window.itools / 底层的层（itools 封装、加密…）；非宿主环境降级 mock 便于浏览器 dev
+    state/                  # zustand store（UI / 领域状态 + 持久化经 services）
+    components/             # shared/（外壳）+ 各功能子目录；样式用 CSS Modules（组件同名 *.module.css）
+    types.ts · App.tsx · main.tsx · styles/global.css（设计令牌 :root 变量）
+```
+
+**vite.config.ts 要点**：
+```ts
+base: "./",                                     // 插件在 itplugin://<id>/ 下，assets 必须相对路径
+build: {
+  outDir: resolve(__dirname, "../../plugins/<id>"),
+  emptyOutDir: false,                           // 保留插件目录里的 plugin.json / logo.png / README.md
+  rollupOptions: { output: { entryFileNames: "assets/<id>.js", assetFileNames: "assets/<id>.[ext]" } },
+}
+```
+
+**构建**：`cd plugin-src/<id> && npm install && npm run build` → 产物落在 `plugins/<id>/`（index.html + assets/）。插件加载只读 index.html，与源码 / node_modules 无关。改代码后重新 build 即可（插件 HTML 热加载，无需重启 iTools）。
+
+**分层规范（设计模式）**：services（底层封装，唯一碰全局 API）→ state（zustand）→ components（只做展示 + 交互）。数据 / 持久化 / 加密逻辑放 store 或 services，**别塞进组件**。TypeScript 严格、CSS Modules、每个组件独立文件。
+
+**完整范例**：`plugin-src/deskbox/`——笔记树 + 加密、待办分类 + 优先级 + 进度、密码库 + 强度 + 分类，三界面按 services/state/components 分层的真实实现，可当模板复制。
 
 ## 九、参考文件（按需读）
 

@@ -187,6 +187,10 @@
     removeFile: function (path) {
       return invoke("plugin_remove_file", { path: String(path) });
     },
+    // 读取本地图片文件（png/jpg/…）→ ArrayBuffer。供把外部图片本地化前取字节（文件路径粘贴 / 资源管理器拖入路径）。
+    readLocalImage: function (path) {
+      return invoke("plugin_read_local_image", { path: String(path) }).then(b64ToBuf);
+    },
     // 截屏（需 screen-capture 授权）：captureFull 返回 ArrayBuffer(PNG)；listDisplays 返回显示器数组
     listDisplays: function () {
       return invoke("plugin_list_displays");
@@ -282,7 +286,7 @@
         return invoke("plugin_data_keys", { prefix: prefix ? String(prefix) : null });
       },
       // 手动触发同步到云端：{ synced, reason?, pushed, pulled, message? }
-      // reason 可能为 cloud_not_configured / not_logged_in / offline / error
+      // reason 可能为 cloud_not_configured / not_logged_in / offline / session_expired / error
       sync: function () {
         return invoke("plugin_data_sync");
       },
@@ -331,5 +335,11 @@
   Object.freeze(itools.settings);
   Object.freeze(itools.platform);
   Object.freeze(itools);
-  Object.defineProperty(window, "itools", { value: itools, writable: false, configurable: false });
+  // 必须用普通属性赋值挂载，不能 defineProperty(writable:false/configurable:false)：
+  // 全局对象上的不可配置属性会触发 ES 规范 HasRestrictedGlobalProperty 限制——插件页顶层一句
+  // `const itools = window.itools;` 就会在脚本实例化阶段抛 SyntaxError，整个 <script> 零执行
+  // （deskbox 曾因此所有按钮失灵）；writable:false 则让 `window.itools = mock` 在严格模式下抛
+  // TypeError。防篡改在此无安全意义：安全边界是后端 capability 白名单，页面本就能绕过门面
+  // 直用 __TAURI_INTERNALS__。对象本身已 freeze，足以防误改 API 表面。
+  window.itools = itools;
 })();

@@ -1,6 +1,7 @@
 // iTools 主库入口：命令注册、协议、托盘、窗口、插件系统。
 mod account;
 mod commands;
+mod db;
 mod hotkey;
 mod launch;
 mod logging;
@@ -32,7 +33,7 @@ use sync::DataStore;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // 最先初始化文件日志（exe 同目录 itools.log），后续所有 [iTools] 日志都落文件+stderr
-    logging::init();
+    logging::init();
     tauri::Builder::default()
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
@@ -109,9 +110,15 @@ pub fn run() {
             )
         })
         .setup(|app| {
+            // 统一本地存储：单个 SQLite 库（%LOCALAPPDATA%\itools\itools.db），取代散落的
+            // usage/settings/account/profile.json 及插件 KV(kv.json)/本地优先数据(data/<ns>.json)；
+            // 首启自动从旧 JSON 惰性迁移。插件沙盒文件（writeFile）仍在文件系统，不入库。
+            let db = std::sync::Arc::new(db::Db::open_default());
             // 设置最先加载：搜索索引与视觉效果都依赖它
-            let settings_store = SettingsStore::load();
+            let settings_store = SettingsStore::load(db.clone());
             let current = settings_store.get();
+            // 用户手填的云端地址（设置里读；env/debug 兜底见 account::cloud_endpoint）装入运行期。
+            account::set_user_endpoint(&current.sync_endpoint);
 
             let search_index = SearchIndex::new(current.custom_apps.clone());
             // 「本地启动」清单里的项一并纳入搜索（可在主搜索栏搜到并打开）
@@ -132,15 +139,22 @@ pub fn run() {
                 .collect();
             search_index.set_plugin_commands(plugin_cmds);
             app.manage(search_index);
-            app.manage(store::UsageStore::load());
+            app.manage(store::UsageStore::load(db.clone()));
             app.manage(settings_store);
             // 账号资料（个人中心）——home_data 等命令依赖它，必须在 setup 里 manage
-            app.manage(ProfileStore::load());
+            app.manage(ProfileStore::load(db.clone()));
             // 云账号登录态（本地优先）+ 本地优先数据层（云同步引擎）
-            app.manage(AccountStore::load());
-            app.manage(DataStore::load());
+            app.manage(AccountStore::load(db.clone()));
+            app.manage(DataStore::load(db.clone()));
+            // 「登录后自动同步」调度器：数据变更后防抖自动上行（受 sync_enabled + 登录态门禁）
+            app.manage(sync::AutoSync::default());
+            // 统一 SQLite 库句柄：插件 KV 命令（plugin_db_*）注入它读写 plugin_kv 表
+            app.manage(db);
             // 插件运行期注册表（open_plugin_window / plugin_* 命令依赖）
+            let plugins_root_watch = plugins_root.clone();
             app.manage(plugin::PluginRegistry::new(plugins_root, loaded_plugins));
+            // 插件热更新：监听 plugins/ 目录，改动后自动重扫 + 刷新已打开插件窗（免重启 / 免手动重载）
+            plugin::watch::start(app.handle(), plugins_root_watch);
             // 区域截图流程状态（冻结图 + 选区结果通道）
             app.manage(plugin::capture::CaptureFlow::default());
             // 插件全局热键注册表
@@ -236,6 +250,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::search,
             commands::execute,
+            commands::record_usage,
             commands::load_icons,
             commands::home_data,
             commands::toggle_pin,
@@ -291,6 +306,7 @@ pub fn run() {
             plugin::commands::plugin_read_file,
             plugin::commands::plugin_write_file,
             plugin::commands::plugin_remove_file,
+            plugin::commands::plugin_read_local_image,
             plugin::commands::plugin_open_external,
             plugin::commands::plugin_open_path,
             plugin::commands::plugin_notify,

@@ -1,0 +1,54 @@
+.list {
+  flex: 1;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-height: 0;
+  padding-top: 4px;
+}
+
+.item {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 9px 12px;
+  border-radius: var(--r-md);
+  cursor: pointer;
+  border: 1px solid transparent;
+  color: var(--sub);
+  font-size: 13.5px;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+
+.item:hover {
+  background: var(--hover);
+}
+
+.active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.ico {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+}
+
+.name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.count {
+  font: 11px var(--mono);
+  color: var(--faint);
+}
+
+.active .count {
+  color: var(--accent);
+}

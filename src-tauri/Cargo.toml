@@ -36,6 +36,8 @@ winreg = "0.55"
 rfd = "0.15"
 regex = "1"
 ureq = { version = "2", features = ["json"] }
+# 统一本地存储：单个 SQLite 库（bundled 自带 SQLite，无系统依赖，Windows 直接编译）
+rusqlite = { version = "0.32", features = ["bundled"] }
 # 原生屏幕/窗口捕获（Windows.Graphics.Capture 底层，无 PowerShell/无杀软木马指纹）
 xcap = "0.9"
 # 已随 tauri 编译；直接声明以用 oneshot(框选结果) 与 time(隐藏面板延时)
@@ -72,7 +74,7 @@ windows = { version = "0.61", features = [
 
 [profile.release]
 codegen-units = 1
-lto = true
+lto = false
 opt-level = "s"
 panic = "abort"
 strip = true

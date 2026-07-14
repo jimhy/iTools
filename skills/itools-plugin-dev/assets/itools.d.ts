@@ -2,10 +2,11 @@
  * iTools 插件全局 API —— 注入到每个插件页的 `window.itools`。
  * 生成插件时把本文件当契约：只用这里声明的方法，全部经统一门面调用。
  *
- * ⚠️ `window.itools` 用 defineProperty(configurable:false) 注入。**顶层写
- * `const itools = window.itools;`（或 let/var 同名声明）会让整个 <script> 抛
- * SyntaxError、一行不执行（症状：页面渲染正常但所有按钮/逻辑全灭，普通浏览器复现不出来）。**
- * 直接裸引用 `itools.xxx`，或起别名 `const api = window.itools`。
+ * ⚠️ 首选裸引用 `itools.xxx`，或起别名 `const api = window.itools`。
+ * 旧版 iTools 用 defineProperty(configurable:false) 注入，顶层 `const itools = window.itools;`
+ * （或 let/var 同名声明）会让整个 <script> 抛 SyntaxError、一行不执行（页面渲染正常但按钮
+ * 全灭，普通浏览器复现不出来）；新版已改普通属性注入、该写法不再致命，但为兼容旧版仍建议避开。
+ * `itools` 对象已 Object.freeze，勿给 `itools.xxx` 赋值（严格模式抛 TypeError）。
  */
 interface IToolsDisplayInfo {
   id: number;
@@ -57,7 +58,7 @@ interface IToolsAccount {
 /** data.sync() 结果；synced=false 时看 reason */
 interface IToolsSyncResult {
   synced: boolean;
-  /** 未同步原因：cloud_not_configured | not_logged_in | offline | error */
+  /** 未同步原因：cloud_not_configured | not_logged_in | offline | session_expired | error */
   reason?: string;
   pushed: number;
   pulled: number;
@@ -107,6 +108,9 @@ interface ITools {
   readImage(): Promise<ArrayBuffer>;
   /** 把图片（Uint8Array/ArrayBuffer/base64/dataURL）写入剪贴板为真实图片 */
   writeImage(data: ArrayBuffer | Uint8Array | string): Promise<void>;
+  /** 读取本地图片文件（png/jpg/jpeg/gif/bmp/webp/svg/ico/tiff）→ ArrayBuffer；非图片/不存在则 reject。
+   *  供把外部图片（文件路径粘贴 / 资源管理器拖入路径）本地化前取字节。 */
+  readLocalImage(path: string): Promise<ArrayBuffer>;
 
   // —— 截屏（需声明并授权 `screen-capture`）——
   /** 列出所有显示器 */

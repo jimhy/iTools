@@ -329,6 +329,10 @@ function execCell(index: number): void {
         target: cell.item.target,
         query: input.value.trim(),
       }).catch((err) => console.error("open_plugin_window failed", err));
+      // 插件不经 execute，单独补记一次使用，使其进入「最近使用」
+      invoke("record_usage", { item: cell.item }).catch((err) =>
+        console.error("record_usage failed", err),
+      );
       void hide();
       return;
     }

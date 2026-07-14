@@ -1,0 +1,127 @@
+.item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  padding: 11px 14px;
+  border-radius: var(--r-md);
+  transition: border-color 0.12s, background 0.12s;
+}
+
+.item:hover {
+  border-color: var(--line-glow);
+  background: var(--hover);
+}
+
+.dragging {
+  opacity: 0.4;
+}
+
+.dropBefore {
+  box-shadow: 0 -2px 0 0 var(--accent);
+}
+
+.dropAfter {
+  box-shadow: 0 2px 0 0 var(--accent);
+}
+
+.cbox {
+  width: 18px;
+  height: 18px;
+  border: 1.5px solid var(--faint);
+  border-radius: 50%;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s;
+}
+
+.cbox:hover {
+  border-color: var(--accent);
+}
+
+.on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+  font-size: 11px;
+  box-shadow: 0 0 10px #38e1c955;
+}
+
+.text {
+  flex: 1;
+  font-size: 13.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  user-select: text;
+}
+
+.item.done {
+  border-color: var(--line);
+  background: var(--panel-2);
+}
+
+.item.done .text {
+  text-decoration: line-through;
+  color: var(--sub);
+}
+
+.edit {
+  flex: 1;
+  border: 1px solid var(--accent);
+  padding: 3px 6px;
+  font-size: 13.5px;
+  outline: none;
+  background: var(--panel-2);
+  border-radius: var(--r-sm);
+}
+
+.prio {
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.prioHigh {
+  color: #ff7a7a;
+  background: #ff6b6b22;
+}
+
+.prioMid {
+  color: #f0b24a;
+  background: #f0b24a22;
+}
+
+.prioLow {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.time {
+  font: 11.5px var(--mono);
+  color: var(--faint);
+  flex: 0 0 auto;
+}
+
+.del {
+  color: var(--faint);
+  font-size: 13px;
+  line-height: 1;
+  opacity: 0;
+  transition: opacity 0.12s, color 0.12s;
+  cursor: pointer;
+}
+
+.item:hover .del {
+  opacity: 1;
+}
+
+.del:hover {
+  color: var(--danger);
+}

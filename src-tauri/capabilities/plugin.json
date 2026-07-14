@@ -20,6 +20,7 @@
     "allow-plugin-read-file",
     "allow-plugin-write-file",
     "allow-plugin-remove-file",
+    "allow-plugin-read-local-image",
     "allow-plugin-open-external",
     "allow-plugin-open-path",
     "allow-plugin-notify",

@@ -7,6 +7,7 @@ const COMMANDS: &[&str] = &[
         // 主程序命令（仅 main/admin 授予）
         "search",
         "execute",
+        "record_usage",
         "load_icons",
         "home_data",
         "toggle_pin",
@@ -58,6 +59,7 @@ const COMMANDS: &[&str] = &[
         "plugin_read_file",
         "plugin_write_file",
         "plugin_remove_file",
+        "plugin_read_local_image",
         "plugin_open_external",
         "plugin_open_path",
         "plugin_notify",

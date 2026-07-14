@@ -1,0 +1,117 @@
+/* DeskBox 设计令牌（对标 Pencil 设计稿：深色科技风，青 + 蓝双强调）。
+   只放全局令牌、reset、外壳骨架；组件样式各自就近放（*.module.css）。 */
+:root {
+  --bg: #0a0e1a;
+  --panel: #0f1524;
+  --panel-2: #151c2e;
+  --inset: #0a0e1a;
+  --hover: #1b2438;
+  --line: #1e2a42;
+  --line-glow: #2a3b5c;
+  --text: #eaf0ff;
+  --sub: #8a97b4;
+  --faint: #54607a;
+  --accent: #38e1c9;
+  --accent-2: #5b8cff;
+  --accent-soft: #38e1c922;
+  --on-accent: #0a0e1a;
+  --danger: #ff6b6b;
+  --warn: #f0b24a;
+  --grad: linear-gradient(135deg, #38e1c9, #5b8cff);
+  --grad-v: linear-gradient(180deg, #38e1c9, #5b8cff);
+  --glow: 0 2px 14px #38e1c940;
+  --r-sm: 6px;
+  --r-md: 8px;
+  --r-lg: 10px;
+  --r-pill: 11px;
+  --mono: "JetBrains Mono", "Cascadia Mono", Consolas, "Courier New", monospace;
+  --font: "Inter", "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.55 var(--font);
+  overflow: hidden;
+  user-select: none;
+}
+
+button {
+  font-family: inherit;
+  cursor: pointer;
+  color: var(--text);
+}
+
+input,
+textarea {
+  font-family: inherit;
+  color: var(--text);
+}
+
+button:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
+input:focus-visible,
+textarea:focus-visible {
+  outline: none;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--faint);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--sub);
+}
+
+.app {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.views {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+/* 占位 / 空态骨架（迁移期各 View 用；迁移完成后由具体组件替代） */
+.stage {
+  flex: 1;
+  display: grid;
+  place-items: center;
+  min-height: 0;
+}
+
+.placeholder {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: center;
+  color: var(--sub);
+  font-size: 13px;
+}
+
+.placeholder b {
+  color: var(--accent);
+  font-size: 15px;
+}

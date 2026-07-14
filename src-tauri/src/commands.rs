@@ -49,6 +49,14 @@ pub fn execute(item: SearchItem, store: State<'_, UsageStore>) -> Result<(), Str
     result
 }
 
+/// 只记录一次使用（写入「最近使用」），不执行任何打开动作。
+/// 插件经 `open_plugin_window` 打开（不走 `execute`），由前端在打开后调用本命令补记使用，
+/// 使插件与应用一样进入「最近使用」。
+#[tauri::command]
+pub fn record_usage(item: SearchItem, store: State<'_, UsageStore>) {
+    store.record(&item);
+}
+
 /// 主面板数据：问候用户名 + 最近使用 + 已固定（图标由前端按需 load_icons 补齐）
 #[derive(Serialize)]
 pub struct HomeData {
@@ -115,6 +123,8 @@ pub fn save_settings(
     next.disabled_plugins = old.disabled_plugins.clone();
     next.plugin_permissions = old.plugin_permissions.clone();
     store.set(next.clone());
+    // 云端地址即时生效：更新运行期端点，随后的登录 / 同步立即指向新地址（无需重启）。
+    crate::account::set_user_endpoint(&next.sync_endpoint);
 
     if old.opacity != next.opacity {
         if let Some(win) = app.get_webview_window("main") {
@@ -359,11 +369,12 @@ pub fn set_data_sync(enabled: bool, account: State<'_, AccountStore>) -> Account
     account.set_sync_enabled(enabled)
 }
 
-/// 立即把核心 App 数据（命名空间 `app`）同步到云端。
+/// 立即把**所有本地数据集**（各插件 `plugin:<id>` 命名空间）同步到云端。
+/// 修复历史缺陷：原先只同步空的 `app` 命名空间（真实用户数据在 `plugin:<id>`，从不被同步）。
 /// 诚实降级：云端未配置 / 未登录时返回 `{ synced:false, reason }`，数据留在本地。
 #[tauri::command]
 pub fn sync_now(account: State<'_, AccountStore>, data: State<'_, DataStore>) -> SyncResult {
-    data.sync_gated("app", &account)
+    data.sync_all_gated(&account)
 }
 
 // ---------- 本地启动 ----------
