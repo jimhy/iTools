@@ -41,20 +41,25 @@ pub fn icon_base64_png(path: &Path) -> Option<String> {
         .chain(std::iter::once(0))
         .collect();
 
-    // SAFETY: wide 是以 0 结尾的合法宽字符串；shfi 为零初始化的输出结构，尺寸如实传入。
+    // 快捷方式先解析出目标 exe 再取图标：直接对 .lnk 取会被 shell 叠上快捷方式箭头。
+    // 解析失败（指向 UWP / 虚拟项等）就退回原路径——宁可带个箭头，也不能没有图标。
+    let target_wide = path
+        .extension()
+        .filter(|e| e.eq_ignore_ascii_case("lnk"))
+        .and_then(|_| resolve_shortcut_target(path))
+        .map(|t| {
+            t.as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect::<Vec<u16>>()
+        });
+
+    // SAFETY: wide / target_wide 都是以 0 结尾的合法宽字符串。
     unsafe {
-        let mut shfi: SHFILEINFOW = std::mem::zeroed();
-        let ok = SHGetFileInfoW(
-            wide.as_ptr(),
-            0, // dwFileAttributes：未用 SHGFI_USEFILEATTRIBUTES 时被忽略
-            &mut shfi,
-            std::mem::size_of::<SHFILEINFOW>() as u32,
-            SHGFI_ICON | SHGFI_LARGEICON, // 32x32 真实图标
-        );
-        if ok == 0 || shfi.hIcon.is_null() {
-            return None;
-        }
-        let hicon = shfi.hIcon;
+        let hicon = match target_wide.as_deref().and_then(|w| hicon_for(w)) {
+            Some(h) => h,
+            None => hicon_for(&wide)?,
+        };
         let rgba = hicon_to_rgba(hicon);
         DestroyIcon(hicon); // 无论成败都释放
 
@@ -62,6 +67,65 @@ pub fn icon_base64_png(path: &Path) -> Option<String> {
         let png = encode_png(w, h, &pixels)?;
         Some(base64::engine::general_purpose::STANDARD.encode(png))
     }
+}
+
+/// 解析 `.lnk` 指向的**真实目标**（可执行文件路径）。拿不到返回 `None`。
+///
+/// 为什么需要它：对 `.lnk` 直接调 `SHGFI_ICON`，shell 会在图标上叠加快捷方式角标，
+/// 于是主面板里每个来自开始菜单的应用都顶着一个小箭头——那是文件管理器才需要的标记，
+/// 在启动器里既没有信息量又难看。改成「解析出目标 exe，再对 exe 取图标」就不会有覆盖层。
+///
+/// 走过的弯路（留个记号免得再试）：`SHGFI_ICONLOCATION` 看似更省事，但实测对开始菜单里的
+/// 快捷方式一律返回**空**的图标源（Chrome / 7-Zip / Lumen 全部 `szDisplayName=""`），
+/// 只能回退，等于没做。所以这里老老实实用 `IShellLinkW` 解析。
+fn resolve_shortcut_target(path: &Path) -> Option<std::path::PathBuf> {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+    use windows::core::{Interface, PCWSTR};
+    use windows::Win32::System::Com::{
+        CoCreateInstance, IPersistFile, CLSCTX_INPROC_SERVER, STGM_READ,
+    };
+    use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
+
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    // SAFETY: COM 已由 init_com_for_thread 在本线程初始化；wide 以 0 结尾；
+    // buf 按 GetPath 契约提供可写缓冲，pfd 传 null 表示不需要 WIN32_FIND_DATAW。
+    unsafe {
+        let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).ok()?;
+        let persist: IPersistFile = link.cast().ok()?;
+        persist.Load(PCWSTR(wide.as_ptr()), STGM_READ).ok()?;
+        let mut buf = [0u16; 260];
+        link.GetPath(&mut buf, ptr::null_mut(), 0).ok()?;
+        let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        if len == 0 {
+            return None; // 指向 UWP / 虚拟项等没有文件路径的目标
+        }
+        Some(std::path::PathBuf::from(OsString::from_wide(&buf[..len])))
+    }
+}
+
+/// 对给定宽字符串路径取系统图标（32x32）。
+///
+/// # Safety
+/// `wide` 必须以 0 结尾。返回的 `HICON` 所有权移交调用方，由其 `DestroyIcon`。
+unsafe fn hicon_for(wide: &[u16]) -> Option<HICON> {
+    let mut shfi: SHFILEINFOW = std::mem::zeroed();
+    let ok = SHGetFileInfoW(
+        wide.as_ptr(),
+        0,
+        &mut shfi,
+        std::mem::size_of::<SHFILEINFOW>() as u32,
+        SHGFI_ICON | SHGFI_LARGEICON,
+    );
+    if ok == 0 || shfi.hIcon.is_null() {
+        return None;
+    }
+    Some(shfi.hIcon)
 }
 
 /// AppsFolder 项（按解析名）→ base64(PNG)。

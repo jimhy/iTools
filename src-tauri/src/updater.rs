@@ -1,4 +1,11 @@
-//! 版本更新检查与安装：**Gitee Releases 单一源**（中国区）。
+//! 版本更新检查与安装：**GitHub Releases 单一源**。
+//!
+//! ⚠ 可达性（部署前必读）：GitHub API 在国内网络下可能超时或被重置。本模块的请求走
+//! [`crate::http`]，会遵循用户配置的代理；没配代理时检查更新可能失败——失败是**静默降级**
+//! （只返回 Err，前端不打扰用户），不会影响任何其它功能。原实现用的是 Gitee（中国区可达性
+//! 更好），2026-08-13 按维护者要求统一到 GitHub。若日后国内用户反馈收不到更新提示，
+//! 优先考虑给 msi 直链套一层镜像（[`crate::plugin::mirror`] 已有现成的镜像竞速能力），
+//! 而不是把源改回去——两个源并存会让「哪个才是最新版」变得没人说得清。
 //!
 //! 设计：
 //! - 检查更新：读 `releases/latest`，semver 比对，返回是否有新版 + 下载页 + msi 直链。
@@ -7,11 +14,15 @@
 //! - 版本号按语义化比较（semver），忽略 tag 前缀 `v`（发版 tag 形如 `v0.1.0`）。
 //! - 网络失败静默降级：失败仅返回 Err，由前端决定是否打扰用户。
 //!
-//! 安全：**访问令牌绝不写进源码/二进制**。Gitee token 在运行期从环境变量
-//! `ITOOLS_GITEE_TOKEN` 读取——设置了就带上（可读私有仓库 / 防限流），未设置则匿名
+//! 安全：**访问令牌绝不写进源码/二进制**。GitHub token 在运行期从环境变量
+//! `ITOOLS_GITHUB_TOKEN` 读取——设置了就带上（可读私有仓库 / 防限流），未设置则匿名
 //! 请求（公开仓库读取 release 无需鉴权）。发版所需的写权限 token 放在发版环境 /
-//! CI secret 的同名变量里，不随客户端分发。令牌是拼在 URL 上的，而 ureq 的错误 Display
-//! 会带上完整 URL，因此所有错误出口都过一遍 [`crate::plugin::install::redact_token`]。
+//! CI secret 的同名变量里，不随客户端分发。
+//!
+//! 令牌走 **`Authorization` 请求头**而不是 URL query（这是换 GitHub 后的一处实质改善：
+//! Gitee 只能 `?access_token=`，一旦超时，ureq 的错误 Display 会把含明文令牌的完整 URL
+//! 回显到 UI）。错误出口仍保留 [`crate::plugin::install::redact_token`] 兜底——
+//! 防的是将来有人又把令牌拼回 URL。
 //!
 //! 线程模型（**曾经写反过，务必别再写回去**）：不带 `async` 的 `#[tauri::command]` 走
 //! `ExecutionContext::Blocking`——tauri-macros 的 `body_blocking` 把函数体直接内联进 IPC
@@ -31,8 +42,8 @@ use crate::plugin::install::redact_token;
 /// 默认指向下方公开发布仓库，可用 `ITOOLS_UPDATE_REPO` 覆盖（换发布主体 / 私有仓库）。
 const UPDATE_REPO_ENV: &str = "ITOOLS_UPDATE_REPO";
 /// 默认发布仓库 owner/repo（公开仓库，客户端匿名即可读 release）。
-const DEFAULT_OWNER: &str = "jimyliu";
-const DEFAULT_REPO: &str = "itools_release";
+const DEFAULT_OWNER: &str = "jimhy";
+const DEFAULT_REPO: &str = "iTools";
 
 /// 解析更新源 `(owner, repo)`：优先环境变量 `ITOOLS_UPDATE_REPO=owner/repo`，否则用默认。
 fn update_repo() -> (String, String) {
@@ -46,9 +57,9 @@ fn update_repo() -> (String, String) {
     (DEFAULT_OWNER.to_string(), DEFAULT_REPO.to_string())
 }
 
-/// 环境变量名：可选的 Gitee 访问令牌。源码与二进制中均**不含**明文 token。
+/// 环境变量名：可选的 GitHub 访问令牌。源码与二进制中均**不含**明文 token。
 /// 公开仓库读取 release 无需设置；私有仓库或防限流时在运行/构建环境导出此变量。
-const GITEE_TOKEN_ENV: &str = "ITOOLS_GITEE_TOKEN";
+const GITHUB_TOKEN_ENV: &str = "ITOOLS_GITHUB_TOKEN";
 
 /// 检查更新请求超时（秒）。
 const TIMEOUT_SECS: u64 = 8;
@@ -76,7 +87,7 @@ pub struct UpdateInfo {
     pub msi_url: Option<String>,
 }
 
-/// 单个 release 的最小化字段（Gitee v5）。
+/// 单个 release 的最小化字段（GitHub REST v3；Gitee v5 的同名字段完全一致）。
 #[derive(Debug, Deserialize)]
 struct Release {
     tag_name: String,
@@ -88,7 +99,7 @@ struct Release {
     assets: Vec<Asset>,
 }
 
-/// release 附件（Gitee v5 只暴露下载直链）。
+/// release 附件（只取下载直链）。
 #[derive(Debug, Deserialize)]
 struct Asset {
     #[serde(default)]
@@ -114,26 +125,30 @@ fn version_gt(a: &str, b: &str) -> bool {
     false
 }
 
-/// 拉取 Gitee 最新 release。若环境变量 `ITOOLS_GITEE_TOKEN` 存在则附带鉴权，
-/// 否则匿名请求（公开仓库可读）。token 只从环境变量读，不落代码。
-fn fetch_gitee() -> Result<Release, String> {
+/// 拉取 GitHub 最新 release。若环境变量 `ITOOLS_GITHUB_TOKEN` 存在则附带鉴权，
+/// 否则匿名请求（公开仓库可读）。token 只从环境变量读、只进请求头，不落代码也不进 URL。
+///
+/// `releases/latest` 不会返回 draft / prerelease——预发布版本不会推给普通用户。
+fn fetch_release() -> Result<Release, String> {
     let (owner, repo) = update_repo();
-    let mut url = format!("https://gitee.com/api/v5/repos/{owner}/{repo}/releases/latest");
-    if let Ok(tok) = std::env::var(GITEE_TOKEN_ENV) {
+    let url = format!("https://api.github.com/repos/{owner}/{repo}/releases/latest");
+    let mut req = crate::http::get(&url)
+        .set("User-Agent", USER_AGENT) // GitHub 强制要求 UA，缺了直接 403
+        .set("Accept", "application/vnd.github+json")
+        .set("X-GitHub-Api-Version", "2022-11-28")
+        .timeout(Duration::from_secs(TIMEOUT_SECS));
+    if let Ok(tok) = std::env::var(GITHUB_TOKEN_ENV) {
         let tok = tok.trim();
         if !tok.is_empty() {
-            url.push_str("?access_token=");
-            url.push_str(tok);
+            req = req.set("Authorization", &format!("Bearer {tok}"));
         }
     }
-    let resp = crate::http::get(&url)
-        .set("User-Agent", USER_AGENT)
-        .timeout(Duration::from_secs(TIMEOUT_SECS))
+    // 令牌在请求头里，正常不会进错误串；redact 仍保留，防的是将来有人把它拼回 URL。
+    let resp = req
         .call()
-        // 脱敏必做：ureq 的 Transport/Status Display 会把完整 URL（含 ?access_token=明文）写进错误串
-        .map_err(|e| redact_token(format!("gitee 请求失败: {e}")))?;
+        .map_err(|e| redact_token(format!("GitHub 请求失败: {e}")))?;
     resp.into_json::<Release>()
-        .map_err(|e| redact_token(format!("gitee 解析失败: {e}")))
+        .map_err(|e| redact_token(format!("GitHub 解析失败: {e}")))
 }
 
 /// 命令：检查更新。前端在「关于」页点击调用。
@@ -152,7 +167,7 @@ pub async fn check_update() -> Result<UpdateInfo, String> {
 /// [`check_update`] 的阻塞实现（跑在 `spawn_blocking` 线程上）。
 fn check_blocking() -> Result<UpdateInfo, String> {
     let current = env!("CARGO_PKG_VERSION").to_string();
-    let release = fetch_gitee()?;
+    let release = fetch_release()?;
     let latest = release.tag_name.trim_start_matches('v').to_string();
     let has_update = version_gt(&latest, &current);
     // 从附件里挑第一个 .msi 直链

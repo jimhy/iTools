@@ -1,0 +1,34 @@
+{
+  "name": "deskbox",
+  "displayName": "云端笔记",
+  "description": "笔记 · 待办 · 密码：树形笔记（可加密上锁）、待办清单、加密密码管家，支持搜索与云同步",
+  "author": "jimhy",
+  "repo": "https://github.com/jimhy/iTools-plugins",
+  "path": "deskbox",
+  "sourceRepo": "https://github.com/jimhy/iTools-plugins/tree/main/src/deskbox",
+  "version": "1.0.0",
+  "revision": "d1db11ec04d573e9561cf1047e877dfbbe6f8141",
+  "category": "效率",
+  "tags": [
+    "笔记",
+    "待办",
+    "密码"
+  ],
+  "keywords": [
+    "笔记",
+    "记事本",
+    "notes",
+    "note",
+    "待办",
+    "todo",
+    "任务",
+    "todolist",
+    "密码",
+    "密码管理",
+    "password",
+    "vault"
+  ],
+  "permissions": [],
+  "license": "MIT",
+  "addedAt": "2026-08-13"
+}

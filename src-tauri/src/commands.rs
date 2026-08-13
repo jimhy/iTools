@@ -442,8 +442,38 @@ pub fn sync_now(account: State<'_, AccountStore>, data: State<'_, DataStore>) ->
 /// 由 WebView2 controller 所属的主 UI 线程调用——云端慢/超时就会把整个 app 卡住
 /// （托盘、全局热键、所有窗口一起排队）。加 async 后交由异步运行时执行。
 #[tauri::command(async)]
-pub fn data_usage(account: State<'_, AccountStore>, data: State<'_, DataStore>) -> DataUsage {
-    data.usage(&account)
+pub fn data_usage(
+    account: State<'_, AccountStore>,
+    data: State<'_, DataStore>,
+    registry: State<'_, crate::plugin::PluginRegistry>,
+) -> DataUsage {
+    data.usage(&account, &collect_data_set_specs(&registry))
+}
+
+/// 汇总各插件在 `plugin.json` 里声明的 `dataSets`，供「我的数据」页按**用户视角**计数。
+///
+/// 没声明的插件不会出现在结果里——界面据此退回「N 个存储项」的说法并说明原因。
+fn collect_data_set_specs(registry: &crate::plugin::PluginRegistry) -> crate::sync::DataSetSpecs {
+    let Ok(plugins) = registry.plugins.read() else {
+        return Default::default();
+    };
+    plugins
+        .iter()
+        .filter(|p| !p.manifest.data_sets.is_empty())
+        .map(|p| {
+            let specs = p
+                .manifest
+                .data_sets
+                .iter()
+                .map(|d| crate::sync::DataSetSpec {
+                    key: d.key.clone(),
+                    label: d.label.clone(),
+                    count_by: d.count_by.clone(),
+                })
+                .collect();
+            (crate::plugin::commands::plugin_ns(&p.manifest.name), specs)
+        })
+        .collect()
 }
 
 // ---------- 本地启动 ----------

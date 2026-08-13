@@ -307,6 +307,34 @@ impl Db {
         Ok(())
     }
 
+    /// 统计每个插件在 `plugin_kv` 里的**纯本地**记录条数（ns, count）。
+    ///
+    /// `plugin_kv` 是 `itools.db.*` 的落点，**不参与云同步**。它必须和 [`Self::pd_counts`]
+    /// 分开统计、在界面上分开呈现：早先「我的数据」页只数 `plugin_data`，
+    /// 于是插件用 `itools.db.*` 存的东西一条都不显示——用户看着「本地 2 条」，
+    /// 实际上库里躺着十来条他自己的笔记和密码，数字对不上就等于界面在说假话。
+    ///
+    /// 返回的 ns 与 `pd_counts` 同构（`plugin:<id>`），这样前端两张表能按同一个键对齐。
+    pub fn pkv_counts(&self) -> Vec<(String, u64)> {
+        let Ok(conn) = self.conn.lock() else {
+            return Vec::new();
+        };
+        let Ok(mut stmt) =
+            conn.prepare("SELECT plugin_id, COUNT(*) FROM plugin_kv GROUP BY plugin_id")
+        else {
+            return Vec::new();
+        };
+        let Ok(rows) = stmt.query_map([], |r| {
+            Ok((
+                crate::plugin::commands::plugin_ns(&r.get::<_, String>(0)?),
+                r.get::<_, i64>(1)?.max(0) as u64,
+            ))
+        }) else {
+            return Vec::new();
+        };
+        rows.flatten().collect()
+    }
+
     /// 统计每个命名空间的**本地**记录条数（ns, count）。供「我的数据」页展示本地已用。
     /// 空表返回空 Vec；仅统计真实存在的行，不臆造。
     pub fn pd_counts(&self) -> Vec<(String, u64)> {

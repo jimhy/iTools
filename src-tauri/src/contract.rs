@@ -116,7 +116,7 @@ mod tests {
     use crate::profile::{Profile, ProfileView};
     use crate::search::SearchItem;
     use crate::settings::{AppSettings, LaunchItem};
-    use crate::sync::{CloudUsage, DataUsage, NsCount, SyncResult};
+    use crate::sync::{CloudUsage, DataUsage, ItemCount, NsCount, SyncResult};
     use crate::updater::UpdateInfo;
 
     /// **前后端契约快照**：钉死字段名 + 导出机器可读清单。
@@ -327,6 +327,7 @@ mod tests {
         // ---------- 插件列表（plugin/mod.rs）：**没有 rename_all，走 snake_case** ----------
         let info = PluginInfo {
             name: "demo".into(),
+            display_name: "示例插件".into(),
             description: String::new(),
             version: "1.0.0".into(),
             author: String::new(),
@@ -346,9 +347,9 @@ mod tests {
             "PluginInfo",
             &info,
             &[
-                "name", "description", "version", "author", "feature_count", "cmds", "logo",
-                "enabled", "permissions", "granted", "has_readme", "has_settings", "source",
-                "builtin",
+                "name", "display_name", "description", "version", "author", "feature_count",
+                "cmds", "logo", "enabled", "permissions", "granted", "has_readme", "has_settings",
+                "source", "builtin",
             ],
             "本结构**没有** #[serde(rename_all)]：字段名原样 snake_case（feature_count / has_readme / has_settings）。",
         );
@@ -470,9 +471,20 @@ mod tests {
             &NsCount {
                 ns: "app".into(),
                 count: 0,
+                // items 带 skip_serializing_if：必须构造成非空才会出现在清单里，
+                // 否则会钉出一份「少了 items」的假契约（见文件头说明）。
+                items: vec![ItemCount { label: "笔记".into(), count: 2 }],
             },
-            &["ns", "count"],
-            "DataUsage.local / CloudUsage.counts 的数组元素。",
+            &["ns", "count", "items"],
+            "DataUsage.local / CloudUsage.counts 的数组元素；items 带 skip_serializing_if（空则不出现）。",
+        );
+
+        freeze(
+            &mut out,
+            "ItemCount",
+            &ItemCount { label: "笔记".into(), count: 2 },
+            &["label", "count"],
+            "NsCount.items 的数组元素：插件声明的业务条目口径。",
         );
 
         freeze(
@@ -493,10 +505,19 @@ mod tests {
             &DataUsage {
                 local: Vec::new(),
                 local_total: 0,
+                local_only: Vec::new(),
+                local_only_total: 0,
                 cloud: None,
                 cloud_reason: Some("offline".into()),
             },
-            &["local", "localTotal", "cloud", "cloudReason"],
+            &[
+                "local",
+                "localTotal",
+                "localOnly",
+                "localOnlyTotal",
+                "cloud",
+                "cloudReason",
+            ],
             "cloudReason 带 skip_serializing_if（云端可用时不出现），这里构造成 Some 钉全字段。",
         );
 

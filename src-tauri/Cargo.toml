@@ -1,6 +1,6 @@
 [package]
 name = "itools"
-version = "0.1.0"
+version = "1.0.0"
 description = "iTools — macOS 风格的效率启动器"
 authors = ["haifeng"]
 edition = "2021"
@@ -89,6 +89,8 @@ windows = { version = "0.61", features = [
     "Win32_System_Search",
     "Win32_UI_Shell",
     "Win32_Graphics_Gdi",
+    # IShellLinkW::GetPath 的 WIN32_FIND_DATAW（解析 .lnk 指向的真实目标，用于去掉图标上的快捷方式箭头）
+    "Win32_Storage_FileSystem",
     # WinRT：离线 OCR（Windows.Media.Ocr）
     "Foundation",
     "Globalization",

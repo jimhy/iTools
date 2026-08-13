@@ -45,7 +45,16 @@ const TEXT_SCORE: i64 = 5;
 #[derive(Debug, Clone, Deserialize)]
 pub struct PluginManifest {
     /// 插件唯一 id（小写字母数字连字符），同时是目录名与协议路径段。
+    ///
+    /// ⚠ 这是**机器标识**，不是给用户看的名字：它要当目录名、进 `itplugin://` 的路径段、
+    /// 做市场索引的主键，所以只能是 ASCII。用户可见的名字请用 [`Self::display_name`]。
     pub name: String,
+    /// 给用户看的名字（如「云端笔记」）。缺省时回落到 [`Self::name`]。
+    ///
+    /// 分成两个字段是因为它们的约束天然冲突：id 要稳定且 ASCII（改了等于换插件），
+    /// 展示名要好懂、可以是中文、可以随时改而不影响已安装用户的数据归属。
+    #[serde(default, alias = "displayName")]
+    pub display_name: String,
     #[serde(default = "default_version")]
     pub version: String,
     #[serde(default)]
@@ -62,6 +71,50 @@ pub struct PluginManifest {
     pub permissions: Vec<String>,
     #[serde(default)]
     pub features: Vec<Feature>,
+    /// 「我的数据」页按什么口径数这个插件的数据（见 [`DataSet`]）。
+    ///
+    /// 不声明就只能按**存储键**计数——那是给开发者看的数字，对用户毫无意义：
+    /// 用户建了 2 篇笔记、2 条待办、1 条密码，存储层却是 8 个键（整份待办清单只占 1 个键，
+    /// 而每篇笔记的正文各占 1 个），界面显示「8 条」纯属答非所问。
+    #[serde(default, alias = "dataSets")]
+    pub data_sets: Vec<DataSet>,
+}
+
+/// 一个**用户视角**的数据集：把某个存储键翻译成「N 条 XX」。
+///
+/// 宿主不可能自己猜出插件的业务语义（`todos` 那个数组里是 2 条待办还是 2 个分组？
+/// 换个插件同样的结构可能完全是别的意思），所以只能由插件声明。
+#[derive(Debug, Clone, Deserialize)]
+pub struct DataSet {
+    /// 存储键（`itools.data.*` 的 key）。支持结尾 `*` 前缀匹配，
+    /// 用于「每条记录各占一个键」的形态（如 `notes.body.*`）。
+    pub key: String,
+    /// 给用户看的名字，如「笔记」「待办」。
+    pub label: String,
+    /// 计数方式：
+    /// - `length`（默认）：值是数组 → 取长度；值是对象 → 取键数；其它 → 1。
+    /// - `one`：整个键算 1 条（用于 `notes.body.*` 这种一记录一键的形态）。
+    #[serde(default = "default_count_by", alias = "countBy")]
+    pub count_by: String,
+}
+
+fn default_count_by() -> String {
+    "length".to_string()
+}
+
+impl PluginManifest {
+    /// 用户可见的名字：声明了就用声明的，否则回落到 id。
+    ///
+    /// 所有对外展示（插件管理 / 搜索结果 / 我的数据 / 详情页）都必须走这里，
+    /// 免得同一个插件在这处叫「云端笔记」、那处叫「deskbox」。
+    pub fn display_label(&self) -> &str {
+        let trimmed = self.display_name.trim();
+        if trimmed.is_empty() {
+            &self.name
+        } else {
+            trimmed
+        }
+    }
 }
 
 fn default_version() -> String {
@@ -256,7 +309,8 @@ pub fn expand_commands(plugins: &[LoadedPlugin]) -> Vec<PluginCommand> {
     let mut out = Vec::new();
     for p in plugins {
         let logo = read_logo(&p.dir, &p.manifest.icon);
-        let subtitle = format!("{} · 插件", p.manifest.name);
+        // 副标题给用户看，用展示名（未声明时它就等于 id，与原行为一致）
+        let subtitle = format!("{} · 插件", p.manifest.display_label());
         out.extend(expand_one(&p.manifest.name, &p.manifest, &subtitle, logo));
     }
     out
@@ -669,6 +723,7 @@ impl PluginRegistry {
                 }
                 PluginInfo {
                     name: m.name.clone(),
+                    display_name: m.display_label().to_string(),
                     description: m.description.clone(),
                     version: m.version.clone(),
                     author: m.author.clone(),
@@ -691,7 +746,10 @@ impl PluginRegistry {
 /// 「插件管理」页展示的一条插件信息（与前端 `PluginInfo` 对齐）。
 #[derive(Debug, Clone, Serialize)]
 pub struct PluginInfo {
+    /// 插件 id（机器标识，ASCII）。UI 展示请用 `display_name`。
     pub name: String,
+    /// 给用户看的名字（清单未声明时等于 `name`，所以前端可以无脑用它）。
+    pub display_name: String,
     pub description: String,
     pub version: String,
     pub author: String,

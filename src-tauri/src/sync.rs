@@ -93,8 +93,65 @@ impl SyncResult {
 pub struct NsCount {
     /// 命名空间：`app`（主程序）或 `plugin:<插件名>`。
     pub ns: String,
-    /// 该命名空间的记录条数（真实统计，非估算）。
+    /// 该命名空间的**存储项**数（真实统计，非估算）。
+    ///
+    /// 注意这是「键」的数量，不是用户眼里的条目数：整份待办清单只占 1 个键，
+    /// 而每篇笔记的正文各占 1 个。给用户看的数字请用 [`Self::items`]。
     pub count: u64,
+    /// **用户视角**的业务条目明细（如「笔记 2 · 待办 2 · 密码 1」）。
+    ///
+    /// 由插件在 `plugin.json` 的 `dataSets` 里声明，宿主据此解析真实值统计得出。
+    /// 插件没声明就是空——此时界面只能退回按存储项显示，并说明原因，不许编数字。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub items: Vec<ItemCount>,
+}
+
+/// 一类业务条目的计数（插件声明的口径）。
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ItemCount {
+    /// 给用户看的名字，如「笔记」。
+    pub label: String,
+    /// 条数（按声明的 `countBy` 解析真实存储值得出）。
+    pub count: u64,
+}
+
+/// 命名空间 → 该插件声明的数据集口径。由插件注册表在调用处组装。
+pub type DataSetSpecs = HashMap<String, Vec<DataSetSpec>>;
+
+/// 一条 `dataSets` 声明的运行期形态（与 `plugin.json` 里的字段一一对应）。
+#[derive(Debug, Clone)]
+pub struct DataSetSpec {
+    /// 存储键；结尾 `*` 表示前缀匹配。
+    pub key: String,
+    pub label: String,
+    /// `length`（数组取长度 / 对象取键数）或 `one`（整键算 1 条）。
+    pub count_by: String,
+}
+
+impl DataSetSpec {
+    /// 该声明是否匹配这个存储键。
+    pub fn matches(&self, key: &str) -> bool {
+        match self.key.strip_suffix('*') {
+            Some(prefix) => key.starts_with(prefix),
+            None => key == self.key,
+        }
+    }
+
+    /// 按声明的口径数这一个键里有多少条业务记录。
+    ///
+    /// 值解析不了（脏数据 / 非 JSON）就算 1 条：它**确实占了一条存储**，
+    /// 报 0 会让用户以为数据丢了。
+    pub fn count_of(&self, value_json: &str) -> u64 {
+        if self.count_by == "one" {
+            return 1;
+        }
+        match serde_json::from_str::<serde_json::Value>(value_json) {
+            Ok(serde_json::Value::Array(a)) => a.len() as u64,
+            Ok(serde_json::Value::Object(o)) => o.len() as u64,
+            _ => 1,
+        }
+    }
 }
 
 /// 云端用量快照（真实来自服务端 `GET /data/_usage`）。
@@ -114,10 +171,17 @@ pub struct CloudUsage {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DataUsage {
-    /// 本地各命名空间条数。
+    /// 本地各命名空间条数（**可参与云同步的那部分**，即 `itools.data.*` / `plugin_data`）。
     pub local: Vec<NsCount>,
-    /// 本地总条数。
+    /// 上者的总条数。
     pub local_total: u64,
+    /// 各命名空间的**纯本地**条数（`itools.db.*` / `plugin_kv`，设计上不参与云同步）。
+    ///
+    /// 单独一档而不是并进 `local`：这两类数据的去向完全不同，合成一个数字会让用户
+    /// 以为「本地 N 条」都会上云，而实际只有 `local` 那部分会。界面必须分开呈现。
+    pub local_only: Vec<NsCount>,
+    /// 上者的总条数。
+    pub local_only_total: u64,
     /// 云端用量（不可用时为 None）。
     pub cloud: Option<CloudUsage>,
     /// 云端不可用原因：`cloud_not_configured` / `not_logged_in` / `offline` / `session_expired` / `error`。
@@ -263,13 +327,23 @@ impl DataStore {
     /// `offline` / `session_expired` / `error`）——绝不用本地数字冒充云端（诚信红线）。
     ///
     /// `account` 用于取 token；服务端判定会话无效（401/403）时**自愈清本地登录态**。
-    pub fn usage(&self, account: &AccountStore) -> DataUsage {
-        // 本地：真实统计（离线始终可用）
+    pub fn usage(&self, account: &AccountStore, data_sets: &DataSetSpecs) -> DataUsage {
+        // 本地：真实统计（离线始终可用）。两张表分开数——
+        // plugin_data 会上云，plugin_kv 只在本机，合成一个数字就是对用户说假话。
         let local_pairs = self.db.pd_counts();
         let local_total: u64 = local_pairs.iter().map(|(_, c)| *c).sum();
         let local: Vec<NsCount> = local_pairs
             .into_iter()
-            .map(|(ns, count)| NsCount { ns, count })
+            .map(|(ns, count)| {
+                let items = self.count_items(&ns, data_sets);
+                NsCount { ns, count, items }
+            })
+            .collect();
+        let local_only_pairs = self.db.pkv_counts();
+        let local_only_total: u64 = local_only_pairs.iter().map(|(_, c)| *c).sum();
+        let local_only: Vec<NsCount> = local_only_pairs
+            .into_iter()
+            .map(|(ns, count)| NsCount { ns, count, items: Vec::new() })
             .collect();
 
         // 云端：诚实门禁——未配置 / 未登录直接给原因，不发请求
@@ -281,9 +355,47 @@ impl DataStore {
         DataUsage {
             local,
             local_total,
+            local_only,
+            local_only_total,
             cloud,
             cloud_reason,
         }
+    }
+
+    /// 按插件声明的 `dataSets` 统计**用户视角**的业务条目数。
+    ///
+    /// 没有声明就返回空 Vec —— 界面据此退回「N 个存储项」的说法。宁可说得不够漂亮，
+    /// 也不能自作聪明去猜（同样一个数组，在 A 插件是 2 条待办，在 B 插件可能是 2 个分组）。
+    fn count_items(&self, ns: &str, specs: &DataSetSpecs) -> Vec<ItemCount> {
+        let Some(specs) = specs.get(ns) else {
+            return Vec::new();
+        };
+        // 两张表都要看：业务条目是「用户有多少东西」，与它落在可同步表还是纯本地表无关
+        // （pixshot 的截图历史就存在 plugin_kv 里，只算 plugin_data 会显示成「暂无数据」）。
+        let mut entries: Vec<(String, String)> = self
+            .db
+            .pd_entries(ns)
+            .into_iter()
+            .map(|(k, v, _)| (k, v))
+            .collect();
+        if let Some(id) = ns.strip_prefix("plugin:") {
+            entries.extend(self.db.pkv_entries(id));
+        }
+        specs
+            .iter()
+            .map(|spec| {
+                let mut count = 0u64;
+                for (key, value) in &entries {
+                    if !spec.matches(key) {
+                        continue;
+                    }
+                    count += spec.count_of(value);
+                }
+                ItemCount { label: spec.label.clone(), count }
+            })
+            // 一条都没有的类别不必占位（用户没建密码就别显示「密码 0」）
+            .filter(|c| c.count > 0)
+            .collect()
     }
 
     /// 真实请求服务端 `GET /data/_usage`（带 Bearer）。返回 Err(reason) 表示不可用（诚实降级）。
@@ -306,10 +418,13 @@ impl DataStore {
             }
             Err(ureq::Error::Transport(_)) => return Err("offline".to_string()),
         };
+        // 云端只回「每个命名空间有多少个键」，值不回传，因此这里给不出业务条目明细
+        // （items 留空）——要按业务口径数就得把云端数据全拉回来，代价与收益不成比例。
+        // 界面据此把云端一栏呈现为存储项 + 同步状态，不与本地的业务条目数混为一谈。
         let mut counts: Vec<NsCount> = parsed
             .counts
             .into_iter()
-            .map(|(ns, count)| NsCount { ns, count })
+            .map(|(ns, count)| NsCount { ns, count, items: Vec::new() })
             .collect();
         // 稳定顺序：按 ns 升序，便于前端与本地行对齐、渲染稳定。
         counts.sort_by(|a, b| a.ns.cmp(&b.ns));

@@ -59,7 +59,7 @@ export async function renderPluginDetail(
       h(
         "div",
         { class: "detail-name-row" },
-        h("span", { class: "detail-name", text: plugin.name }),
+        h("span", { class: "detail-name", text: plugin.display_name }),
         h("span", { class: "detail-ver", text: "v" + plugin.version }),
       ),
       plugin.author ? h("div", { class: "detail-author", text: "作者：" + plugin.author }) : null,

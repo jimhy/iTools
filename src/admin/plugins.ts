@@ -273,7 +273,7 @@ export async function renderPlugins(root: HTMLElement, ctx: AdminCtx): Promise<v
       h(
         "div",
         { class: "plugin-name-row" },
-        h("span", { class: "plugin-name", text: p.name }),
+        h("span", { class: "plugin-name", text: p.display_name }),
         h("span", { class: "plugin-ver", text: "v" + p.version }),
         statusBadge(p),
       ),

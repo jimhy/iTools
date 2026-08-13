@@ -40,6 +40,8 @@
     "cloud",
     "cloudReason",
     "local",
+    "localOnly",
+    "localOnlyTotal",
     "localTotal"
   ],
   "DevConfig": [
@@ -151,6 +153,10 @@
     "version",
     "viaMirror"
   ],
+  "ItemCount": [
+    "count",
+    "label"
+  ],
   "LaunchItem": [
     "id",
     "is_dir",
@@ -226,6 +232,7 @@
   ],
   "NsCount": [
     "count",
+    "items",
     "ns"
   ],
   "PluginInfo": [
@@ -233,6 +240,7 @@
     "builtin",
     "cmds",
     "description",
+    "display_name",
     "enabled",
     "feature_count",
     "granted",

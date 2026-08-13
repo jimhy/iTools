@@ -475,32 +475,14 @@ function renderHome(): void {
     );
   }
   pane.appendChild(renderBuiltinSection());
-  pane.appendChild(renderMarketSection());
-
   if (gridCells.length > 0) selectCell(0);
   void loadGridIcons();
   void resizeToContent();
 }
 
-/** 市场精选：插件市场尚未开放，暂显示「敬请期待」占位 */
-function renderMarketSection(): HTMLDivElement {
-  const wrap = document.createElement("div");
-  wrap.className = "home-section";
-
-  const head = document.createElement("div");
-  head.className = "section-head";
-  const label = document.createElement("span");
-  label.className = "section-title";
-  label.textContent = "市场精选";
-  head.appendChild(label);
-  wrap.appendChild(head);
-
-  const coming = document.createElement("div");
-  coming.className = "section-coming";
-  coming.textContent = "敬请期待";
-  wrap.appendChild(coming);
-  return wrap;
-}
+// 「市场精选」分区已移除：它从来只是一块写死的「敬请期待」，既不来自真实数据、
+// 也点不动，占着首屏一整块位置。按开发准则第 6 条（不做无效控件 / 不用占位冒充功能），
+// 空着不如不显示。要恢复请接真实的市场索引（plugin::market），有内容才渲染。
 
 function renderBuiltinSection(): HTMLDivElement {
   const wrap = document.createElement("div");

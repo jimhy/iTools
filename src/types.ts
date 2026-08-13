@@ -297,7 +297,11 @@ export interface MirrorTestResult {
 
 /** 已装插件信息，与 Rust 侧 `PluginInfo` 保持一致 */
 export interface PluginInfo {
+  /** 插件 id（机器标识，ASCII）。**UI 展示一律用 `display_name`**，
+   *  否则同一个插件会在这处叫「云端笔记」、那处叫「deskbox」。 */
   name: string;
+  /** 给用户看的名字；清单未声明时后端已回落成 `name`，前端可直接用。 */
+  display_name: string;
   description: string;
   version: string;
   author: string;
@@ -407,6 +411,18 @@ export interface SyncResult {
 /** 单个命名空间的条数，与 Rust 侧 `NsCount` 一致（`ns` 形如 `app` / `plugin:<插件名>`）。 */
 export interface NsCount {
   ns: string;
+  /** **存储项**数（键的数量）——整份待办清单只占 1 项，每篇笔记正文各占 1 项。
+   *  给用户看的数字请用 `items`，别拿这个当"数据条数"。 */
+  count: number;
+  /** 用户视角的业务条目明细（插件在 `plugin.json` 的 `dataSets` 里声明后才有）。
+   *  为空 = 该插件没声明，界面只能按存储项显示并说明原因。 */
+  items?: ItemCount[];
+}
+
+/** 一类业务条目的计数，与 Rust 侧 `ItemCount` 一致。 */
+export interface ItemCount {
+  /** 给用户看的名字，如「笔记」。 */
+  label: string;
   count: number;
 }
 
@@ -422,8 +438,13 @@ export interface CloudUsage {
  *  本地始终真实；`cloud=null` 表示云端不可用，`cloudReason` 说明原因
  *  ∈ cloud_not_configured | not_logged_in | offline | session_expired | error。 */
 export interface DataUsage {
+  /** 可参与云同步的本地数据（`itools.data.*`）。 */
   local: NsCount[];
   localTotal: number;
+  /** 纯本地数据（`itools.db.*`），**设计上不上云**——UI 必须与 `local` 分开呈现，
+   *  否则用户会以为这部分也会同步。 */
+  localOnly: NsCount[];
+  localOnlyTotal: number;
   cloud: CloudUsage | null;
   cloudReason?: string;
 }

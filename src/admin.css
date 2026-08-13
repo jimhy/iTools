@@ -1211,6 +1211,13 @@ select {
   font-size: 12px;
   color: var(--text-sub);
 }
+/* 「其中 N 条可同步 · M 条仅本机」——比主标签再弱一档，但必须可读 */
+.data-sum-sub {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--text-sub);
+  opacity: 0.85;
+}
 .btn-sm {
   padding: 6px 12px;
   font-size: 12px;
@@ -1284,6 +1291,14 @@ select {
   font-size: 12px;
   color: var(--text-sub);
   margin-top: 2px;
+}
+/* 「其中 N 条为插件的纯本地数据，不参与云同步」——这句是防误解的关键提示，
+   所以不做成灰到看不见的脚注，用与条数同级的字号、稍弱的颜色 */
+.data-row-hint {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--text-sub);
+  opacity: 0.8;
 }
 
 .detail-scroll {

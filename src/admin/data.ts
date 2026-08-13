@@ -6,7 +6,7 @@
 //! - 「立即同步」仅在云端可用（已登录）时出现，复用真实的 sync_now，不做无效控件。
 
 import type { AdminCtx } from "./main";
-import type { PluginInfo, DataUsage } from "../types";
+import type { PluginInfo, DataUsage, ItemCount } from "../types";
 import { h } from "./ui";
 import * as api from "./api";
 
@@ -60,9 +60,14 @@ interface Row {
   /** 该数据集是否为「已安装的核心/插件」（否 = 云端残留或已卸载）。 */
   present: boolean;
   glyph: string;
+  /** 可参与云同步的本地**存储项**数（`itools.data.*`）。 */
   local: number;
-  /** 云端条数；云端不可用时为 null。 */
+  /** 纯本地存储项数（`itools.db.*`），**不会上云**，必须与 `local` 分开显示。 */
+  localOnly: number;
+  /** 云端存储项数；云端不可用时为 null。 */
   cloud: number | null;
+  /** 用户视角的业务条目（插件声明了 `dataSets` 才有）。空 = 只能按存储项显示。 */
+  items: ItemCount[];
 }
 
 export async function renderData(root: HTMLElement, ctx: AdminCtx): Promise<void> {
@@ -79,7 +84,13 @@ export async function renderData(root: HTMLElement, ctx: AdminCtx): Promise<void
   /** 把 usage + plugins 合并成有序行集合。 */
   function buildRows(): Row[] {
     const localMap = new Map<string, number>();
-    usage.local.forEach((c) => localMap.set(c.ns, c.count));
+    const itemsMap = new Map<string, ItemCount[]>();
+    usage.local.forEach((c) => {
+      localMap.set(c.ns, c.count);
+      if (c.items?.length) itemsMap.set(c.ns, c.items);
+    });
+    const localOnlyMap = new Map<string, number>();
+    usage.localOnly.forEach((c) => localOnlyMap.set(c.ns, c.count));
     const cloudMap = new Map<string, number>();
     const cloudOk = usage.cloud != null;
     usage.cloud?.counts.forEach((c) => cloudMap.set(c.ns, c.count));
@@ -95,7 +106,9 @@ export async function renderData(root: HTMLElement, ctx: AdminCtx): Promise<void
         present,
         glyph,
         local: localMap.get(ns) ?? 0,
+        localOnly: localOnlyMap.get(ns) ?? 0,
         cloud: cloudOk ? cloudMap.get(ns) ?? 0 : null,
+        items: itemsMap.get(ns) ?? [],
       });
     };
 
@@ -103,11 +116,13 @@ export async function renderData(root: HTMLElement, ctx: AdminCtx): Promise<void
     pushRow("app", "主程序", null, true, IC_APP);
     // 2) 已安装插件按列表顺序（即便 0 条也展示，和示意图一致）
     for (const p of plugins) {
-      pushRow(`plugin:${p.name}`, p.name, p.logo, true, IC_PLUGIN);
+      // ns 用 id（数据按 id 归属），展示用 display_name
+      pushRow(`plugin:${p.name}`, p.display_name, p.logo, true, IC_PLUGIN);
     }
     // 3) 云端 / 本地存在但已卸载的命名空间（残留数据）——诚实展示，按 ns 升序
     const orphans = new Set<string>();
     localMap.forEach((_, ns) => !taken.has(ns) && orphans.add(ns));
+    localOnlyMap.forEach((_, ns) => !taken.has(ns) && orphans.add(ns));
     cloudMap.forEach((_, ns) => !taken.has(ns) && orphans.add(ns));
     Array.from(orphans)
       .sort()
@@ -122,13 +137,26 @@ export async function renderData(root: HTMLElement, ctx: AdminCtx): Promise<void
   function summaryCard(): HTMLElement {
     const cloudOk = usage.cloud != null;
 
-    // 左：本地
+    // 左：我的数据总条数 —— 只汇总**插件声明过业务口径**的部分，口径单一才敢求和。
+    // 没声明的插件不计入（另起一行说明有多少个），绝不把键数混进来凑一个看着大的数字。
+    const rows = buildRows();
+    const itemTotal = rows.reduce(
+      (sum, r) => sum + r.items.reduce((s, i) => s + i.count, 0),
+      0,
+    );
+    const unspecified = rows.filter((r) => !r.items.length && r.local + r.localOnly > 0).length;
     const localCol = h(
       "div",
       { class: "data-sum-col" },
       h("span", { class: "data-sum-icon", html: IC_LOCAL }),
-      h("div", { class: "data-sum-num", text: String(usage.localTotal) }),
-      h("div", { class: "data-sum-label", text: "本地记录（条）" }),
+      h("div", { class: "data-sum-num", text: String(itemTotal) }),
+      h("div", { class: "data-sum-label", text: "我的数据（条）" }),
+      unspecified > 0
+        ? h("div", {
+            class: "data-sum-sub",
+            text: `另有 ${unspecified} 个插件的数据未计入`,
+          })
+        : null,
     );
 
     // 中：刷新 +（可用时）立即同步
@@ -161,11 +189,14 @@ export async function renderData(root: HTMLElement, ctx: AdminCtx): Promise<void
     // 右：云端（可用显示条数+容量；否则如实标注状态）
     const rightChildren: HTMLElement[] = [h("span", { class: "data-sum-icon", html: IC_CLOUD })];
     if (cloudOk && usage.cloud) {
+      // 云端同样不报「项数」：服务端只知道键的数量，跟左边的业务条数不是一个口径，
+      // 并排显示就是在制造「9 对 8，是不是丢了一条」的误会。改报占用与同步状态。
+      const pending = rows.some((r) => r.local > 0 && (r.cloud ?? 0) < r.local);
       rightChildren.push(
-        h("div", { class: "data-sum-num", text: String(usage.cloud.total) }),
+        h("div", { class: "data-sum-num", text: formatBytes(usage.cloud.bytes) }),
         h("div", {
           class: "data-sum-label",
-          text: `云端记录（条）· 占用 ${formatBytes(usage.cloud.bytes)}`,
+          text: pending ? "云端占用 · 有改动待同步" : "云端占用 · 已同步",
         }),
       );
     } else {
@@ -186,10 +217,30 @@ export async function renderData(root: HTMLElement, ctx: AdminCtx): Promise<void
   }
 
   function rowEl(row: Row): HTMLElement {
-    const countText =
-      row.cloud == null
-        ? `本地 ${row.local} 条`
-        : `本地 ${row.local} 条　·　云端 ${row.cloud} 条`;
+    // 只说用户看得懂的话：他的东西有多少（「笔记 2 · 待办 2 · 密码 1」）、有没有上云。
+    // **不暴露存储项/键数** —— 那是实现细节，两个口径的数字并排出现（本地 9 / 云端 8）
+    // 只会让人以为同步出错了，而真相往往只是「一个键装了多条记录」。
+    const storageAll = row.local + row.localOnly;
+    const headline = row.items.length
+      ? row.items.map((i) => `${i.label} ${i.count}`).join("　·　")
+      : storageAll > 0
+        ? "已保存数据" // 插件没声明业务口径：只说有数据，绝不拿键数冒充条数
+        : "暂无数据";
+
+    // 同步状态：用户真正关心的是「我的东西上云了没」。
+    let state: string | null = null;
+    if (storageAll > 0) {
+      if (row.local === 0) {
+        state = "仅保存在本机（该插件的数据不参与云同步）";
+      } else if (row.cloud == null) {
+        state = `未同步到云端（${cloudReasonText(usage.cloudReason)}）`;
+      } else if (row.cloud >= row.local) {
+        state = row.localOnly > 0 ? "已同步到云端（部分数据仅保存在本机）" : "已同步到云端";
+      } else {
+        state = "有改动尚未同步";
+      }
+    }
+
     const meta = h(
       "div",
       { class: "data-row-meta" },
@@ -199,7 +250,8 @@ export async function renderData(root: HTMLElement, ctx: AdminCtx): Promise<void
         h("span", { class: "data-row-name", text: row.name }),
         row.present ? null : h("span", { class: "data-row-tag", text: "残留" }),
       ),
-      h("div", { class: "data-row-counts", text: countText }),
+      h("div", { class: "data-row-counts", text: headline }),
+      state ? h("div", { class: "data-row-hint", text: state }) : null,
     );
     return h("div", { class: "data-row" }, logoEl(row), meta);
   }
@@ -224,7 +276,9 @@ export async function renderData(root: HTMLElement, ctx: AdminCtx): Promise<void
 
     const intro = h("div", {
       class: "launch-intro",
-      text: "这里统计每个数据集（主程序与各插件）在本地和云端各存了多少条记录。数字均为真实统计。",
+      text:
+        "这里按每个数据集（主程序与各插件）展示你实际有多少条数据，以及有没有同步到云端。" +
+        "数字均为真实统计——由插件声明自己的数据口径（如「笔记」「待办」），未声明的只显示有无数据，不猜条数。",
     });
 
     root.append(
