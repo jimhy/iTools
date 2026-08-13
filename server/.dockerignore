@@ -1,6 +1,4 @@
-node_modules
-.git
-test
-*.log
-Dockerfile
-.dockerignore
+# 本地编译产物动辄数 GB，进构建上下文只会拖慢 docker build（镜像内会重新编译）
+target/
+# 本地凭据绝不进镜像
+.env

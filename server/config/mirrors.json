@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "updatedAt": "2026-08-12T10:00:00Z",
+  "probe": {
+    "owner": "octocat",
+    "repo": "Hello-World",
+    "ref": "7fd1a60b01f91b314f59955a4e4d4e80d8edf11d",
+    "path": "README",
+    "sha256": "03ba204e50d126e4674c005e04d82e84c21366780af1f43bd54a37816b6ab340"
+  },
+  "mirrors": [
+    {
+      "id": "gh-proxy",
+      "label": "gh-proxy.com",
+      "raw": "https://gh-proxy.com/https://raw.githubusercontent.com/{owner}/{repo}/{ref}/{path}",
+      "archive": "https://gh-proxy.com/https://github.com/{owner}/{repo}/archive/{ref}.zip",
+      "healthy": true
+    },
+    {
+      "id": "ghproxy-net",
+      "label": "ghproxy.net",
+      "raw": "https://ghproxy.net/https://raw.githubusercontent.com/{owner}/{repo}/{ref}/{path}",
+      "archive": "https://ghproxy.net/https://github.com/{owner}/{repo}/archive/{ref}.zip",
+      "healthy": true
+    },
+    {
+      "id": "ghfast",
+      "label": "ghfast.top",
+      "raw": "https://ghfast.top/https://raw.githubusercontent.com/{owner}/{repo}/{ref}/{path}",
+      "archive": "https://ghfast.top/https://github.com/{owner}/{repo}/archive/{ref}.zip",
+      "healthy": true
+    }
+  ]
+}

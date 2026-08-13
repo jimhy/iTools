@@ -1,0 +1,66 @@
+[package]
+name = "itools-sync-server"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+description = "iTools 云同步服务端：账号鉴权 + 本地优先数据的云端存储/合并（Rust 实现）"
+publish = false
+
+[lib]
+name = "itools_sync"
+path = "src/lib.rs"
+
+[[bin]]
+name = "itools-sync-server"
+path = "src/main.rs"
+
+[dependencies]
+# HTTP 服务
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "signal", "fs"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["trace"] }
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["server-auto", "tokio"] }
+# TLS 终止（可选：配了证书才启用）。统一走 rustls + ring provider，不引 aws-lc-rs
+# ——后者在 Windows 上要 NASM/CMake，构建面无谓变大。
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls-pemfile = "2"
+# 存储：MariaDB。不启用 DB 侧 TLS（服务端与库通常同机/内网，与旧 Node 版行为一致）。
+sqlx = { version = "0.8", default-features = false, features = ["mysql", "runtime-tokio", "tls-none", "macros"] }
+# 镜像探测的 HTTP 客户端（webpki 内置根证书 → 容器里不依赖系统 ca-certificates）
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "charset", "http2"] }
+serde = { version = "1", features = ["derive"] }
+# preserve_order：同步数据里的任意 JSON 值往返时保持对象键顺序，不打乱客户端的数据
+serde_json = { version = "1", features = ["preserve_order"] }
+# 口令哈希：scrypt（参数与 Node crypto.scryptSync 默认值一致，老库里的哈希可直接沿用）
+scrypt = { version = "0.11", default-features = false }
+sha2 = "0.10"
+hex = "0.4"
+subtle = "2"
+rand = "0.9"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+ipnet = "2"
+hashlink = "0.10"
+async-trait = "0.1"
+percent-encoding = "2"
+url = "2"
+
+[dev-dependencies]
+http-body-util = "0.1"
+tempfile = "3"
+
+# scrypt 是刻意设计成 CPU/内存密集的：未优化编译时它既极慢（一次派生数秒）
+# 又会吃掉大量栈空间（debug 下实测直接爆栈）。这些包与业务逻辑无关、不需要调试，
+# 因此即使在 dev/test 构建里也一律按 release 级别优化。
+[profile.dev.package.scrypt]
+opt-level = 3
+[profile.dev.package.salsa20]
+opt-level = 3
+[profile.dev.package.pbkdf2]
+opt-level = 3
+[profile.dev.package.sha2]
+opt-level = 3
