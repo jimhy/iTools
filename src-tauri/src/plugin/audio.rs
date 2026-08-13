@@ -3,6 +3,10 @@
 //!
 //! 并发/线程安全（据评审加固）：命令全 async——启动不在 UI 线程上阻塞等设备初始化、也不跨等待持锁；
 //! 自然终止（600s 兜底）的旧会话会在下次启动时回收；停止带归属校验（别的插件不能取走本插件的录音）。
+//!
+//! 归属校验用的是**完整会话身份**（插件 id + `dev` 标志，见 [`ActiveSession::same_as`]），不是裸 id：
+//! 调试插件与同名正式插件共用一个 id，只比 id 会让调试窗里的 demo 停掉正式窗里 demo 的录音
+//! 并拿走那段麦克风音频（反向亦然）。
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -13,13 +17,14 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use tauri::State;
 use tokio::sync::oneshot;
 
-use super::commands::{current_plugin, plugin_granted, png_to_b64};
-use super::PluginRegistry;
+use super::commands::{caller_session, plugin_granted, png_to_b64};
+use super::{ActiveSession, PluginRegistry};
 use crate::settings::SettingsStore;
 
 struct Session {
     stop: Arc<AtomicBool>,
-    owner: String,
+    /// 录音会话的归属者：**整个会话身份**（id + dev），不是裸 id。见模块头注释。
+    owner: ActiveSession,
     handle: JoinHandle<Result<Recorded, String>>,
 }
 
@@ -35,12 +40,18 @@ pub struct AudioState {
     session: Mutex<Option<Session>>,
 }
 
-fn require_audio(registry: &PluginRegistry, settings: &SettingsStore) -> Result<(), String> {
-    let id = current_plugin(registry)?;
-    if !plugin_granted(settings, &id, "audio-capture") {
+/// 校验**发起调用的窗口**当前的插件会话已获 audio-capture 授权，并返回**该会话**
+/// （录音会话的归属者：id + dev 标志，缺一不可）。调试会话查的是独立的调试授权表。
+fn require_audio(
+    webview: &tauri::Webview,
+    registry: &PluginRegistry,
+    settings: &SettingsStore,
+) -> Result<ActiveSession, String> {
+    let session = caller_session(webview, registry)?;
+    if !plugin_granted(settings, registry, &session, "audio-capture") {
         return Err("插件未获授权录音（请在「插件管理」里授权 audio-capture）".to_string());
     }
-    Ok(())
+    Ok(session)
 }
 
 /// 录音线程主体：建流→播放→收到停止信号前一直采样→停。ready_tx 回传「流是否建好」。
@@ -140,12 +151,12 @@ fn record_worker(
 /// 开始录音（默认麦克风）。已在录则报错；自然终止的旧会话会被回收后再启。
 #[tauri::command]
 pub async fn plugin_start_audio_record(
+    webview: tauri::Webview,
     registry: State<'_, PluginRegistry>,
     settings: State<'_, SettingsStore>,
     state: State<'_, AudioState>,
 ) -> Result<(), String> {
-    require_audio(&registry, &settings)?;
-    let owner = current_plugin(&registry)?;
+    let owner = require_audio(&webview, &registry, &settings)?;
     // 回收自然终止的旧会话；仍在录则拒绝（不跨 await 持锁）
     {
         let mut g = state.session.lock().unwrap();
@@ -194,16 +205,20 @@ pub async fn plugin_start_audio_record(
 /// 停止录音，返回 base64 WAV（16-bit PCM）。带归属校验；join + 编码不在 UI 线程做。
 #[tauri::command]
 pub async fn plugin_stop_audio_record(
+    webview: tauri::Webview,
     registry: State<'_, PluginRegistry>,
     state: State<'_, AudioState>,
 ) -> Result<String, String> {
     // 取会话 + 归属校验在同一临界区内原子完成（避免 take→check→put-back 之间被并发 start 抢占覆盖）
-    let cur = current_plugin(&registry)?;
+    let cur = caller_session(&webview, &registry)?;
     let session = {
         let mut g = state.session.lock().unwrap();
         match g.as_ref() {
             None => return Err("当前没有录音".to_string()),
-            Some(s) if s.owner != cur => return Err("该录音会话不属于本插件".to_string()),
+            // 归属比对**带 dev 标志**：同名的调试会话与正式会话是两个不同的归属者
+            Some(s) if !s.owner.same_as(&cur) => {
+                return Err("该录音会话不属于本插件".to_string())
+            }
             _ => g.take().unwrap(),
         }
     };

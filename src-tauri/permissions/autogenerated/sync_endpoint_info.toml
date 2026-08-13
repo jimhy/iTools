@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-sync-endpoint-info"
+description = "Enables the sync_endpoint_info command without any pre-configured scope."
+commands.allow = ["sync_endpoint_info"]
+
+[[permission]]
+identifier = "deny-sync-endpoint-info"
+description = "Denies the sync_endpoint_info command without any pre-configured scope."
+commands.deny = ["sync_endpoint_info"]

@@ -1,13 +1,14 @@
 //! 我的账号（本地优先 + 配置化云端 + 诚实降级）：
-//! 首页 banner + 账号操作；「修改账号」覆盖页（修改头像/昵称/数据同步/账号注销）；登录/退出弹窗。
+//! 首页 banner + 账号操作；「修改账号」覆盖页（修改头像/昵称/账号注销）；登录/退出弹窗。
+//! 数据同步（服务器地址、同步开关、立即同步）在「网络设置」页，不在这里。
 //!
 //! 诚信约束（doc/开发准则.md 第 7 条）：数据始终先落本地、离线可用；登录云账号后才可选同步到云端。
 //! 未接入云端（未配置 ITOOLS_SYNC_ENDPOINT）或未登录时，UI **如实标注**「云端未接入 / 未登录」，
 //! 不出现「备份到云端 / 多设备同步 / 会员权益」等对用户暗示服务端却不兑现的文案，不展示写死的假手机号。
 
 import type { AdminCtx } from "./main";
-import type { ProfileView, AccountState, SyncResult } from "../types";
-import { h, makeSwitch } from "./ui";
+import type { ProfileView, AccountState } from "../types";
+import { h } from "./ui";
 import { setDropZone, clearDropZone } from "./dnd";
 import * as api from "./api";
 
@@ -16,8 +17,6 @@ const IC_FACE =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="9"/><circle cx="9" cy="10.5" r="1"/><circle cx="15" cy="10.5" r="1"/><path d="M8.5 15a4 4 0 0 0 7 0"/></svg>';
 const IC_PEN =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>';
-const IC_SYNC =
-  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 1-15.7 6M3 12A9 9 0 0 1 18.7 6"/><polyline points="18 2 18.7 6 15 6.7"/><polyline points="6 22 5.3 18 9 17.3"/></svg>';
 const IC_BAN =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="9"/><line x1="5.6" y1="5.6" x2="18.4" y2="18.4"/></svg>';
 const IC_CHEVRON =
@@ -49,23 +48,6 @@ function noticeBox(cls: string, title: string, ...lines: string[]): HTMLElement 
 /** 文本/密码输入框。 */
 function field(placeholder: string, type = "text"): HTMLInputElement {
   return h("input", { class: "field-input", type, placeholder });
-}
-
-/** 把同步结果翻译成给用户看的一句话（诚实：未同步说明原因，不谎报成功）。 */
-function syncResultMsg(r: SyncResult): string {
-  if (r.synced) return `已同步（上行 ${r.pushed} 条，下行 ${r.pulled} 条）`;
-  switch (r.reason) {
-    case "cloud_not_configured":
-      return "云端服务未接入，数据已保存在本地";
-    case "not_logged_in":
-      return "未登录，数据已保存在本地";
-    case "offline":
-      return "无法连接云端，请稍后重试";
-    case "session_expired":
-      return "云端会话已失效，请重新登录";
-    default:
-      return r.message || "同步失败";
-  }
 }
 
 export async function renderAccount(root: HTMLElement, ctx: AdminCtx): Promise<void> {
@@ -172,7 +154,6 @@ export async function renderAccount(root: HTMLElement, ctx: AdminCtx): Promise<v
     const subs: Array<{ label: string; icon: string; render: (inner: HTMLElement) => void }> = [
       { label: "修改头像", icon: IC_FACE, render: renderAvatarPane },
       { label: "修改昵称", icon: IC_PEN, render: renderNickPane },
-      { label: "数据同步", icon: IC_SYNC, render: renderSyncPane },
       { label: "账号注销", icon: IC_BAN, render: renderDeletePane },
     ];
 
@@ -290,104 +271,6 @@ export async function renderAccount(root: HTMLElement, ctx: AdminCtx): Promise<v
       });
       inner.appendChild(
         h("div", { class: "pane-form" }, h("label", { class: "field-label", text: "昵称" }), input, btn),
-      );
-    }
-
-    function renderSyncPane(inner: HTMLElement): void {
-      // 云同步服务器地址：用户**手动填写**（不随程序内置、不写死在代码里）。填了才接入云端、可登录同步。
-      const epInput = h("input", { class: "field-input", type: "text", placeholder: "如 https://api.jimhy.cn:7010" });
-      const epSave = h("button", { class: "btn btn-primary btn-block", text: "保存并接入" });
-      epSave.addEventListener("click", async () => {
-        epSave.disabled = true;
-        try {
-          const s = await api.getSettings();
-          s.sync_endpoint = epInput.value.trim();
-          await api.saveSettings(s);
-          account = await api.accountState();
-          ctx.toast(s.sync_endpoint ? "已保存服务器地址" : "已清除服务器地址");
-          inner.innerHTML = "";
-          renderSyncPane(inner); // 重绘以反映接入状态
-        } catch (err) {
-          console.error("save sync_endpoint failed", err);
-          ctx.toast("保存失败");
-          epSave.disabled = false;
-        }
-      });
-      inner.appendChild(
-        h(
-          "div",
-          { class: "pane-form" },
-          noticeBox(
-            "info-box-blue",
-            "云同步服务器",
-            "iTools 本地优先：数据始终先存本机、离线可用。填入你自建的同步服务器地址（含端口）后即可登录并跨设备同步。",
-            "地址只保存在本机、不随程序内置；留空即为「仅本地」。",
-          ),
-          h("label", { class: "field-label", text: "服务器地址" }),
-          epInput,
-          epSave,
-        ),
-      );
-      void api.getSettings().then((s) => (epInput.value = s.sync_endpoint || "")).catch(() => {});
-
-      if (!account.cloudConfigured) {
-        inner.appendChild(
-          noticeBox(
-            "info-box-warn",
-            "云端服务未接入",
-            "还没填写服务器地址（在上方填入并保存），暂无法同步，数据仅保存在本地。",
-          ),
-        );
-        return;
-      }
-      if (!account.loggedIn) {
-        inner.appendChild(noticeBox("info-box-warn", "未登录", "登录云账号后可开启登录同步。"));
-        inner.appendChild(
-          h("button", {
-            class: "btn btn-primary btn-block",
-            text: "去登录",
-            onClick: () => {
-              closeEdit();
-              openLogin();
-            },
-          }),
-        );
-        return;
-      }
-
-      // 已登录 + 已配置：真实开关 + 立即同步
-      const sw = makeSwitch(account.syncEnabled, async (checked) => {
-        try {
-          account = await api.setDataSync(checked);
-          ctx.toast(checked ? "已开启登录同步" : "已关闭登录同步");
-        } catch (err) {
-          console.error("set_data_sync failed", err);
-          ctx.toast("操作失败");
-        }
-      });
-      const syncBtn = h("button", { class: "btn btn-primary btn-block", text: "立即同步" });
-      syncBtn.addEventListener("click", async () => {
-        syncBtn.disabled = true;
-        syncBtn.textContent = "同步中…";
-        try {
-          const r = await api.syncNow();
-          ctx.toast(syncResultMsg(r));
-          if (r.reason === "session_expired") {
-            // 后端已自愈清本地会话：关掉编辑页并刷新账号态，UI 诚实转为未登录。
-            closeEdit();
-            void refreshAll();
-          }
-        } catch (err) {
-          console.error("sync_now failed", err);
-          ctx.toast("同步失败");
-        } finally {
-          syncBtn.disabled = false;
-          syncBtn.textContent = "立即同步";
-        }
-      });
-      inner.append(
-        h("div", { class: "sync-row card" }, h("span", { text: "登录后自动同步" }), sw),
-        syncBtn,
       );
     }
 

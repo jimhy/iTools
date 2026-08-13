@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  iTools 的 Windows 应用清单。
+
+  内容与 tauri-build 2.6.3 的默认清单（`tauri-build/src/windows-app-manifest.xml`）**逐项一致**
+  ——只声明对 Common-Controls 6.0.0.0 的依赖，没有 DPI 感知 / longPathAware /
+  requestedExecutionLevel（tauri 的默认清单里本来就没有这三项，别以为是本文件漏掉了）。
+
+  之所以把它从 tauri 手里接管过来（见 `build.rs::emit_app_manifest`）：tauri-build 生成的资源是用
+  `cargo:rustc-link-arg-bins` 发的，**只进 bin 与 bin 的单测二进制，lib 的单测二进制拿不到**，
+  于是 `cargo test` 产出的 `itools_lib-*.exe` 没有清单 → 加载 comctl32 v6 里的
+  `TaskDialogIndirect`（由 `rfd` 引入）失败 → 启动即退 `0xC0000139`。
+  改由我们用不带后缀的 `cargo:rustc-link-arg` 发同一份清单，所有目标就都拿得到。
+
+  ⚠ 改这里等于改**正式发布产物**的清单，不是只影响测试。加任何一项（DPI / UAC / longPath）
+  都要真机验证缩放、权限提示与长路径行为后再合入。
+-->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity
+        type="win32"
+        name="Microsoft.Windows.Common-Controls"
+        version="6.0.0.0"
+        processorArchitecture="*"
+        publicKeyToken="6595b64144ccf1df"
+        language="*"
+      />
+    </dependentAssembly>
+  </dependency>
+</assembly>

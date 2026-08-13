@@ -12,6 +12,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+# 自备 Windows 应用清单资源（理由见 build.rs::emit_app_manifest）。
+# tauri-build → tauri-winres 已经依赖同一版本，显式声明不引入新的编译单元。
+embed-resource = "3"
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
@@ -35,7 +38,29 @@ image = "0.25"
 winreg = "0.55"
 rfd = "0.15"
 regex = "1"
-ureq = { version = "2", features = ["json"] }
+# 出站 HTTP（全应用唯一出口见 src/http.rs：代理 / 绕过规则都在那里）。
+#
+# `socks-proxy`：SOCKS 代理支持（`socks*://`，形态清单见 `http::normalize_proxy`）。
+#
+# ⚠ **勘误（2026-08-12）——上一轮「这个 feature 会做出跑不起来的二进制」是误判，别照着它退回去。**
+# 当时的现象是真的：`cargo test -j1 --lib` 产出的 exe 一启动就退，`0xC0000139`
+# （STATUS_ENTRYPOINT_NOT_FOUND）。但归因错了，真实原因与 socks 无关——
+# lib 的单测二进制拿不到应用清单，于是 `comctl32` v6 里的 `TaskDialogIndirect`
+# （由 `rfd` 引入）解析不到（详见 `build.rs::emit_app_manifest`，已持久修复）。
+# 复现证据：依赖树里**根本没有** socks（`cargo tree -i socks` 查无此包）时同样崩；
+# 给那个 exe 用 mt.exe 塞一份 Common-Controls 6.0.0.0 清单，**带着 socks** 也全绿。
+# 上一轮的 A/B 对照之所以看起来成立，是因为两边真实差异是「测试二进制有没有被重新链接」
+# ——去掉 feature 那次复用了旧的、恰好带清单的二进制。
+#
+# 📌 教训：**再遇到测试二进制启动即崩，先查清单，再怀疑依赖。**
+# 加载期错误（0xC000013x）与业务代码、与刚加的那个依赖，通常都没有关系。
+ureq = { version = "2", features = ["json", "socks-proxy"] }
+# 插件 Git 安装：解 zip 归档（Gitee/GitHub 的 archive 都是 deflate zip）。
+# default-features = false 去掉 aes/bzip2/zstd/时间戳等无用后端，只留 deflate（flate2 已在依赖树里）。
+zip = { version = "2", default-features = false, features = ["deflate"] }
+# 插件包内容校验（sha256）：镜像源可篡改内容，有可信哈希时必须校验。
+# 已在依赖树里（rusqlite/tauri 传递依赖），显式声明不引入新的编译单元。
+sha2 = "0.10"
 # 统一本地存储：单个 SQLite 库（bundled 自带 SQLite，无系统依赖，Windows 直接编译）
 rusqlite = { version = "0.32", features = ["bundled"] }
 # 原生屏幕/窗口捕获（Windows.Graphics.Capture 底层，无 PowerShell/无杀软木马指纹）

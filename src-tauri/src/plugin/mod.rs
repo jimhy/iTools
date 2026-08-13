@@ -12,6 +12,9 @@ pub mod audio;
 pub mod capture;
 pub mod commands;
 pub mod hotkey;
+pub mod install;
+pub mod market;
+pub mod mirror;
 #[cfg(windows)]
 pub mod native_overlay;
 pub mod ocr;
@@ -20,8 +23,9 @@ pub mod record;
 pub mod settings;
 pub mod watch;
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
@@ -175,6 +179,15 @@ pub fn scan_plugins(root: &Path) -> Vec<LoadedPlugin> {
         if !dir.is_dir() {
             continue;
         }
+        // 跳过 `.` 开头的内部目录（`.staging` 安装暂存、`.git` 等）：
+        // 安装过程会在 `.staging/` 里落半成品包，若被扫进来会造成「装到一半就被加载」。
+        if entry
+            .file_name()
+            .to_str()
+            .is_some_and(|n| n.starts_with('.'))
+        {
+            continue;
+        }
         let manifest_path = dir.join("plugin.json");
         if !manifest_path.exists() {
             continue;
@@ -208,7 +221,8 @@ pub fn scan_plugins(root: &Path) -> Vec<LoadedPlugin> {
     out
 }
 
-fn load_one(dir: &Path, manifest_path: &Path) -> Result<LoadedPlugin, String> {
+/// 解析并校验单个插件目录（扫描与 Git 安装共用同一套校验，避免两处标准漂移）。
+pub(crate) fn load_one(dir: &Path, manifest_path: &Path) -> Result<LoadedPlugin, String> {
     let text = std::fs::read_to_string(manifest_path).map_err(|e| format!("读 plugin.json 失败: {e}"))?;
     let manifest: PluginManifest =
         serde_json::from_str(&text).map_err(|e| format!("plugin.json 解析失败: {e}"))?;
@@ -243,71 +257,192 @@ pub fn expand_commands(plugins: &[LoadedPlugin]) -> Vec<PluginCommand> {
     for p in plugins {
         let logo = read_logo(&p.dir, &p.manifest.icon);
         let subtitle = format!("{} · 插件", p.manifest.name);
-        for f in &p.manifest.features {
-            let mut keywords = Vec::new();
-            let mut regexes = Vec::new();
-            let mut any_text = false;
-            for cmd in &f.cmds {
-                match cmd {
-                    Cmd::Keyword(kw) => keywords.push(kw.clone()),
-                    Cmd::Typed(t) if t.kind == "regex" => {
-                        if let Some(src) = &t.pattern {
-                            match regex::Regex::new(src) {
-                                Ok(re) => regexes.push(re),
-                                Err(e) => ilog!(
-                                    "[iTools] 插件 {} 的 regex 无效 {src:?}: {e}",
-                                    p.manifest.name
-                                ),
-                            }
-                        }
-                    }
-                    // text：任意输入命中（翻译/搜索类）
-                    Cmd::Typed(t) if t.kind == "text" => any_text = true,
-                    // files/img 首期不参与匹配
-                    Cmd::Typed(_) => {}
-                }
-            }
-            if keywords.is_empty() && regexes.is_empty() && !any_text {
-                ilog!(
-                    "[iTools] 插件 {} 的 feature {:?} 无可用触发方式已跳过（cmds 只支持裸字符串关键字、{{\"type\":\"regex\"}}、{{\"type\":\"text\"}}；{{\"type\":\"keyword\"}} 对象形态/files/img 不会被搜到）",
-                    p.manifest.name,
-                    f.code
-                );
-                continue;
-            }
-            let title = if f.explain.trim().is_empty() {
-                p.manifest.description.clone()
-            } else {
-                f.explain.clone()
-            };
-            out.push(PluginCommand {
-                plugin_id: p.manifest.name.clone(),
-                code: f.code.clone(),
-                title,
-                subtitle: subtitle.clone(),
-                keywords,
-                regexes,
-                any_text,
-                icon: logo.clone(),
-            });
-        }
+        out.extend(expand_one(&p.manifest.name, &p.manifest, &subtitle, logo));
     }
     out
 }
 
-/// 读插件 logo（png/jpg）为 base64 data URL；失败或不存在返回 None。
-fn read_logo(dir: &Path, icon: &str) -> Option<String> {
+/// 把**一个**插件清单展开成可搜索命令。
+///
+/// 单独抽出来是给调试环境复用的：调试插件的 id 取**目录名**（`plugin.json.name` 可能写错），
+/// 副标题也要标成「调试插件」——除此之外的匹配规则必须与正式环境**完全一致**，
+/// 否则「在调试里能搜到、装上去搜不到」，这套环境就失去了意义。
+pub fn expand_one(
+    id: &str,
+    manifest: &PluginManifest,
+    subtitle: &str,
+    logo: Option<String>,
+) -> Vec<PluginCommand> {
+    let mut out = Vec::new();
+    for f in &manifest.features {
+        let mut keywords = Vec::new();
+        let mut regexes = Vec::new();
+        let mut any_text = false;
+        for cmd in &f.cmds {
+            match cmd {
+                Cmd::Keyword(kw) => keywords.push(kw.clone()),
+                Cmd::Typed(t) if t.kind == "regex" => {
+                    if let Some(src) = &t.pattern {
+                        match regex::Regex::new(src) {
+                            Ok(re) => regexes.push(re),
+                            Err(e) => ilog!("[iTools] 插件 {id} 的 regex 无效 {src:?}: {e}"),
+                        }
+                    }
+                }
+                // text：任意输入命中（翻译/搜索类）
+                Cmd::Typed(t) if t.kind == "text" => any_text = true,
+                // files/img 首期不参与匹配
+                Cmd::Typed(_) => {}
+            }
+        }
+        if keywords.is_empty() && regexes.is_empty() && !any_text {
+            ilog!(
+                "[iTools] 插件 {id} 的 feature {:?} 无可用触发方式已跳过（cmds 只支持裸字符串关键字、{{\"type\":\"regex\"}}、{{\"type\":\"text\"}}；{{\"type\":\"keyword\"}} 对象形态/files/img 不会被搜到）",
+                f.code
+            );
+            continue;
+        }
+        let title = if f.explain.trim().is_empty() {
+            manifest.description.clone()
+        } else {
+            f.explain.clone()
+        };
+        out.push(PluginCommand {
+            plugin_id: id.to_string(),
+            code: f.code.clone(),
+            title,
+            subtitle: subtitle.to_string(),
+            keywords,
+            regexes,
+            any_text,
+            icon: logo.clone(),
+        });
+    }
+    out
+}
+
+/// 判定 query 对某 feature 的触发类型："regex" / "keyword" / "text"（正式与调试共用同一套规则）。
+pub fn trigger_kind_of(manifest: &PluginManifest, code: &str, query: &str) -> String {
+    let Some(f) = manifest.features.iter().find(|f| f.code == code) else {
+        return "keyword".to_string();
+    };
+    let mut has_text = false;
+    for cmd in &f.cmds {
+        match cmd {
+            Cmd::Typed(t) if t.kind == "regex" => {
+                if let Some(src) = &t.pattern {
+                    if regex::Regex::new(src)
+                        .map(|re| re.is_match(query))
+                        .unwrap_or(false)
+                    {
+                        return "regex".to_string();
+                    }
+                }
+            }
+            Cmd::Typed(t) if t.kind == "text" => has_text = true,
+            _ => {}
+        }
+    }
+    let matcher = SkimMatcherV2::default();
+    let kw_hit = f
+        .cmds
+        .iter()
+        .any(|c| matches!(c, Cmd::Keyword(k) if matcher.fuzzy_match(k, query).is_some()));
+    if kw_hit {
+        return "keyword".to_string();
+    }
+    if has_text && !query.is_empty() {
+        return "text".to_string();
+    }
+    "keyword".to_string()
+}
+
+/// 校验 `plugin.json` 里的 `icon` 是否为**安全的插件目录内相对路径**，是则返回规范化的相对路径。
+///
+/// 为什么必须校验：`icon` 完全由插件作者（Git 安装时即**远端攻击者**）控制，
+/// 而它会被 `dir.join(icon)` 直接拿去读文件。Windows 上 `Path::join` 遇到绝对路径会
+/// **丢弃 dir 直接用参数**，于是 `"icon": "C:/Users/xxx/.ssh/id_rsa"` 能在**用户还没点安装**的
+/// 预览阶段就把沙盒外的任意文件读出来、base64 成 data URL 送进 UI。
+///
+/// 规则：非空、无 NUL、无冒号（挡盘符与 scheme）、不以 `/` `\` 开头、每段不是纯点（`..`）、
+/// 段不以点或空格结尾（Windows 会静默剥掉），且扩展名必须在图片白名单内。
+fn safe_icon_rel(icon: &str) -> Option<PathBuf> {
+    let icon = icon.trim();
+    if icon.is_empty() || icon.contains('\0') || icon.contains(':') {
+        return None;
+    }
+    if icon.starts_with('/') || icon.starts_with('\\') {
+        return None;
+    }
+    let mut out = PathBuf::new();
+    let mut segs = 0usize;
+    for seg in icon.split(['/', '\\']) {
+        if seg.is_empty() || seg == "." {
+            continue;
+        }
+        if seg.chars().all(|c| c == '.') || seg.ends_with('.') || seg.ends_with(' ') {
+            return None;
+        }
+        out.push(seg);
+        segs += 1;
+    }
+    if segs == 0 {
+        return None;
+    }
+    let ext = out.extension()?.to_str()?.to_ascii_lowercase();
+    if !matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "svg" | "webp") {
+        return None;
+    }
+    Some(out)
+}
+
+/// 读插件 logo（png/jpg/svg/webp）为 base64 data URL；失败、越界或过大返回 None。
+///
+/// 三道闸，缺一不可（`list_infos`、搜索索引展开、Git 安装预览都走这一条路）：
+/// 1. [`safe_icon_rel`]：路径形态与扩展名白名单（挡「绝对路径逃出插件目录」）；
+/// 2. `canonicalize` 后必须仍在插件目录内（挡预先埋好的软链接 / 重解析点）；
+/// 3. 限量读取 [`install::MAX_LOGO_BYTES`]：否则 `"icon": "C:/Windows/MEMORY.DMP"` 这类
+///    几 GB 文件会被一次性读进内存再 base64（×1.33 再拷一份）直接 OOM，
+///    而攻击成本只是让用户粘贴一条 URL 点「获取信息」。
+pub(crate) fn read_logo(dir: &Path, icon: &str) -> Option<String> {
     use base64::Engine as _;
-    let path = dir.join(icon);
-    let bytes = std::fs::read(&path).ok()?;
-    let mime = match path.extension().and_then(|e| e.to_str()) {
+    use std::io::Read as _;
+
+    let rel = safe_icon_rel(icon)?;
+    let path = dir.join(&rel);
+    let (canon_dir, canon_path) = (dir.canonicalize().ok()?, path.canonicalize().ok()?);
+    if !canon_path.starts_with(&canon_dir) {
+        ilog!("[iTools] 插件 icon 指向目录外的文件，已忽略：{icon}");
+        return None;
+    }
+    let mut buf = Vec::new();
+    std::fs::File::open(&canon_path)
+        .ok()?
+        .take(install::MAX_LOGO_BYTES + 1)
+        .read_to_end(&mut buf)
+        .ok()?;
+    if buf.len() as u64 > install::MAX_LOGO_BYTES {
+        ilog!(
+            "[iTools] 插件 icon 超过 {} MB 上限，已忽略：{icon}",
+            install::MAX_LOGO_BYTES / 1024 / 1024
+        );
+        return None;
+    }
+    // mime 取自**已校验**的相对路径扩展名（不看 canonicalize 后的真实路径），大小写不敏感
+    let mime = match rel
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .as_deref()
+    {
         Some("jpg") | Some("jpeg") => "image/jpeg",
         Some("svg") => "image/svg+xml",
+        Some("webp") => "image/webp",
         _ => "image/png",
     };
     Some(format!(
         "data:{mime};base64,{}",
-        base64::engine::general_purpose::STANDARD.encode(bytes)
+        base64::engine::general_purpose::STANDARD.encode(buf)
     ))
 }
 
@@ -325,28 +460,115 @@ pub struct EnterInfo {
     pub plugin_id: String,
 }
 
+/// 一次插件运行**会话**：哪个插件 + 是不是调试会话。
+///
+/// 为什么不能只存 id：调试插件与正式插件可能同名（正在开发的就是已装的那个），
+/// 存储 / 文件 / 授权 / 同步四类命令必须靠 `dev` 这个标志决定落到测试库还是正式库。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveSession {
+    pub id: String,
+    /// true = 调试会话（`plugin-dev` 窗口），落测试库与调试沙盒。
+    pub dev: bool,
+}
+
+impl ActiveSession {
+    /// 是否为**同一个会话**：插件 id 与 `dev` 标志都相等才算。
+    ///
+    /// 一切「归属校验」（录音 / 录屏会话的 owner、热键绑定的归属）都必须走这里，**不能只比 id**：
+    /// 「正在开发的就是已装的那个」是最典型的调试场景，此时调试插件与正式插件共用同一个 id，
+    /// 只比 id 会让调试窗里的 demo 通过校验、拿走正式窗里 demo 正在录的麦克风 / 屏幕内容
+    /// （反向亦然）——那是一条实打实的 dev↔prod 越界。
+    pub fn same_as(&self, other: &Self) -> bool {
+        self.id == other.id && self.dev == other.dev
+    }
+
+    /// 用于「按插件存的宿主侧配置」（如窗口尺寸）的作用域键：调试会话加 `dev:` 前缀，
+    /// 免得调试窗口的尺寸把同名正式插件的记忆盖掉。
+    pub fn scope_key(&self) -> String {
+        if self.dev {
+            format!("{}{}", crate::dev::DEV_ID_PREFIX, self.id)
+        } else {
+            self.id.clone()
+        }
+    }
+}
+
 /// 插件运行期注册表（managed state）。plugins 用 RwLock 以支持热重载运行时替换。
 pub struct PluginRegistry {
     /// 插件根目录（项目内 `plugins/`），热重载（reload）时重扫它。
     pub root: PathBuf,
     pub plugins: RwLock<Vec<LoadedPlugin>>,
-    /// 本次进入信息，供 `plugin_take_enter` 拉取（规避事件时序竞态）。
-    pub pending_enter: Mutex<Option<EnterInfo>>,
-    /// 当前插件窗展示的插件 id，供 db/文件命令按插件隔离作用域。
-    pub current: Mutex<Option<String>>,
-    /// 上次进入信息的留存（供插件热更新自动重载窗口时重放 onEnter；区别于「取走即清」的 pending_enter）。
-    pub last_enter: Mutex<Option<EnterInfo>>,
+    /// 插件调试运行时（同一个 Arc 也作为 managed state 供 `dev_*` 命令使用）。
+    /// 挂在这里是为了让 `plugin_*` 命令在**不额外多传一个 State** 的前提下按会话分流。
+    pub dev: Arc<crate::dev::DevRuntime>,
+    /// 各插件窗口待取的进入信息（`plugin_take_enter` 取走即清）。
+    /// **按窗口 label 隔离**：正式窗与调试窗可同时开着，共用一个槽会互相取走对方的上下文。
+    pending_enter: Mutex<HashMap<String, EnterInfo>>,
+    /// 上次进入信息的留存（热更新重载窗口时重放 onEnter），同样按窗口 label 隔离。
+    last_enter: Mutex<HashMap<String, EnterInfo>>,
+    /// 每个插件窗口当前加载的会话：窗口 label → 会话。**这是「当前是哪个插件」的唯一真相**。
+    ///
+    /// 为什么不是一个全局槽：正式插件窗（`plugin`）与调试插件窗（`plugin-dev`）可以同时开着，
+    /// 全局槽会被后打开的那个覆盖——那时调试窗的存储写入会落进正式库、正式插件也可能反过来
+    /// 读到测试库。按窗口存则两边各说各话，隔离才成立。
+    sessions: Mutex<HashMap<String, ActiveSession>>,
 }
 
 impl PluginRegistry {
-    pub fn new(root: PathBuf, plugins: Vec<LoadedPlugin>) -> Self {
+    pub fn new(root: PathBuf, plugins: Vec<LoadedPlugin>, dev: Arc<crate::dev::DevRuntime>) -> Self {
         Self {
             root,
             plugins: RwLock::new(plugins),
-            pending_enter: Mutex::new(None),
-            current: Mutex::new(None),
-            last_enter: Mutex::new(None),
+            dev,
+            pending_enter: Mutex::new(HashMap::new()),
+            last_enter: Mutex::new(HashMap::new()),
+            sessions: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// 登记「某窗口现在跑的是哪个会话」。
+    pub fn set_session(&self, label: &str, session: ActiveSession) {
+        if let Ok(mut g) = self.sessions.lock() {
+            g.insert(label.to_string(), session);
+        }
+    }
+
+    /// 某窗口当前的会话（**存储 / 文件 / 授权 / 同步类命令必须用这个**）。
+    pub fn session_for(&self, label: &str) -> Option<ActiveSession> {
+        self.sessions.lock().ok()?.get(label).cloned()
+    }
+
+    /// 存入某窗口的「本次进入信息」（同时留存一份供热更新重放）。
+    pub fn set_enter(&self, label: &str, info: EnterInfo) {
+        if let Ok(mut g) = self.pending_enter.lock() {
+            g.insert(label.to_string(), info.clone());
+        }
+        if let Ok(mut g) = self.last_enter.lock() {
+            g.insert(label.to_string(), info);
+        }
+    }
+
+    /// 取走某窗口的「本次进入信息」。
+    pub fn take_enter(&self, label: &str) -> Option<EnterInfo> {
+        self.pending_enter.lock().ok()?.remove(label)
+    }
+
+    /// 某会话对应的插件目录（正式查正式注册表，调试查调试注册表）。
+    pub fn session_dir(&self, session: &ActiveSession) -> Option<PathBuf> {
+        if session.dev {
+            self.dev.dir_of(&session.id)
+        } else {
+            self.plugin_dir(&session.id)
+        }
+    }
+
+    /// 该插件**是否还装着**（按 `plugin.json` 的 name 匹配，与目录名一致）。
+    ///
+    /// 返回 `None` 表示**读不出注册表**（锁中毒），调用方必须保守处理：
+    /// 「最近使用」的残留清理就靠它区分「确实已卸载」与「这次读不到」——
+    /// 把后者当成前者会因为一次无关的 panic 把用户的记录整列删光。
+    pub fn has_plugin(&self, id: &str) -> Option<bool> {
+        Some(self.plugins.read().ok()?.iter().any(|p| p.manifest.name == id))
     }
 
     /// 某插件的目录（存在则返回其副本）。
@@ -359,42 +581,31 @@ impl PluginRegistry {
             .map(|p| p.dir.clone())
     }
 
+    /// 某插件**当前已加载的清单**是否声明了该高危能力。
+    ///
+    /// 这是授权判定的第二个条件（见 [`commands::plugin_granted`]）：授权表按插件**名**存，
+    /// 光看「授权过没有」会让同名覆盖安装 / 手工换包的新代码继承旧插件的授权，
+    /// 用上新清单里根本没声明的能力。插件未加载（被删/加载失败）时返回 false——
+    /// 此时它本就不该拿到任何高危能力。
+    pub fn declares_permission(&self, id: &str, perm: &str) -> bool {
+        self.plugins.read().is_ok_and(|g| {
+            g.iter()
+                .any(|p| p.manifest.name == id && p.manifest.permissions.iter().any(|x| x == perm))
+        })
+    }
+
     /// 判定 query 的触发类型："regex" / "keyword" / "text"。
     pub fn trigger_kind(&self, id: &str, code: &str, query: &str) -> String {
-        if let Ok(plugins) = self.plugins.read() {
-            if let Some(p) = plugins.iter().find(|p| p.manifest.name == id) {
-                if let Some(f) = p.manifest.features.iter().find(|f| f.code == code) {
-                    let mut has_text = false;
-                    for cmd in &f.cmds {
-                        match cmd {
-                            Cmd::Typed(t) if t.kind == "regex" => {
-                                if let Some(src) = &t.pattern {
-                                    if regex::Regex::new(src)
-                                        .map(|re| re.is_match(query))
-                                        .unwrap_or(false)
-                                    {
-                                        return "regex".to_string();
-                                    }
-                                }
-                            }
-                            Cmd::Typed(t) if t.kind == "text" => has_text = true,
-                            _ => {}
-                        }
-                    }
-                    let matcher = SkimMatcherV2::default();
-                    let kw_hit = f.cmds.iter().any(|c| {
-                        matches!(c, Cmd::Keyword(k) if matcher.fuzzy_match(k, query).is_some())
-                    });
-                    if kw_hit {
-                        return "keyword".to_string();
-                    }
-                    if has_text && !query.is_empty() {
-                        return "text".to_string();
-                    }
-                }
-            }
-        }
-        "keyword".to_string()
+        self.plugins
+            .read()
+            .ok()
+            .and_then(|plugins| {
+                plugins
+                    .iter()
+                    .find(|p| p.manifest.name == id)
+                    .map(|p| trigger_kind_of(&p.manifest, code, query))
+            })
+            .unwrap_or_else(|| "keyword".to_string())
     }
 
     /// 由内存中的插件清单展开可搜索命令，过滤掉被禁用的插件（不重扫磁盘）。
@@ -418,13 +629,15 @@ impl PluginRegistry {
         self.commands(disabled)
     }
 
-    /// 插件热更新自动重载窗口前调用：把「上次进入信息」重新放回待取队列，
+    /// 插件热更新自动重载窗口前调用：把该窗口「上次进入信息」重新放回待取队列，
     /// 使重载后的插件页 `onEnter` 无缝拿到原 code/query（否则 pending 已被取走，onEnter 收不到上下文）。
     /// 仅在当前无待取信息时重放，避免顶掉一次真实的新打开。
-    pub fn reseed_enter(&self) {
+    pub fn reseed_enter(&self, label: &str) {
         if let (Ok(last), Ok(mut pending)) = (self.last_enter.lock(), self.pending_enter.lock()) {
-            if pending.is_none() {
-                *pending = last.clone();
+            if !pending.contains_key(label) {
+                if let Some(info) = last.get(label) {
+                    pending.insert(label.to_string(), info.clone());
+                }
             }
         }
     }
@@ -439,6 +652,9 @@ impl PluginRegistry {
             Ok(g) => g,
             Err(_) => return Vec::new(),
         };
+        // Git 安装来源来自插件根下的锁文件（`.installed.json`）：手工放入/内置的插件没有记录 → None，
+        // 前端据此判断「能否检查更新 / 查看仓库」，不会把无来源的插件伪装成可更新。
+        let lock = install::read_lock(&self.root);
         plugins
             .iter()
             .map(|p| {
@@ -464,6 +680,8 @@ impl PluginRegistry {
                     granted: granted_map.get(&m.name).cloned().unwrap_or_default(),
                     has_readme: p.dir.join("README.md").exists(),
                     has_settings: p.dir.join("settings.json").exists(),
+                    source: lock.plugins.get(&m.name).map(|e| e.source.clone()),
+                    builtin: install::is_builtin(&m.name),
                 }
             })
             .collect()
@@ -491,6 +709,11 @@ pub struct PluginInfo {
     pub has_readme: bool,
     /// 是否有 settings.json（详情页「设置」tab 是否可用）
     pub has_settings: bool,
+    /// Git 安装来源（来自 `<plugins_root>/.installed.json`）；手工放入或内置的插件为 None，
+    /// 此时**没有**可用的更新来源，UI 不应展示「检查更新 / 查看仓库」。
+    pub source: Option<install::GitSource>,
+    /// 是否为随安装包分发的内置插件（不可被 Git 安装覆盖，随应用整体升级）。
+    pub builtin: bool,
 }
 
 /// 解析插件根目录（可写）：
@@ -516,10 +739,7 @@ pub fn resolve_plugins_root(app: &tauri::AppHandle) -> PathBuf {
     // 打包：可写目录，**每次启动都「缺啥补啥」合并播种**内置插件（随安装包分发）。
     // copy_dir_merge 只补缺失文件、不覆盖用户改动；不再用版本号 marker 作跳过闸门——否则同版本
     // 新增的内置插件（如 deskbox / pixshot）会因 marker 已存在而永远补不上（曾致其加载不了）。
-    let writable = dirs::data_local_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join("itools")
-        .join("plugins");
+    let writable = packaged_plugins_root();
     if let Ok(res) = app.path().resource_dir() {
         let seed = res.join("plugins");
         if seed.is_dir() {
@@ -529,6 +749,30 @@ pub fn resolve_plugins_root(app: &tauri::AppHandle) -> PathBuf {
         }
     }
     writable
+}
+
+/// 「打包分支」的可写插件根：`%LOCALAPPDATA%\itools\plugins`。
+///
+/// 单独抽出来是因为 [`install::init_builtins`] 要靠它判断「本次运行的插件根是不是**会被
+/// 资源目录播种**的那个」——只有那种情况下同名插件才会被内置版本覆盖回来，
+/// 才该被判为「内置、不可 Git 安装覆盖」。两处必须用同一份定义，否则会判反（见 init_builtins）。
+pub fn packaged_plugins_root() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("itools")
+        .join("plugins")
+}
+
+/// `root` 是否就是「会被随包资源播种的那个可写插件根」。
+///
+/// dev 分支（项目 `plugins/`）与 `ITOOLS_PLUGINS_DIR` 覆盖分支都**不播种**，此处返回 false。
+/// 路径经 canonicalize 后比较（大小写 / 短名 / 符号链接都归一）；目录还不存在时退化为字面比较。
+pub fn is_seeded_root(root: &Path) -> bool {
+    let expect = packaged_plugins_root();
+    match (expect.canonicalize(), root.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => expect == root,
+    }
 }
 
 /// 递归「缺啥补啥」复制：已存在文件不覆盖（保留用户改动）；单文件失败不短路，
@@ -563,39 +807,46 @@ fn copy_dir_merge(src: &Path, dst: &Path) -> std::io::Result<()> {
 /// `itplugin://localhost/<plugin_id>/<path>`（Windows 上表现为 `http://itplugin.localhost/...`）
 /// → 读 `<root>/<plugin_id>/<path>`。canonicalize 后校验仍在该插件目录内，拒绝 `..` 穿越。
 pub fn serve(root: &Path, request: &tauri::http::Request<Vec<u8>>) -> tauri::http::Response<Vec<u8>> {
-    let status = |code: u16| {
-        tauri::http::Response::builder()
-            .status(code)
-            .header("Access-Control-Allow-Origin", "*")
-            .body(Vec::new())
-            .unwrap()
-    };
-
     let path = request.uri().path();
     let rel = path.trim_start_matches('/');
     let mut segs = rel.splitn(2, '/');
     let plugin_id = segs.next().unwrap_or("");
     if plugin_id.is_empty() {
-        return status(404);
+        return serve_status(404);
     }
     let sub = match segs.next() {
         Some(s) if !s.is_empty() => s,
         _ => "index.html",
     };
+    serve_file(&root.join(plugin_id), sub)
+}
 
-    let base = root.join(plugin_id);
+/// 只有状态码的响应（404 / 403）。
+pub fn serve_status(code: u16) -> tauri::http::Response<Vec<u8>> {
+    tauri::http::Response::builder()
+        .status(code)
+        .header("Access-Control-Allow-Origin", "*")
+        .body(Vec::new())
+        .unwrap_or_else(|_| tauri::http::Response::new(Vec::new()))
+}
+
+/// 从 `base` 目录里取出 `sub` 并按插件页的统一策略响应（CSP / mime / no-store / 越界防护）。
+///
+/// 正式协议（`itplugin`）与调试协议（`itplugindev`）共用同一份实现——两边的安全策略
+/// 必须逐字节一致，否则「调试能跑、正式被 CSP 拦」这类问题会在上线时才暴露。
+pub fn serve_file(base: &Path, sub: &str) -> tauri::http::Response<Vec<u8>> {
     let target = base.join(sub);
     let (canon_base, canon_target) = match (base.canonicalize(), target.canonicalize()) {
         (Ok(b), Ok(t)) => (b, t),
-        _ => return status(404),
+        _ => return serve_status(404),
     };
     if !canon_target.starts_with(&canon_base) {
-        ilog!("[iTools] 插件资源越界访问被拒: {path}");
-        return status(403);
+        ilog!("[iTools] 插件资源越界访问被拒: {}", target.display());
+        return serve_status(403);
     }
     let bytes = match std::fs::read(&canon_target) {
         Ok(b) => b,
-        Err(_) => return status(404),
+        Err(_) => return serve_status(404),
     };
     let mime = mime_for(&canon_target);
     // 插件页统一【严格 CSP】：允许内联脚本/样式，但掐断一切外联(connect/img)与被框入(frame-ancestors)。
@@ -615,7 +866,7 @@ pub fn serve(root: &Path, request: &tauri::http::Request<Vec<u8>>) -> tauri::htt
         // 不被 WebView2 的启发式缓存卡住旧版本（配合插件热更新，真正「改完即生效」）。
         .header("Cache-Control", "no-store")
         .body(bytes)
-        .unwrap()
+        .unwrap_or_else(|_| serve_status(500))
 }
 
 fn mime_for(path: &Path) -> &'static str {
@@ -640,6 +891,58 @@ fn mime_for(path: &Path) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// R4 回归：只有「打包分支那个会被资源目录播种的可写根」才算内置插件根。
+    ///
+    /// 曾经的写法是「资源目录里有 plugins/ 就登记内置名单」，而 `tauri.conf.json` 配了
+    /// `"resources": { "../plugins": "plugins" }`，dev 下 tauri 同样会把它铺到 `target/debug/plugins`
+    /// ——于是开发机上 5 个示例插件全被判成内置、更新与覆盖安装一律被拒。
+    /// 注意也不能用「seed 目录 != 插件根」判定：dev 下这两个路径本来就是两份不同的拷贝，
+    /// 那样判等于没判。真正的区别是有没有**播种关系**。
+    #[test]
+    fn seeded_root_only_matches_packaged_dir() {
+        let packaged = packaged_plugins_root();
+        assert!(
+            is_seeded_root(&packaged),
+            "打包分支的可写插件根必须被认作「会被随包资源播种」"
+        );
+        // dev 分支用的是项目根的 plugins/（cargo test 的 cwd 是 src-tauri/）
+        let dev = std::env::current_dir().unwrap().join("..").join("plugins");
+        assert!(
+            !is_seeded_root(&dev),
+            "dev 的项目 plugins/ 不该被认作内置根（否则示例插件在开发机上全被锁死）"
+        );
+        // ITOOLS_PLUGINS_DIR 指到别处时同样不播种
+        assert!(!is_seeded_root(&std::env::temp_dir().join("itools-custom-plugins")));
+    }
+
+    /// 归属校验必须**同时**看 id 与 dev 标志：同名的调试插件与正式插件不是同一个会话。
+    ///
+    /// 这条不变量被录音（`plugin_stop_audio_record`）、录屏（`plugin_stop_gif_record`）与
+    /// 插件热键（注册 / 注销）共用——任何一处退化成「只比 id」，
+    /// 调试窗就能接管同名正式插件的麦克风 / 屏幕会话或热键。
+    #[test]
+    fn same_session_requires_matching_dev_flag() {
+        let prod = ActiveSession {
+            id: "demo".into(),
+            dev: false,
+        };
+        let dev = ActiveSession {
+            id: "demo".into(),
+            dev: true,
+        };
+        let other = ActiveSession {
+            id: "other".into(),
+            dev: false,
+        };
+        assert!(prod.same_as(&prod.clone()));
+        assert!(dev.same_as(&dev.clone()));
+        assert!(!prod.same_as(&dev), "同名的调试会话不是同一个会话");
+        assert!(!dev.same_as(&prod), "反向同样不成立");
+        assert!(!prod.same_as(&other));
+        // 作用域键也必须能把两者分开（窗口尺寸等宿主侧配置按它存）
+        assert_ne!(prod.scope_key(), dev.scope_key());
+    }
 
     #[test]
     fn manifest_parse_flexible_cmds() {
@@ -678,5 +981,70 @@ mod tests {
         assert_eq!(item.kind, "plugin");
         assert_eq!(item.action, "plugin");
         assert_eq!(item.target, "base64#main");
+    }
+
+    #[test]
+    fn icon_path_validation() {
+        for ok in ["logo.png", "assets/logo.PNG", "./icon.svg", "a/b/c.webp"] {
+            assert!(safe_icon_rel(ok).is_some(), "本应放行: {ok}");
+        }
+        for bad in [
+            "",
+            "   ",
+            // 绝对路径 / 盘符：Windows 上 dir.join(它) 会**丢弃 dir**，直接读到插件目录外
+            "C:/Users/xxx/.ssh/id_rsa",
+            "C:\\Windows\\MEMORY.DMP",
+            "/etc/passwd",
+            "\\\\server\\share\\x.png",
+            "file:///c:/x.png",
+            // 上跳
+            "../../secret.png",
+            "a/../../b.png",
+            // 非图片扩展名（含无扩展名）
+            "logo",
+            "config.json",
+            "payload.exe",
+            // 段以点/空格结尾（Windows 会静默剥掉，落点与校验不一致）
+            "logo.png.",
+            "assets /logo.png",
+            "assets./logo.png",
+        ] {
+            assert!(safe_icon_rel(bad).is_none(), "本应拒绝: {bad:?}");
+        }
+        assert_eq!(
+            safe_icon_rel("assets//logo.png").unwrap(),
+            PathBuf::from("assets").join("logo.png")
+        );
+    }
+
+    #[test]
+    fn read_logo_stays_in_plugin_dir_and_is_capped() {
+        let base = std::env::temp_dir().join(format!(
+            "itools-logo-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let plugin_dir = base.join("demo");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        // 插件目录**外**的「敏感文件」
+        std::fs::write(base.join("secret.png"), b"TOP-SECRET").unwrap();
+        std::fs::write(plugin_dir.join("logo.png"), b"\x89PNG-ok").unwrap();
+
+        // 正常相对路径可读
+        assert!(read_logo(&plugin_dir, "logo.png").is_some());
+
+        // 绝对路径 / 上跳一律读不到（Windows 上 join 绝对路径会丢弃 dir，这是真实逃逸路径）
+        let outside = base.join("secret.png");
+        assert!(read_logo(&plugin_dir, outside.to_str().unwrap()).is_none());
+        assert!(read_logo(&plugin_dir, "../secret.png").is_none());
+
+        // 超过上限的图片不读（否则远端指定一个几 GB 的本地文件即可 OOM）
+        let big = vec![b'x'; (install::MAX_LOGO_BYTES + 1) as usize];
+        std::fs::write(plugin_dir.join("big.png"), &big).unwrap();
+        assert!(read_logo(&plugin_dir, "big.png").is_none());
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

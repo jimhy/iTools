@@ -1,0 +1,322 @@
+{
+  "AccountState": [
+    "cloudConfigured",
+    "loggedIn",
+    "syncEnabled",
+    "username"
+  ],
+  "AppSettings": [
+    "auto_clear_seconds",
+    "autostart",
+    "background_dim",
+    "background_enabled",
+    "background_image",
+    "custom_apps",
+    "dev_plugin_dirs",
+    "dev_plugin_permissions",
+    "dev_search_visible",
+    "disabled_plugins",
+    "hotkey",
+    "local_launch_items",
+    "opacity",
+    "pin_hotkey",
+    "plugin_mirror_mode",
+    "plugin_permissions",
+    "plugin_window_sizes",
+    "proxy_address",
+    "proxy_enabled",
+    "screenshot_hotkey",
+    "search_placeholder",
+    "separate_hotkey",
+    "sync_endpoint",
+    "theme"
+  ],
+  "CloudUsage": [
+    "bytes",
+    "counts",
+    "total"
+  ],
+  "DataUsage": [
+    "cloud",
+    "cloudReason",
+    "local",
+    "localTotal"
+  ],
+  "DevConfig": [
+    "dbPath",
+    "dirs",
+    "filesRoot",
+    "mock",
+    "searchVisible"
+  ],
+  "DevDirInfo": [
+    "exists",
+    "fixed",
+    "path",
+    "pluginCount"
+  ],
+  "DevFeature": [
+    "code",
+    "explain",
+    "hasRegex",
+    "hasText",
+    "keywords"
+  ],
+  "DevIssue": [
+    "field",
+    "level",
+    "message"
+  ],
+  "DevKv": [
+    "bytes",
+    "key",
+    "updatedAt",
+    "value"
+  ],
+  "DevLogEntry": [
+    "args",
+    "at",
+    "kind",
+    "level",
+    "method",
+    "ms",
+    "ok",
+    "pluginId",
+    "result",
+    "seq"
+  ],
+  "DevMockConfig": [
+    "delayMs",
+    "mode",
+    "pulled",
+    "pushed",
+    "reason"
+  ],
+  "DevPluginInfo": [
+    "author",
+    "cmds",
+    "description",
+    "dir",
+    "featureCount",
+    "features",
+    "granted",
+    "id",
+    "issues",
+    "logo",
+    "name",
+    "permissions",
+    "root",
+    "runnable",
+    "version"
+  ],
+  "EndpointInfo": [
+    "effective",
+    "source",
+    "userValue"
+  ],
+  "GitSource": [
+    "domain",
+    "host",
+    "owner",
+    "pageUrl",
+    "repo",
+    "revision",
+    "subPath",
+    "url"
+  ],
+  "HomeData": [
+    "pinned",
+    "recent",
+    "user"
+  ],
+  "InstallPreview": [
+    "alreadyInstalled",
+    "author",
+    "cmds",
+    "description",
+    "downloadSource",
+    "featureCount",
+    "fileCount",
+    "hashVerified",
+    "installedVersion",
+    "isBuiltin",
+    "logo",
+    "name",
+    "permissions",
+    "readme",
+    "sameSource",
+    "source",
+    "token",
+    "totalBytes",
+    "version",
+    "viaMirror"
+  ],
+  "LaunchItem": [
+    "id",
+    "is_dir",
+    "name",
+    "path"
+  ],
+  "MarketEntry": [
+    "addedAt",
+    "auditReport",
+    "author",
+    "category",
+    "contentHash",
+    "description",
+    "displayName",
+    "fileCount",
+    "homepage",
+    "keywords",
+    "license",
+    "minAppVersion",
+    "name",
+    "path",
+    "permissionReasons",
+    "permissions",
+    "repo",
+    "revision",
+    "revoked",
+    "revokedReason",
+    "screenshots",
+    "sourceRepo",
+    "tags",
+    "version"
+  ],
+  "MarketView": [
+    "error",
+    "installed",
+    "origin",
+    "plugins",
+    "source"
+  ],
+  "MirrorConfigView": [
+    "fetchedAt",
+    "lastError",
+    "mirrors",
+    "mode",
+    "officialLabel",
+    "origin",
+    "serverUrl",
+    "updatedAt",
+    "version"
+  ],
+  "MirrorEntry": [
+    "archive",
+    "healthy",
+    "host",
+    "id",
+    "label",
+    "lastOkAt",
+    "latencyMs",
+    "raw",
+    "unlisted"
+  ],
+  "MirrorTestResult": [
+    "error",
+    "hashChecked",
+    "hashOk",
+    "id",
+    "isMirror",
+    "label",
+    "latencyMs",
+    "ok",
+    "target",
+    "url"
+  ],
+  "NsCount": [
+    "count",
+    "ns"
+  ],
+  "PluginInfo": [
+    "author",
+    "builtin",
+    "cmds",
+    "description",
+    "enabled",
+    "feature_count",
+    "granted",
+    "has_readme",
+    "has_settings",
+    "logo",
+    "name",
+    "permissions",
+    "source",
+    "version"
+  ],
+  "PluginUpdate": [
+    "checked",
+    "currentVersion",
+    "downloadSource",
+    "error",
+    "hasUpdate",
+    "latestVersion",
+    "name",
+    "pinned",
+    "viaMirror"
+  ],
+  "ProfileView": [
+    "avatar_path",
+    "companion_days",
+    "first_use_ts",
+    "nickname",
+    "phone"
+  ],
+  "ProxyTestResult": [
+    "error",
+    "latencyMs",
+    "ok",
+    "target",
+    "viaProxy"
+  ],
+  "SearchItem": [
+    "action",
+    "icon",
+    "id",
+    "kind",
+    "subtitle",
+    "target",
+    "title"
+  ],
+  "SettingsGroup": [
+    "description",
+    "items",
+    "title"
+  ],
+  "SettingsItem": [
+    "default",
+    "description",
+    "key",
+    "label",
+    "max",
+    "min",
+    "mode",
+    "options",
+    "placeholder",
+    "step",
+    "type"
+  ],
+  "SettingsOption": [
+    "label",
+    "value"
+  ],
+  "SettingsSchema": [
+    "groups",
+    "version"
+  ],
+  "SyncResult": [
+    "message",
+    "pulled",
+    "pushed",
+    "reason",
+    "synced"
+  ],
+  "UpdateInfo": [
+    "currentVersion",
+    "hasUpdate",
+    "latestVersion",
+    "msiUrl",
+    "releaseNotes",
+    "releaseUrl"
+  ]
+}

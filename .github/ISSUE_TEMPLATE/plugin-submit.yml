@@ -1,0 +1,103 @@
+name: 插件收录申请
+description: 申请把你的 iTools 插件收录进插件市场
+title: "[收录] "
+labels: ["插件收录"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢你写插件。提交前请先确认下面几条，它们都是**机器会自动校验**的硬性要求，不满足会直接打回：
+
+        - 仓库是**公开**的（私有仓库客户端拉不到）
+        - 插件目录里有 `plugin.json` 与 `index.html`
+        - `plugin.json` 的 `name` 只含小写字母、数字与 `. _ -`，且**全局唯一**
+          （它同时是安装后的目录名和数据命名空间，重名会串数据）
+        - 包里**不含可执行文件**（exe / dll / bat / ps1 / lnk / reg 等一律拒收）
+        - 若 `?path=` 指向子目录，路径每段只能是 ASCII 字母数字与 `. _ -`（**中文和空格目录装不了**）
+
+        > ℹ️ **当前的审核现状（如实告知）**：目前只有**机械校验**（格式、清单一致性、无可执行文件、内容哈希）。
+        > 代码是否有恶意行为、申请的权限是否名副其实，靠维护者人工看。原计划的 AI 自动审核**尚未启用**。
+
+  - type: input
+    id: repo
+    attributes:
+      label: 仓库地址
+      description: 形如 https://github.com/你的用户名/仓库名（不要带 .git 后缀和尾斜杠）
+      placeholder: https://github.com/octocat/itools-hello
+    validations:
+      required: true
+
+  - type: input
+    id: path
+    attributes:
+      label: 插件所在子目录
+      description: 仓库根目录就是插件目录的话，**留空**。monorepo 请填相对路径，如 plugins/hello
+      placeholder: 留空表示仓库根
+
+  - type: input
+    id: revision
+    attributes:
+      label: 提交收录的 commit sha（完整 40 位）
+      description: >
+        必须是完整 40 位 sha，不能写分支名或 tag。客户端只会安装这个**确切的 commit** ——
+        你之后往分支上推代码不会自动到达用户，需要再次提审。这是保证「用户装到的就是审核过的那份」的关键。
+      placeholder: e35127407012ccdadcbda955674f76822187ef7a
+    validations:
+      required: true
+
+  - type: input
+    id: displayName
+    attributes:
+      label: 展示名称
+      description: 市场里显示的名字，可用中文
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: 一句话说明
+      description: 这个插件做什么（4~200 字）
+    validations:
+      required: true
+
+  - type: dropdown
+    id: category
+    attributes:
+      label: 分类
+      options: ["效率", "开发", "文本", "图像", "系统", "网络", "娱乐", "其它"]
+    validations:
+      required: true
+
+  - type: textarea
+    id: permissions
+    attributes:
+      label: 申请的高危能力与用途
+      description: >
+        `plugin.json` 里 permissions 声明的每一项，都要在这里说明**具体用来做什么**。
+        申请了却说不出用途、或代码里根本没用到的，会被拒绝。没申请任何高危能力就填「无」。
+      placeholder: |
+        network：调用 xxx 接口获取汇率数据
+        runCommand：调用系统的 ffmpeg 转码
+    validations:
+      required: true
+
+  - type: input
+    id: sourceRepo
+    attributes:
+      label: 源码仓库（如果上面提交的是构建产物）
+      description: >
+        插件若是 Vite / webpack 打包后的产物，必须提供可复现的源码地址 —— 压缩混淆过的代码没法审。
+        直接手写、无需构建的插件请留空。
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: 确认
+      options:
+        - label: 我已确认仓库是公开的，且上面填的 commit 里包含完整可运行的插件
+          required: true
+        - label: 我理解客户端只安装这个确切 commit，后续更新需要重新提审
+          required: true
+        - label: 插件不收集用户数据；如有收集，我已在插件的 README 中明确告知
+          required: true

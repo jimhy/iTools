@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-dev-list-plugins"
+description = "Enables the dev_list_plugins command without any pre-configured scope."
+commands.allow = ["dev_list_plugins"]
+
+[[permission]]
+identifier = "deny-dev-list-plugins"
+description = "Denies the dev_list_plugins command without any pre-configured scope."
+commands.deny = ["dev_list_plugins"]

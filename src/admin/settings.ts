@@ -1,4 +1,5 @@
-//! 设置面板：使用偏好 / 主题样式 / 高级设置 / 网络代理。
+//! 设置面板：使用偏好 / 主题样式 / 高级设置 / 关于。
+//! 网络相关（云同步服务器、网络代理）已迁至「网络设置」页（admin/network.ts）。
 //! 改动即写入本地 settings 副本并防抖保存；主题切换即时应用。
 
 import type { AdminCtx } from "./main";
@@ -6,6 +7,18 @@ import type { AppSettings, Theme } from "../types";
 import { AUTO_CLEAR_NEVER } from "../types";
 import { h, makeSwitch, bindHotkeyRecorder, formatHotkey } from "./ui";
 import * as api from "./api";
+
+/** 把 invoke 抛出的东西转成可读文本。Tauri 的 `Err(String)` 到前端就是个字符串，
+ *  这里**不**把它替换成「操作失败」一类的自造文案 —— 后端给的真实原因才是用户要的。 */
+function errText(err: unknown): string {
+  if (typeof err === "string") return err;
+  if (err instanceof Error) return err.message;
+  try {
+    return JSON.stringify(err);
+  } catch {
+    return String(err);
+  }
+}
 
 export async function renderSettings(root: HTMLElement, ctx: AdminCtx): Promise<void> {
   let settings: AppSettings;
@@ -21,16 +34,31 @@ export async function renderSettings(root: HTMLElement, ctx: AdminCtx): Promise<
   let saveTimer: number | undefined;
   function scheduleSave(): void {
     window.clearTimeout(saveTimer);
-    saveTimer = window.setTimeout(save, 300);
+    saveTimer = window.setTimeout(() => {
+      saveTimer = undefined;
+      void save();
+    }, 300);
   }
   async function save(): Promise<void> {
     try {
       await api.saveSettings(settings);
     } catch (err) {
       console.error("save_settings failed", err);
-      ctx.toast("保存失败");
+      // 后端给的是可照做的中文原因（「已开启网络代理，但没有填写代理地址（形如 127.0.0.1:7897）」
+      // 「代理端口不合法：应为 1~65535 的数字」…），吞成「保存失败」等于把唯一的修正指引丢掉。
+      ctx.toast(errText(err));
     }
   }
+
+  // 切走本面板时，把还在 300ms 防抖窗口里的改动立刻落盘。
+  // 否则「刚改完代理地址就点『去账号页修改』」会静默丢掉最后一次编辑 ——
+  // 本页新增的跳转按钮正是这样一条「编辑完立刻离开」的路径。
+  ctx.registerDispose(() => {
+    if (saveTimer === undefined) return;
+    window.clearTimeout(saveTimer);
+    saveTimer = undefined;
+    void save();
+  });
 
   // ---------- 布局原语 ----------
   function group(title: string, ...rows: HTMLElement[]): HTMLElement {
@@ -251,28 +279,6 @@ export async function renderSettings(root: HTMLElement, ctx: AdminCtx): Promise<
       }),
     ),
   );
-
-  // ---------- 网络代理 ----------
-  const proxyAddr = h("input", { class: "field-input-sm", type: "text", placeholder: "如 127.0.0.1:7890" });
-  proxyAddr.value = settings.proxy_address;
-  proxyAddr.addEventListener("input", () => {
-    settings.proxy_address = proxyAddr.value;
-    scheduleSave();
-  });
-
-  const proxy = group(
-    "网络代理",
-    row(
-      "启用代理",
-      "为插件网络请求走代理（演示）",
-      makeSwitch(settings.proxy_enabled, (checked) => {
-        settings.proxy_enabled = checked;
-        scheduleSave();
-      }),
-    ),
-    row("代理地址", "host:port 形式", proxyAddr),
-  );
-
   // ---------- 关于 iTools ----------
   // 进入即用 get_app_version 显示当前版本（本地瞬时）；「检查更新」再联网比对 Gitee Releases。
   const versionBadge = h("span", { class: "value-badge", text: "…" });
@@ -359,6 +365,8 @@ export async function renderSettings(root: HTMLElement, ctx: AdminCtx): Promise<
     statusRow,
   );
 
-  root.appendChild(h("div", { class: "settings-scroll" }, usage, theme, advanced, proxy, about));
+  root.appendChild(
+    h("div", { class: "settings-scroll" }, usage, theme, advanced, about),
+  );
   void refreshThumb();
 }

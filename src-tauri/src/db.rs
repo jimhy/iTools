@@ -155,6 +155,32 @@ impl Db {
             .collect()
     }
 
+    /// 列某插件的全部 (key, value)（升序）。供调试环境的存储查看器一次取全，
+    /// 避免「先 keys 再逐个 get」的 N+1 次加锁查询。
+    pub fn pkv_entries(&self, plugin: &str) -> Vec<(String, String)> {
+        let Ok(conn) = self.conn.lock() else {
+            return Vec::new();
+        };
+        let Ok(mut stmt) = conn.prepare("SELECT k,v FROM plugin_kv WHERE plugin_id=?1 ORDER BY k")
+        else {
+            return Vec::new();
+        };
+        let Ok(rows) = stmt.query_map([plugin], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        }) else {
+            return Vec::new();
+        };
+        rows.flatten().collect()
+    }
+
+    /// 清空某插件的全部 KV（调试环境「清空测试数据」用；正式环境的删插件走 delete_plugin）。
+    pub fn pkv_clear(&self, plugin: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|_| "存储锁获取失败".to_string())?;
+        conn.execute("DELETE FROM plugin_kv WHERE plugin_id=?1", [plugin])
+            .map(|_| ())
+            .map_err(|e| format!("清空插件存储失败: {e}"))
+    }
+
     // ================= plugin_data：itools.data.*（value 为 JSON 文本，带 updated_at/dirty） =================
 
     /// 读一条记录的 value（JSON 文本），不存在返回 None。
@@ -213,6 +239,37 @@ impl Db {
             .collect()
     }
 
+    /// 列某 ns 下全部 (key, value_json, updated_at)（升序）。供调试环境的存储查看器展示
+    /// 值与更新时间——`pd_keys` 只给 key，逐条再查一次既慢又拿不到时间戳。
+    pub fn pd_entries(&self, ns: &str) -> Vec<(String, String, u64)> {
+        let Ok(conn) = self.conn.lock() else {
+            return Vec::new();
+        };
+        let Ok(mut stmt) =
+            conn.prepare("SELECT k,v,updated_at FROM plugin_data WHERE ns=?1 ORDER BY k")
+        else {
+            return Vec::new();
+        };
+        let Ok(rows) = stmt.query_map([ns], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?.max(0) as u64,
+            ))
+        }) else {
+            return Vec::new();
+        };
+        rows.flatten().collect()
+    }
+
+    /// 清空某命名空间的全部记录（调试环境「清空测试数据」用）。
+    pub fn pd_clear_ns(&self, ns: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|_| "存储锁获取失败".to_string())?;
+        conn.execute("DELETE FROM plugin_data WHERE ns=?1", [ns])
+            .map(|_| ())
+            .map_err(|e| format!("清空本地数据失败: {e}"))
+    }
+
     /// 待上行（dirty）记录：返回 (key, value_json, updated_at)。
     pub fn pd_dirty(&self, ns: &str) -> Vec<(String, String, u64)> {
         let Ok(conn) = self.conn.lock() else {
@@ -248,6 +305,23 @@ impl Db {
             .map_err(|e| format!("清除 dirty 失败: {e}"))?;
         }
         Ok(())
+    }
+
+    /// 统计每个命名空间的**本地**记录条数（ns, count）。供「我的数据」页展示本地已用。
+    /// 空表返回空 Vec；仅统计真实存在的行，不臆造。
+    pub fn pd_counts(&self) -> Vec<(String, u64)> {
+        let Ok(conn) = self.conn.lock() else {
+            return Vec::new();
+        };
+        let Ok(mut stmt) = conn.prepare("SELECT ns, COUNT(*) FROM plugin_data GROUP BY ns") else {
+            return Vec::new();
+        };
+        let Ok(rows) = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?.max(0) as u64))
+        }) else {
+            return Vec::new();
+        };
+        rows.flatten().collect()
     }
 
     /// 列出 `plugin_data` 表中出现过的所有命名空间（去重）。供「立即同步」全量遍历真实数据集。
@@ -414,10 +488,22 @@ mod tests {
         ka.sort();
         assert_eq!(ka, vec!["k1".to_string(), "k2".to_string()]);
         assert_eq!(db.pkv_keys("a", "k1"), vec!["k1".to_string()]);
+        // entries 一次取全（按 key 升序）
+        assert_eq!(
+            db.pkv_entries("a"),
+            vec![
+                ("k1".to_string(), "\"v1\"".to_string()),
+                ("k2".to_string(), "\"v2\"".to_string())
+            ]
+        );
         db.pkv_remove("a", "k1").unwrap();
         assert_eq!(db.pkv_get("a", "k1"), None);
         // b 不受影响
         assert_eq!(db.pkv_get("b", "k1").as_deref(), Some("\"other\""));
+        // 清空只清一个插件
+        db.pkv_clear("a").unwrap();
+        assert!(db.pkv_entries("a").is_empty());
+        assert_eq!(db.pkv_entries("b").len(), 1, "清空 a 不得动到 b");
     }
 
     #[test]
@@ -459,5 +545,18 @@ mod tests {
         assert_eq!(keys, vec!["a".to_string(), "c".to_string()]);
         // pd_namespaces 去重列出当前命名空间
         assert_eq!(db.pd_namespaces(), vec!["plugin:x".to_string()]);
+        // pd_counts：当前 plugin:x 下有 a、c 两条
+        assert_eq!(db.pd_counts(), vec![("plugin:x".to_string(), 2u64)]);
+        // pd_entries：一次取全（含 updated_at），供调试存储查看器
+        let entries = db.pd_entries("plugin:x");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].0, "a");
+        assert_eq!(entries[0].1, "999");
+        assert_eq!(entries[0].2, 200);
+        // pd_clear_ns：只清该命名空间
+        db.pd_set("plugin:y", "keep", "1", 1, false).unwrap();
+        db.pd_clear_ns("plugin:x").unwrap();
+        assert!(db.pd_entries("plugin:x").is_empty());
+        assert_eq!(db.pd_entries("plugin:y").len(), 1, "清空 x 不得动到 y");
     }
 }

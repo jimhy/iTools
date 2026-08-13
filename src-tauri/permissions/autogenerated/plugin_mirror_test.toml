@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-mirror-test"
+description = "Enables the plugin_mirror_test command without any pre-configured scope."
+commands.allow = ["plugin_mirror_test"]
+
+[[permission]]
+identifier = "deny-plugin-mirror-test"
+description = "Denies the plugin_mirror_test command without any pre-configured scope."
+commands.deny = ["plugin_mirror_test"]

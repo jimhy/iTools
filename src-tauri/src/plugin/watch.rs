@@ -71,6 +71,11 @@ fn plugin_fingerprints(root: &Path) -> Fingerprints {
             continue;
         }
         let id = entry.file_name().to_string_lossy().into_owned();
+        // 跳过 `.` 开头的内部目录（`.staging` 安装暂存、`.git` 等）：安装/更新期间暂存目录
+        // 里的文件在不断变化，纳入指纹会让每次安装都误触发一轮全量重扫与插件窗口重载。
+        if id.starts_with('.') {
+            continue;
+        }
         out.insert(id, dir_hash(&dir));
     }
     out
@@ -80,12 +85,18 @@ fn plugin_fingerprints(root: &Path) -> Fingerprints {
 /// - 纳入相对路径 → 纯重命名也会改变指纹；
 /// - 大小 / mtime 纳秒 → 内容改动被检出（含「同秒内、同大小」的编辑）；
 /// - 增 / 删文件 → 参与异或的项集合变化，指纹随之变化；
-/// - 跳过 `node_modules` / `.git`：无关的大目录不必遍历。
+/// - 跳过 `node_modules` 与一切 `.` 开头的条目（`.git`、`.staging`、`.installed.json` 等）：
+///   无关的大目录不必遍历，安装暂存与元数据文件也不该触发插件热重载。
 fn dir_hash(dir: &Path) -> u64 {
     let mut acc: u64 = 0;
-    let walker = walkdir::WalkDir::new(dir)
-        .into_iter()
-        .filter_entry(|e| !matches!(e.file_name().to_str(), Some("node_modules") | Some(".git")));
+    let walker = walkdir::WalkDir::new(dir).into_iter().filter_entry(|e| {
+        // depth 0 是插件目录本身，永远保留（否则整棵树都被过滤掉）
+        e.depth() == 0
+            || match e.file_name().to_str() {
+                Some(n) => n != "node_modules" && !n.starts_with('.'),
+                None => true,
+            }
+    });
     for entry in walker.flatten() {
         if !entry.file_type().is_file() {
             continue;
@@ -125,7 +136,7 @@ fn changed_plugins(old: &Fingerprints, new: &Fingerprints) -> Vec<String> {
 
 /// 目录变更处理：重扫插件 + 刷新搜索索引；仅当**当前打开的插件自身**变化时才重载其窗口。
 fn on_change(app: &AppHandle, changed: &[String]) {
-    let (Some(registry), Some(index), Some(settings)) = (
+    let (Some(registry), Some(_index), Some(settings)) = (
         app.try_state::<PluginRegistry>(),
         app.try_state::<SearchIndex>(),
         app.try_state::<SettingsStore>(),
@@ -134,9 +145,10 @@ fn on_change(app: &AppHandle, changed: &[String]) {
     };
 
     // 1) 重扫清单 + 刷新可搜索命令（任一插件的新增 / 删除 / 改关键词 / 改版本都要即时反映）
+    //    经 dev::apply_plugin_search 写索引：否则会把「调试插件进主搜索」的那部分冲掉。
     let cmds = registry.reload(&settings.get().disabled_plugins);
     let n = cmds.len();
-    index.set_plugin_commands(cmds);
+    crate::dev::apply_plugin_search(app, cmds);
     ilog!(
         "[iTools] 插件目录变更 {:?} → 自动重载：{n} 条可搜索命令",
         changed
@@ -146,11 +158,11 @@ fn on_change(app: &AppHandle, changed: &[String]) {
     //    避免改 / 删别的插件时打断用户正在用的这个窗口（消除跨插件放大）。
     //    注：当前插件自身被改属开发者主动改代码，重载即其预期；重载会重置该页未持久化的输入
     //    （热更新固有行为），重载前重放 onEnter 让 code/query 恢复。
-    let current = registry.current.lock().ok().and_then(|g| g.clone());
-    if let Some(cur) = current {
+    let current = registry.session_for(crate::plugin::commands::PLUGIN_WINDOW_LABEL);
+    if let Some(cur) = current.map(|s| s.id) {
         if changed.iter().any(|id| id == &cur) {
-            if let Some(win) = app.get_webview_window("plugin") {
-                registry.reseed_enter();
+            if let Some(win) = app.get_webview_window(crate::plugin::commands::PLUGIN_WINDOW_LABEL) {
+                registry.reseed_enter(crate::plugin::commands::PLUGIN_WINDOW_LABEL);
                 if let Err(e) = win.eval("location.reload()") {
                     ilog!("[iTools] 刷新插件窗口失败：{e}");
                 }

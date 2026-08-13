@@ -5,7 +5,8 @@
 //! - **用户值**：存 `%LOCALAPPDATA%\itools\plugin-data\<id>\settings.json`（与业务 `kv.json` 分开、
 //!   保留原始 JSON 类型）。首版纯本地；此存储层可后续切到可同步的 `DataStore` 而不改契约。
 //! - **管理中心**（main/admin 窗口）按 `name` 显式读写：`plugin_settings_schema/values/set/reset`。
-//! - **插件运行时**（plugin 窗口）经 `current_plugin` 隔离、**只读**合并值：`plugin_get_settings/plugin_get_setting`。
+//! - **插件运行时**（plugin / plugin-dev 窗口）按**调用窗口的插件会话**隔离、**只读**合并值：
+//!   `plugin_get_settings/plugin_get_setting`；调试会话只给 schema 默认值（不读正式插件的用户值）。
 //! - 管理中心写入后 emit `plugin-settings-changed`（payload=插件 id），运行中的插件页据此实时刷新
 //!   （`itools.settings.onChange`）。
 //!
@@ -18,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use tauri::{AppHandle, Manager, State};
 
-use super::commands::current_plugin;
+use super::commands::caller_session;
 use super::PluginRegistry;
 
 // ==================== schema 结构 ====================
@@ -169,8 +170,20 @@ fn save_values(id: &str, map: &Map<String, Value>) -> Result<(), String> {
 /// 合并「schema 默认值 + 用户值」：先铺 schema 里每项的 default（非 null），再用用户值覆盖。
 /// 这就是插件运行时 `itools.settings.get/all` 读到的最终值——与管理中心写入的是同一份。
 fn merged_values(registry: &PluginRegistry, id: &str) -> Map<String, Value> {
+    merged_values_in(registry.plugin_dir(id), id, true)
+}
+
+/// 合并实现体。`with_user_values=false` 时**只取 schema 默认值**——调试会话用这条路：
+/// 用户设定值存在正式插件的 `plugin-data/<id>/settings.json` 里，调试插件与同名正式插件
+/// 共用一个 id，读它就会把正式插件的用户设置串给调试插件（而调试环境目前没有设置编辑入口，
+/// 写更是绝不允许）。所以调试会话只给 `settings.json` 里的默认值，且在报告里如实说明。
+fn merged_values_in(
+    dir: Option<PathBuf>,
+    id: &str,
+    with_user_values: bool,
+) -> Map<String, Value> {
     let mut out = Map::new();
-    if let Some(dir) = registry.plugin_dir(id) {
+    if let Some(dir) = dir {
         if let Ok(Some(raw)) = read_schema(&dir) {
             for group in raw.normalized_groups() {
                 for item in group.items {
@@ -181,13 +194,15 @@ fn merged_values(registry: &PluginRegistry, id: &str) -> Map<String, Value> {
             }
         }
     }
-    if let Ok(user) = load_values(id) {
-        for (k, v) in user {
-            // null 视为「未设定」→ 保留 schema 默认（number 输入框清空会存 null，不应盖掉默认值）
-            if v.is_null() {
-                continue;
+    if with_user_values {
+        if let Ok(user) = load_values(id) {
+            for (k, v) in user {
+                // null 视为「未设定」→ 保留 schema 默认（number 输入框清空会存 null，不应盖掉默认值）
+                if v.is_null() {
+                    continue;
+                }
+                out.insert(k, v);
             }
-            out.insert(k, v);
         }
     }
     out
@@ -264,25 +279,39 @@ pub fn plugin_settings_reset(app: AppHandle, name: String) -> Result<(), String>
     Ok(())
 }
 
-// ==================== 命令：插件运行时（current_plugin 隔离，只读） ====================
+// ==================== 命令：插件运行时（按调用窗口的会话隔离，只读） ====================
+
+/// 本次调用该读哪份设置：正式会话 = schema 默认 + 用户值；
+/// **调试会话 = 只读调试插件目录里 `settings.json` 的默认值**（理由见 [`merged_values_in`]）。
+fn session_values(
+    webview: &tauri::Webview,
+    registry: &PluginRegistry,
+) -> Result<Map<String, Value>, String> {
+    let session = caller_session(webview, registry)?;
+    Ok(merged_values_in(
+        registry.session_dir(&session),
+        &session.id,
+        !session.dev,
+    ))
+}
 
 /// 插件读取自己的全部设置（合并 default + 用户值）。供 `itools.settings.all()`。
 #[tauri::command]
 pub fn plugin_get_settings(
+    webview: tauri::Webview,
     registry: State<'_, PluginRegistry>,
 ) -> Result<Map<String, Value>, String> {
-    let id = current_plugin(&registry)?;
-    Ok(merged_values(&registry, &id))
+    session_values(&webview, &registry)
 }
 
 /// 插件读取自己的某个设置项（不存在返回 JSON null）。供 `itools.settings.get(key)`。
 #[tauri::command]
 pub fn plugin_get_setting(
     key: String,
+    webview: tauri::Webview,
     registry: State<'_, PluginRegistry>,
 ) -> Result<Value, String> {
-    let id = current_plugin(&registry)?;
-    Ok(merged_values(&registry, &id)
+    Ok(session_values(&webview, &registry)?
         .get(&key)
         .cloned()
         .unwrap_or(Value::Null))

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-mirror-config"
+description = "Enables the plugin_mirror_config command without any pre-configured scope."
+commands.allow = ["plugin_mirror_config"]
+
+[[permission]]
+identifier = "deny-plugin-mirror-config"
+description = "Denies the plugin_mirror_config command without any pre-configured scope."
+commands.deny = ["plugin_mirror_config"]

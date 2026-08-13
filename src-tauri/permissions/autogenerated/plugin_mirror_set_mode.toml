@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-mirror-set-mode"
+description = "Enables the plugin_mirror_set_mode command without any pre-configured scope."
+commands.allow = ["plugin_mirror_set_mode"]
+
+[[permission]]
+identifier = "deny-plugin-mirror-set-mode"
+description = "Denies the plugin_mirror_set_mode command without any pre-configured scope."
+commands.deny = ["plugin_mirror_set_mode"]

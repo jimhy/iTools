@@ -6,6 +6,10 @@
 //!
 //! 加固（据评审）：stop 全 async——join 与 CPU 密集的 GIF 量化编码都放 blocking 线程池，不冻结 UI；
 //! stop 带归属校验；自然满帧终止的旧会话在下次 start 时回收。
+//!
+//! 归属校验用的是**完整会话身份**（插件 id + `dev` 标志，见 [`ActiveSession::same_as`]），不是裸 id：
+//! 调试插件与同名正式插件共用一个 id，只比 id 会让调试窗里的 demo 停掉正式窗里 demo 的录屏
+//! 并拿走那段屏幕内容（反向亦然）。
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -15,8 +19,8 @@ use std::time::{Duration, Instant};
 use tauri::State;
 
 use super::capture::require_capture;
-use super::commands::{current_plugin, png_to_b64};
-use super::PluginRegistry;
+use super::commands::{caller_session, png_to_b64};
+use super::{ActiveSession, PluginRegistry};
 use crate::settings::SettingsStore;
 
 const TARGET_MS: u64 = 200; // ~5fps
@@ -25,7 +29,8 @@ const MAX_W: u32 = 640;
 
 struct RecSession {
     stop: Arc<AtomicBool>,
-    owner: String,
+    /// 录屏会话的归属者：**整个会话身份**（id + dev），不是裸 id。见模块头注释。
+    owner: ActiveSession,
     handle: JoinHandle<Result<Vec<image::RgbaImage>, String>>,
 }
 
@@ -37,12 +42,12 @@ pub struct RecordState {
 /// 开始录屏（主屏，GIF）。已在录则报错；自然满帧终止的旧会话会被回收后再启。需 screen-capture 授权。
 #[tauri::command]
 pub fn plugin_start_gif_record(
+    webview: tauri::Webview,
     registry: State<'_, PluginRegistry>,
     settings: State<'_, SettingsStore>,
     state: State<'_, RecordState>,
 ) -> Result<(), String> {
-    require_capture(&registry, &settings)?;
-    let owner = current_plugin(&registry)?;
+    let owner = require_capture(&webview, &registry, &settings)?;
     let mut guard = state.session.lock().unwrap();
     if guard.as_ref().map(|s| s.handle.is_finished()).unwrap_or(false) {
         let _ = guard.take();
@@ -74,16 +79,20 @@ pub fn plugin_start_gif_record(
 /// 停止录屏，返回 base64 GIF。带归属校验；join + GIF 编码不在 UI 线程做。
 #[tauri::command]
 pub async fn plugin_stop_gif_record(
+    webview: tauri::Webview,
     registry: State<'_, PluginRegistry>,
     state: State<'_, RecordState>,
 ) -> Result<String, String> {
     // 取会话 + 归属校验原子完成（避免与并发 start 的竞态覆盖）
-    let cur = current_plugin(&registry)?;
+    let cur = caller_session(&webview, &registry)?;
     let session = {
         let mut g = state.session.lock().unwrap();
         match g.as_ref() {
             None => return Err("当前没有录屏".to_string()),
-            Some(s) if s.owner != cur => return Err("该录屏会话不属于本插件".to_string()),
+            // 归属比对**带 dev 标志**：同名的调试会话与正式会话是两个不同的归属者
+            Some(s) if !s.owner.same_as(&cur) => {
+                return Err("该录屏会话不属于本插件".to_string())
+            }
             _ => g.take().unwrap(),
         }
     };

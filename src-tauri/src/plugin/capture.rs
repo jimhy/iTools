@@ -14,20 +14,25 @@ use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};
 use tokio::sync::oneshot;
 
-use super::commands::{current_plugin, plugin_granted, png_to_b64, rgba_to_bmp, rgba_to_png};
-use super::PluginRegistry;
+use super::commands::{caller_session, plugin_granted, png_to_b64, rgba_to_bmp, rgba_to_png};
+use super::{ActiveSession, PluginRegistry};
 use crate::settings::SettingsStore;
 
-/// 校验当前活动插件已获 screen-capture 授权。
+/// 校验**发起调用的窗口**当前的插件会话已获 screen-capture 授权，并返回**该会话**。
+/// 调试会话查的是独立的调试授权表（见 [`plugin_granted`]）。
+///
+/// 返回整个 [`ActiveSession`]（而不是裸 id）是给 `record.rs` 用的：录屏会话的归属者必须
+/// 带上 `dev` 标志，否则同名的调试插件与正式插件会互相停掉对方的录屏并拿走那段屏幕内容。
 pub(crate) fn require_capture(
+    webview: &tauri::Webview,
     registry: &PluginRegistry,
     settings: &SettingsStore,
-) -> Result<(), String> {
-    let id = current_plugin(registry)?;
-    if !plugin_granted(settings, &id, "screen-capture") {
+) -> Result<ActiveSession, String> {
+    let session = caller_session(webview, registry)?;
+    if !plugin_granted(settings, registry, &session, "screen-capture") {
         return Err("插件未获授权截屏（请在「插件管理」里授权 screen-capture）".to_string());
     }
-    Ok(())
+    Ok(session)
 }
 
 /// 截取主屏为 RGBA（xcap::Monitor 不是 Send，务必在此函数内用完即弃，勿跨 .await 持有）。
@@ -177,7 +182,7 @@ fn capture_gdi(x: i32, y: i32, w: i32, h: i32) -> Result<Vec<u8>, String> {
         bi.bmiHeader.biHeight = -h;
         bi.bmiHeader.biPlanes = 1;
         bi.bmiHeader.biBitCount = 32;
-        bi.bmiHeader.biCompression = BI_RGB as u32;
+        bi.bmiHeader.biCompression = BI_RGB;
         // 像素直接写进 buf 头之后
         let lines = GetDIBits(
             mem,
@@ -231,7 +236,7 @@ fn capture_gdi_raw(x: i32, y: i32, w: i32, h: i32) -> Result<Vec<u8>, String> {
         bi.bmiHeader.biHeight = -h;
         bi.bmiHeader.biPlanes = 1;
         bi.bmiHeader.biBitCount = 32;
-        bi.bmiHeader.biCompression = BI_RGB as u32;
+        bi.bmiHeader.biCompression = BI_RGB;
         let lines = GetDIBits(
             mem,
             bmp,
@@ -447,10 +452,11 @@ pub struct DisplayInfo {
 /// 列出所有显示器（虚拟屏坐标 + 缩放）。需 screen-capture 授权。
 #[tauri::command]
 pub fn plugin_list_displays(
+    webview: tauri::Webview,
     registry: State<'_, PluginRegistry>,
     settings: State<'_, SettingsStore>,
 ) -> Result<Vec<DisplayInfo>, String> {
-    require_capture(&registry, &settings)?;
+    require_capture(&webview, &registry, &settings)?;
     let monitors = xcap::Monitor::all().map_err(|e| e.to_string())?;
     let out = monitors
         .into_iter()
@@ -472,10 +478,11 @@ pub fn plugin_list_displays(
 #[tauri::command]
 pub fn plugin_capture_full(
     display_id: Option<u32>,
+    webview: tauri::Webview,
     registry: State<'_, PluginRegistry>,
     settings: State<'_, SettingsStore>,
 ) -> Result<String, String> {
-    require_capture(&registry, &settings)?;
+    require_capture(&webview, &registry, &settings)?;
     let img = {
         let mon = match display_id {
             Some(want) => xcap::Monitor::all()
@@ -537,16 +544,19 @@ impl CaptureFlow {
 pub async fn plugin_capture_region(
     full: Option<bool>,
     app: tauri::AppHandle,
+    webview: tauri::Webview,
     registry: State<'_, PluginRegistry>,
     settings: State<'_, SettingsStore>,
     flow: State<'_, CaptureFlow>,
 ) -> Result<RegionOut, String> {
-    require_capture(&registry, &settings)?;
+    require_capture(&webview, &registry, &settings)?;
     // 在途守卫：已有一次 captureRegion 在跑就拒绝（避免并发踩同一 slot/覆盖窗）
     if flow.busy.swap(true, Ordering::SeqCst) {
         return Err("截图正在进行中".to_string());
     }
-    let plugin_win = app.get_webview_window("plugin");
+    // 要藏的是**发起调用的那个窗口**（正式插件窗 / 调试插件窗），否则调试时会把
+    // 正式插件窗藏起来、调试窗自己反倒被抓进截图里。
+    let plugin_win = app.get_webview_window(webview.label());
     // 面板截图前是否可见：热键唤起时面板通常已隐藏 → 全程不显示它（不闪面板），事后也不弹出来
     let was_visible = plugin_win
         .as_ref()
@@ -632,8 +642,6 @@ async fn capture_region_inner(
     // 冻结「光标所在」的显示器：优先 GDI BitBlt（返回 BGRA→直封 BMP，无压缩无转换），退回 xcap。
     let (cx, cy) = cursor_pos();
     let (bmp, px, py, pw, ph) = freeze_target(app, cx, cy)?;
-    let iw = pw;
-    let ih = ph;
 
     let (tx, rx) = oneshot::channel::<Option<RegionResult>>();
     {
@@ -648,7 +656,7 @@ async fn capture_region_inner(
         // 这一步省掉了每次重建 WebView2 + 重新加载页面的几百 ms（这是原来 2 秒延迟的大头）。
         let _ = win.set_position(tauri::PhysicalPosition::new(px, py));
         let _ = win.set_size(tauri::PhysicalSize::new(pw, ph));
-        let _ = win.eval(&format!("window.__begin && window.__begin({}, {})", full, bust));
+        let _ = win.eval(format!("window.__begin && window.__begin({}, {})", full, bust));
     } else {
         // 首次：建**隐藏**窗；页面初始化脚本自会 __begin(载图→就绪→capture_overlay_ready 显示)
         let url_str = format!(

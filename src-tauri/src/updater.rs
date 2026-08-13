@@ -10,13 +10,22 @@
 //! 安全：**访问令牌绝不写进源码/二进制**。Gitee token 在运行期从环境变量
 //! `ITOOLS_GITEE_TOKEN` 读取——设置了就带上（可读私有仓库 / 防限流），未设置则匿名
 //! 请求（公开仓库读取 release 无需鉴权）。发版所需的写权限 token 放在发版环境 /
-//! CI secret 的同名变量里，不随客户端分发。
+//! CI secret 的同名变量里，不随客户端分发。令牌是拼在 URL 上的，而 ureq 的错误 Display
+//! 会带上完整 URL，因此所有错误出口都过一遍 [`crate::plugin::install::redact_token`]。
 //!
-//! 命令均为同步 `#[tauri::command]`：Tauri 在独立线程执行，阻塞式 ureq 请求/下载
-//! 不会占用 async 运行时的工作线程。
+//! 线程模型（**曾经写反过，务必别再写回去**）：不带 `async` 的 `#[tauri::command]` 走
+//! `ExecutionContext::Blocking`——tauri-macros 的 `body_blocking` 把函数体直接内联进 IPC
+//! handler，而 Windows 上 IPC handler 由 WebView2 controller 所属的**主 UI 线程**调用。
+//! 也就是说同步命令是**在主线程上跑**的，不是「Tauri 在独立线程执行」。
+//! 本文件里带网络的命令因此一律 `async fn` + `spawn_blocking`：交给异步运行时还不够，
+//! 「同步函数体 + `(async)`」只是把阻塞从 UI 线程搬到 tokio worker（worker 数 = CPU 核数，
+//! 低核机器上占住一个就让别的异步命令排队），必须再用 `spawn_blocking` 挪进专用阻塞线程池。
 
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+
+// 令牌脱敏与插件安装模块共用一份实现（两处都把 access_token 拼在 URL 上，泄漏面完全相同）
+use crate::plugin::install::redact_token;
 
 /// 更新源仓库的环境变量覆盖（形如 `owner/repo`）。满足准则「服务端地址可配置、不写死」：
 /// 默认指向下方公开发布仓库，可用 `ITOOLS_UPDATE_REPO` 覆盖（换发布主体 / 私有仓库）。
@@ -117,18 +126,31 @@ fn fetch_gitee() -> Result<Release, String> {
             url.push_str(tok);
         }
     }
-    let resp = ureq::get(&url)
+    let resp = crate::http::get(&url)
         .set("User-Agent", USER_AGENT)
         .timeout(Duration::from_secs(TIMEOUT_SECS))
         .call()
-        .map_err(|e| format!("gitee 请求失败: {e}"))?;
+        // 脱敏必做：ureq 的 Transport/Status Display 会把完整 URL（含 ?access_token=明文）写进错误串
+        .map_err(|e| redact_token(format!("gitee 请求失败: {e}")))?;
     resp.into_json::<Release>()
-        .map_err(|e| format!("gitee 解析失败: {e}"))
+        .map_err(|e| redact_token(format!("gitee 解析失败: {e}")))
 }
 
 /// 命令：检查更新。前端在「关于」页点击调用。
-#[tauri::command]
-pub fn check_update() -> Result<UpdateInfo, String> {
+///
+/// `async fn` + `spawn_blocking`：同步命令跑在主 UI 线程上（见文件头「线程模型」）；
+/// 而「同步函数体 + `(async)`」只是把 8 秒阻塞从 UI 线程搬到 tokio worker——
+/// 1~2 vCPU 的机器上 worker 数就等于核数，占住一个就足以让别的异步命令排队。
+/// 与本文件的 [`download_update`] 保持同一种写法，避免后来者照抄错的那个。
+#[tauri::command(async)]
+pub async fn check_update() -> Result<UpdateInfo, String> {
+    tauri::async_runtime::spawn_blocking(check_blocking)
+        .await
+        .map_err(|e| format!("检查更新任务异常终止: {e}"))?
+}
+
+/// [`check_update`] 的阻塞实现（跑在 `spawn_blocking` 线程上）。
+fn check_blocking() -> Result<UpdateInfo, String> {
     let current = env!("CARGO_PKG_VERSION").to_string();
     let release = fetch_gitee()?;
     let latest = release.tag_name.trim_start_matches('v').to_string();
@@ -175,11 +197,23 @@ fn is_valid_msi(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
-/// 命令：下载 msi 安装包到临时目录，返回本地绝对路径。阻塞式（在独立线程执行）。
+/// 命令：下载 msi 安装包到临时目录，返回本地绝对路径。
+///
+/// **必须异步**：同步命令的函数体被内联进 IPC handler，在 Windows 上就是主 UI 线程
+/// （见文件头「线程模型」）——本命令超时高达 600 秒，同步版等于「点了更新，整个 app
+/// 最长十分钟没反应」。这里再进一步用 `spawn_blocking` 把阻塞下载挪到专用阻塞线程池，
+/// 避免长时间占住异步运行时的工作线程。
+#[tauri::command]
+pub async fn download_update(url: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || download_blocking(&url))
+        .await
+        .map_err(|e| format!("下载任务异常终止: {e}"))?
+}
+
+/// [`download_update`] 的阻塞实现（跑在 `spawn_blocking` 线程上）。
 ///
 /// 仅接受 `.msi`（防止误下载/执行其他类型）；下载完校验非空且与 Content-Length 一致。
-#[tauri::command]
-pub fn download_update(url: String) -> Result<String, String> {
+fn download_blocking(url: &str) -> Result<String, String> {
     // 从 URL 末段取文件名，回退默认名
     let filename = url
         .rsplit('/')
@@ -195,11 +229,12 @@ pub fn download_update(url: String) -> Result<String, String> {
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建临时目录失败: {e}"))?;
     let dest = dir.join(&filename);
 
-    let resp = ureq::get(&url)
+    // 统一出口取 Agent；600 秒的超时**按请求**设置，代理只决定走哪条链路、不改超时语义
+    let resp = crate::http::get(url)
         .set("User-Agent", USER_AGENT)
         .timeout(Duration::from_secs(DOWNLOAD_TIMEOUT_SECS))
         .call()
-        .map_err(|e| format!("下载请求失败: {e}"))?;
+        .map_err(|e| redact_token(format!("下载请求失败: {e}")))?;
     let expected: Option<u64> = resp.header("Content-Length").and_then(|s| s.parse().ok());
 
     let mut reader = resp.into_reader();

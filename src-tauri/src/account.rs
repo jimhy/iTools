@@ -23,6 +23,13 @@ const CLOUD_ENDPOINT_ENV: &str = "ITOOLS_SYNC_ENDPOINT";
 /// 云端鉴权请求超时（秒）。
 const CLOUD_TIMEOUT_SECS: u64 = 15;
 
+/// **dev 便利默认端点**：debug 构建下没有任何配置时 [`cloud_endpoint`] 返回它（release 不启用）。
+///
+/// 单独抽成常量是因为它有第二个用途：请求这个地址失败时，错误文案要能说清
+/// 「这是开发模式的默认地址，服务端没启动属正常现象」（见 [`is_dev_default_endpoint`]）。
+/// 两处各写一遍字面量迟早会分叉——改了默认值而提示还在说 8787，就是又一条误导用户的信息。
+pub const DEV_DEFAULT_ENDPOINT: &str = "http://127.0.0.1:8787";
+
 /// 用户在「账号 → 数据同步」里**手动填写**的云端地址（运行期从 `AppSettings.sync_endpoint` 同步进来）。
 /// 源码/二进制不含任何写死的服务端地址；地址只在运行期从环境变量或用户设置获得，绝不随仓库上传。
 static USER_ENDPOINT: RwLock<Option<String>> = RwLock::new(None);
@@ -44,28 +51,90 @@ pub fn set_user_endpoint(raw: &str) {
     }
 }
 
-/// 解析云端 base URL。优先级：
-/// 1) 环境变量 `ITOOLS_SYNC_ENDPOINT`（本机 / CI 显式覆盖，也是 dev 联调本地服务端的开关）；
-/// 2) 用户在「账号 → 数据同步」里**手填**的服务器地址（`AppSettings.sync_endpoint`）；
-/// 3) 两者都没有 = 云端未接入（诚实降级为纯本地，需显式配置才可用）。
+/// 云端地址的**唯一解析实现**：返回「实际生效地址 + 它来自哪一层」。
 ///
-/// ⚠ 历史坑（本次修复）：曾在 debug 构建里默认兜底 `http://127.0.0.1:8787`——一旦本地服务端
-/// 跑过、登录过一次，会话就永久落盘，之后每次启动都「已登录」且退不干净（僵尸登录态）。
-/// dev 便利默认【保留】（见下方 debug 分支）；僵尸态改由登录态门禁 + 会话失效自愈 + 可靠退出缓解；release / test 不启用、不写死生产地址（红线）。
+/// 优先级：
+/// 1) `env`：环境变量 `ITOOLS_SYNC_ENDPOINT`（本机 / CI 显式覆盖，也是 dev 联调本地服务端的开关）；
+/// 2) `user`：用户在「账号 → 数据同步」里**手填**的服务器地址（`AppSettings.sync_endpoint`）；
+/// 3) `devDefault`：**仅 debug 构建**兜底 [`DEV_DEFAULT_ENDPOINT`]；
+/// 4) `none`：云端未接入（诚实降级为纯本地）。
 ///
-/// 源码/二进制零写死生产地址——「地址不进代码 / 不随仓库上传，手动填」的落地。
-pub fn cloud_endpoint() -> Option<String> {
+/// [`cloud_endpoint`] 与 [`endpoint_info`] 都只能走它：这两处一旦各写一遍优先级，
+/// 「设置里显示的地址」与「实际请求的地址」就会分叉——那正是用户这次困惑的根源
+/// （他从没填过地址，dev 下客户端其实一直在连 127.0.0.1:8787，而界面上完全看不出来）。
+fn resolve_endpoint() -> (Option<String>, &'static str) {
     if let Some(ep) = std::env::var(CLOUD_ENDPOINT_ENV).ok().as_deref().and_then(normalize_endpoint) {
-        return Some(ep);
+        return (Some(ep), "env");
     }
     if let Some(ep) = USER_ENDPOINT.read().ok().and_then(|g| g.clone()) {
-        return Some(ep);
+        return (Some(ep), "user");
     }
     // dev 便利：debug 默认连本地 server（仅 dev；release/test 不启用、不写死生产地址、不违红线）。
     if cfg!(debug_assertions) && !cfg!(test) {
-        return Some("http://127.0.0.1:8787".to_string());
+        return (Some(DEV_DEFAULT_ENDPOINT.to_string()), "devDefault");
     }
-    None
+    (None, "none")
+}
+
+/// 解析云端 base URL（优先级与来源判定见 [`resolve_endpoint`]）。
+///
+/// ⚠ 历史坑：曾在 debug 构建里默认兜底 `http://127.0.0.1:8787`——一旦本地服务端
+/// 跑过、登录过一次，会话就永久落盘，之后每次启动都「已登录」且退不干净（僵尸登录态）。
+/// dev 便利默认【保留】；僵尸态改由登录态门禁 + 会话失效自愈 + 可靠退出缓解；
+/// release / test 不启用、不写死生产地址（红线）。
+///
+/// 源码/二进制零写死生产地址——「地址不进代码 / 不随仓库上传，手动填」的落地。
+pub fn cloud_endpoint() -> Option<String> {
+    resolve_endpoint().0
+}
+
+/// 「当前实际生效的同步服务器地址」快照（camelCase 发给前端）。
+///
+/// 存在的意义是**消除一个只有开发者才知道的隐形状态**：dev 构建下用户什么都没填，
+/// 客户端却在连 [`DEV_DEFAULT_ENDPOINT`]；用户于是在「网络」页签里遍寻不着服务器地址，
+/// 以为自己没配、或以为配置没生效。把「生效值 + 它从哪来 + 你填的是什么」三者一起如实摆出来。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EndpointInfo {
+    /// 实际生效的地址；`None` = 云端未接入（此时登录 / 同步都会诚实报「未接入」）。
+    pub effective: Option<String>,
+    /// 生效值来自哪一层：`"env"`（环境变量 `ITOOLS_SYNC_ENDPOINT`）
+    /// | `"user"`（用户手填）| `"devDefault"`（**开发构建**的本地默认值，release 不存在）
+    /// | `"none"`（未接入）。
+    pub source: String,
+    /// 用户在「账号 → 数据同步」里手填的**原始值**（原样返回，可能为空串）。
+    /// 与 `effective` 不同时，说明生效的是更高优先级的来源（env）或兜底（devDefault）。
+    pub user_value: String,
+}
+
+/// 命令：查询当前实际生效的同步服务器地址（「设置 → 网络」页签展示用）。
+///
+/// 本地瞬时、不触网。`user_value` 取自设置里的**原始串**（不做 trim / 去尾斜杠），
+/// 好让用户看见自己到底填了什么（多敲的空格也算事实）。
+#[tauri::command]
+pub fn sync_endpoint_info(settings: tauri::State<'_, crate::settings::SettingsStore>) -> EndpointInfo {
+    endpoint_info(&settings.get().sync_endpoint)
+}
+
+/// [`sync_endpoint_info`] 的纯函数实现（`raw_user` = 设置里的原始手填值）。
+fn endpoint_info(raw_user: &str) -> EndpointInfo {
+    let (effective, source) = resolve_endpoint();
+    EndpointInfo {
+        effective,
+        source: source.to_string(),
+        user_value: raw_user.to_string(),
+    }
+}
+
+/// 该端点是否就是 [`DEV_DEFAULT_ENDPOINT`]（dev 兜底默认值）。
+///
+/// 仅在 **debug 构建**下成立：release 里这个默认值根本不会被启用，用户手填同样的地址属于
+/// 「他自己起了个本地服务端」，此时把失败说成「开发模式默认地址未启动属正常」反而是假信息。
+///
+/// 用途：拉取失败时给出「不是故障」的准确解释——dev 下没启动 server 是常态，
+/// 客户端会自动退回内置镜像列表，一切照常工作。
+pub fn is_dev_default_endpoint(raw: &str) -> bool {
+    cfg!(debug_assertions) && normalize_endpoint(raw).as_deref() == Some(DEV_DEFAULT_ENDPOINT)
 }
 
 /// 云端是否已配置（供 UI / 插件判断是否展示云能力、是否可真同步）。
@@ -254,7 +323,7 @@ struct LoginResp {
 /// `POST {endpoint}/auth/login`，成功返回会话 token。
 fn cloud_login(endpoint: &str, username: &str, password: &str) -> Result<String, String> {
     let url = format!("{endpoint}/auth/login");
-    let resp = ureq::post(&url)
+    let resp = crate::http::post(&url)
         .timeout(Duration::from_secs(CLOUD_TIMEOUT_SECS))
         .send_json(serde_json::json!({ "username": username, "password": password }))
         .map_err(map_auth_err)?;
@@ -270,7 +339,7 @@ fn cloud_login(endpoint: &str, username: &str, password: &str) -> Result<String,
 /// `POST {endpoint}/auth/logout`，通知服务端吊销会话（可选全设备）。
 fn cloud_logout(endpoint: &str, token: &str, all_devices: bool) -> Result<(), String> {
     let url = format!("{endpoint}/auth/logout");
-    ureq::post(&url)
+    crate::http::post(&url)
         .timeout(Duration::from_secs(CLOUD_TIMEOUT_SECS))
         .set("Authorization", &format!("Bearer {token}"))
         .send_json(serde_json::json!({ "allDevices": all_devices }))
@@ -281,7 +350,7 @@ fn cloud_logout(endpoint: &str, token: &str, all_devices: bool) -> Result<(), St
 /// `POST {endpoint}/account/delete`，真实鉴权后删除云端账号数据。
 fn cloud_delete(endpoint: &str, username: &str, password: &str) -> Result<(), String> {
     let url = format!("{endpoint}/account/delete");
-    ureq::post(&url)
+    crate::http::post(&url)
         .timeout(Duration::from_secs(CLOUD_TIMEOUT_SECS))
         .send_json(serde_json::json!({ "username": username, "password": password }))
         .map_err(map_auth_err)?;
@@ -369,6 +438,28 @@ mod tests {
         dirty.set_sync_enabled(true);
         assert!(AccountStore::load(db.clone()).sync_enabled());
 
+        // 7) endpoint_info 必须与 cloud_endpoint 同源同结论（两者都走 resolve_endpoint）
+        //    此刻 USER_ENDPOINT = http://127.0.0.1:9（第 4 步设的）
+        let info = endpoint_info("  http://127.0.0.1:9/  ");
+        assert_eq!(
+            info.user_value, "  http://127.0.0.1:9/  ",
+            "user_value 是**原始**手填值，不做 trim / 去尾斜杠"
+        );
+        if std::env::var(CLOUD_ENDPOINT_ENV).is_err() {
+            assert_eq!(info.source, "user");
+            assert_eq!(info.effective.as_deref(), Some("http://127.0.0.1:9"));
+            assert_eq!(info.effective, cloud_endpoint(), "展示值必须等于实际请求用的值");
+        }
+
         set_user_endpoint(""); // 复位全局，勿污染其它用例
+
+        // 8) 清空手填值后：test 构建不启用 devDefault → 未接入（source=none、effective=None）
+        let info = endpoint_info("");
+        if std::env::var(CLOUD_ENDPOINT_ENV).is_err() {
+            assert_eq!(info.source, "none");
+            assert!(info.effective.is_none());
+            assert_eq!(info.effective, cloud_endpoint());
+        }
+        assert_eq!(info.user_value, "");
     }
 }

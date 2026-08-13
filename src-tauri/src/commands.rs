@@ -14,7 +14,7 @@ use crate::profile::{ProfileStore, ProfileView};
 use crate::search::{icon, SearchIndex, SearchItem};
 use crate::settings::{AppSettings, LaunchItem, SettingsStore};
 use crate::store::UsageStore;
-use crate::sync::{DataStore, SyncResult};
+use crate::sync::{DataStore, DataUsage, SyncResult};
 
 /// 前端查询入口。
 /// 默认应用搜索给足数量（网格「展开 (N)」要显示全部匹配）；/f 文件搜索保持精简列表。
@@ -65,12 +65,55 @@ pub struct HomeData {
     pub pinned: Vec<SearchItem>,
 }
 
+/// 判定「最近使用 / 已固定」里的一条**插件**记录当前该显示、该隐藏、还是该清掉。
+///
+/// `target` 形如 `<插件id>#<feature code>`，调试插件的 id 带 `dev:` 前缀（见 [`crate::dev::DEV_ID_PREFIX`]）。
+///
+/// - **调试插件**：`dev_search_visible` 关闭时不显示。设计契约是「调试插件默认不出现在主界面、
+///   由该开关控制」，而此前它只管住了搜索索引这一半——用过一次调试插件后，即便关掉开关，
+///   「最近使用」里仍常驻这条 `dev:` 项，点击照样打开调试窗口（`open_plugin` 的 dev 前缀
+///   路由不看开关）。开关开着时还要与搜索索引同一条线：**跑不起来的（缺 index.html / 清单坏掉）
+///   不露面**（`DevRuntime::search_commands` 就是这么过滤的——点了打不开 = 欺骗），
+///   但那只是暂时隐藏；只有插件压根不在注册表里（目录被删 / 改名 / 调试目录被移除）才算 Gone。
+/// - **正式插件**：不在注册表里（卸载 / 改名 / 清单坏掉加载失败）就清掉——留着点了也只是报错。
+///   注意用的是「插件是否还装着」而不是「是否在搜索索引里」：被用户**停用**的插件仍然装着，
+///   它的记录不该被删。
+///
+/// `Gone` 会**真删记录**，所以只在能**确证**插件不在时才返回它：注册表读不出来（锁中毒，
+/// `has_plugin` 返回 `None`）一律保守处理，绝不因为一次无关的 panic 把用户的记录清空。
+fn plugin_entry_state(
+    target: &str,
+    registry: &crate::plugin::PluginRegistry,
+    dev_visible: bool,
+) -> crate::store::PluginEntry {
+    use crate::store::PluginEntry;
+    let id = target.split('#').next().unwrap_or(target);
+    match id.strip_prefix(crate::dev::DEV_ID_PREFIX) {
+        Some(dev_id) => match registry.dev.has_plugin(dev_id) {
+            Some(false) => PluginEntry::Gone,
+            // 读不出调试注册表：不显示（调试项本就默认不该出现），但保留记录
+            None => PluginEntry::Hide,
+            Some(true) if !dev_visible || !registry.dev.runnable(dev_id) => PluginEntry::Hide,
+            Some(true) => PluginEntry::Show,
+        },
+        None => match registry.has_plugin(id) {
+            Some(false) => PluginEntry::Gone,
+            // 读不出正式注册表：宁可多显示一条，也不删用户的最近使用
+            None | Some(true) => PluginEntry::Show,
+        },
+    }
+}
+
 #[tauri::command]
 pub fn home_data(
     store: State<'_, UsageStore>,
     profile: State<'_, ProfileStore>,
+    registry: State<'_, crate::plugin::PluginRegistry>,
+    settings: State<'_, SettingsStore>,
 ) -> HomeData {
-    let (recent, pinned) = store.snapshot();
+    let dev_visible = settings.get().dev_search_visible;
+    let (recent, pinned) =
+        store.snapshot(|target| plugin_entry_state(target, &registry, dev_visible));
     // 问候名优先用账号昵称，回退系统用户名
     let user = {
         let p = profile.get();
@@ -114,17 +157,31 @@ pub fn save_settings(
     index: State<'_, SearchIndex>,
 ) -> Result<(), String> {
     let old = store.get();
-    // 本地启动清单由专用命令（add/remove_launch_items）独占管理。
-    // save_settings 是整包保存，若连带覆盖会与那些命令构成丢更新竞态（删了又被旧快照写回）——
-    // 这里强制保留 store 的现值，把本地启动清单的所有权完全交出去。
+    // 后端独占写入的字段（本地启动清单 / 插件禁用清单 / 授权表 / 下载源偏好 / 插件窗口尺寸）
+    // 一律用 store 现值回填：save_settings 是整包保存，若连带覆盖就会与那些专用命令构成
+    // 丢更新竞态（删了又被旧快照写回），前端 TS 声明里没有的字段更会被直接清空。
+    // 清单与理由见 settings::preserve_backend_owned——**新增此类字段必须去那里补一行**。
     let mut next = settings;
-    next.local_launch_items = old.local_launch_items.clone();
-    // 插件禁用清单/授权表由「插件管理」专用命令独占，整包保存不覆盖（同 local_launch_items）
-    next.disabled_plugins = old.disabled_plugins.clone();
-    next.plugin_permissions = old.plugin_permissions.clone();
+    crate::settings::preserve_backend_owned(&mut next, &old);
+
+    // 代理配置**先校验再保存**：开着开关却给不出可用地址时，如果照样存下去，
+    // 运行期只能悄悄退回直连——那就又造出一个「开着、看着生效、其实一个字节都不走」的假控件。
+    // 这里直接拒绝保存并把中文原因抛给 UI，让用户当场知道该怎么改。
+    if next.proxy_enabled {
+        if next.proxy_address.trim().is_empty() {
+            return Err("已开启网络代理，但没有填写代理地址（形如 127.0.0.1:7897）".to_string());
+        }
+        crate::http::normalize_proxy(&next.proxy_address)?;
+    }
+
     store.set(next.clone());
     // 云端地址即时生效：更新运行期端点，随后的登录 / 同步立即指向新地址（无需重启）。
     crate::account::set_user_endpoint(&next.sync_endpoint);
+    // 代理即时生效：重建出站 Agent，随后所有请求按新配置选链路（无需重启）。
+    // 上面已校验过，正常不会 Err；真出错也 fail-closed 到直连并如实记日志。
+    if let Err(e) = crate::http::refresh(next.proxy_enabled, &next.proxy_address) {
+        ilog!("[iTools] 代理配置应用失败（已回退直连）：{e}");
+    }
 
     if old.opacity != next.opacity {
         if let Some(win) = app.get_webview_window("main") {
@@ -375,6 +432,18 @@ pub fn set_data_sync(enabled: bool, account: State<'_, AccountStore>) -> Account
 #[tauri::command]
 pub fn sync_now(account: State<'_, AccountStore>, data: State<'_, DataStore>) -> SyncResult {
     data.sync_all_gated(&account)
+}
+
+/// 「我的数据」用量：本地各命名空间条数（真实）+ 云端用量（真实请求服务端，不可用则诚实标注原因）。
+/// 供设置中心「我的数据」页展示每个数据集（主程序 / 各插件）本地与云端各有多少条记录。
+///
+/// `#[tauri::command(async)]`：本命令会**同步请求云端**。不带 async 的命令走
+/// `ExecutionContext::Blocking`，函数体被内联进 IPC handler，而 Windows 上 IPC handler
+/// 由 WebView2 controller 所属的主 UI 线程调用——云端慢/超时就会把整个 app 卡住
+/// （托盘、全局热键、所有窗口一起排队）。加 async 后交由异步运行时执行。
+#[tauri::command(async)]
+pub fn data_usage(account: State<'_, AccountStore>, data: State<'_, DataStore>) -> DataUsage {
+    data.usage(&account)
 }
 
 // ---------- 本地启动 ----------

@@ -13,7 +13,7 @@
 //!
 //! 命名空间：核心 App 用 `app`；第三方插件用 `plugin:<id>`（经桥接 `itools.data.*` 访问，按插件隔离）。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -86,6 +86,54 @@ impl SyncResult {
             message: Some(message.to_string()),
         }
     }
+}
+
+/// 单个命名空间的记录条数（`ns` 形如 `app` / `plugin:<id>`）。供「我的数据」页展示。
+#[derive(Serialize)]
+pub struct NsCount {
+    /// 命名空间：`app`（主程序）或 `plugin:<插件名>`。
+    pub ns: String,
+    /// 该命名空间的记录条数（真实统计，非估算）。
+    pub count: u64,
+}
+
+/// 云端用量快照（真实来自服务端 `GET /data/_usage`）。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudUsage {
+    /// 各命名空间在云端的条数。
+    pub counts: Vec<NsCount>,
+    /// 云端总条数。
+    pub total: u64,
+    /// 云端占用的原始字节数（服务端各记录 value 文本长度之和；真实值，不硬编码）。
+    pub bytes: u64,
+}
+
+/// 「我的数据」页所需的用量汇总：本地始终真实；云端仅在已登录 + 已配置且请求成功时给出，
+/// 否则 `cloud=None` 且 `cloud_reason` 如实说明原因（绝不用本地数字冒充云端）。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DataUsage {
+    /// 本地各命名空间条数。
+    pub local: Vec<NsCount>,
+    /// 本地总条数。
+    pub local_total: u64,
+    /// 云端用量（不可用时为 None）。
+    pub cloud: Option<CloudUsage>,
+    /// 云端不可用原因：`cloud_not_configured` / `not_logged_in` / `offline` / `session_expired` / `error`。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cloud_reason: Option<String>,
+}
+
+/// 服务端 `GET /data/_usage` 的响应体（camelCase 与服务端对齐）。
+#[derive(Deserialize)]
+struct UsageResp {
+    /// 命名空间 → 条数。
+    #[serde(default)]
+    counts: HashMap<String, u64>,
+    /// 云端占用字节数。
+    #[serde(default)]
+    bytes: u64,
 }
 
 /// 本地优先数据存储：所有读写走统一 SQLite 库的 `plugin_data` 表（并发串行化在 [`Db`] 内）。
@@ -210,6 +258,69 @@ impl DataStore {
         }
     }
 
+    /// 「我的数据」用量汇总：本地条数**始终真实统计**；云端仅在已配置 + 已登录且请求成功时给出，
+    /// 否则 `cloud=None` + `cloud_reason` 如实说明（`cloud_not_configured` / `not_logged_in` /
+    /// `offline` / `session_expired` / `error`）——绝不用本地数字冒充云端（诚信红线）。
+    ///
+    /// `account` 用于取 token；服务端判定会话无效（401/403）时**自愈清本地登录态**。
+    pub fn usage(&self, account: &AccountStore) -> DataUsage {
+        // 本地：真实统计（离线始终可用）
+        let local_pairs = self.db.pd_counts();
+        let local_total: u64 = local_pairs.iter().map(|(_, c)| *c).sum();
+        let local: Vec<NsCount> = local_pairs
+            .into_iter()
+            .map(|(ns, count)| NsCount { ns, count })
+            .collect();
+
+        // 云端：诚实门禁——未配置 / 未登录直接给原因，不发请求
+        let (cloud, cloud_reason) = match self.fetch_cloud_usage(account) {
+            Ok(c) => (Some(c), None),
+            Err(reason) => (None, Some(reason)),
+        };
+
+        DataUsage {
+            local,
+            local_total,
+            cloud,
+            cloud_reason,
+        }
+    }
+
+    /// 真实请求服务端 `GET /data/_usage`（带 Bearer）。返回 Err(reason) 表示不可用（诚实降级）。
+    fn fetch_cloud_usage(&self, account: &AccountStore) -> Result<CloudUsage, String> {
+        let endpoint = crate::account::cloud_endpoint().ok_or("cloud_not_configured".to_string())?;
+        let token = account.token().ok_or("not_logged_in".to_string())?;
+        let url = format!("{endpoint}/data/_usage");
+        let resp = crate::http::get(&url)
+            .timeout(Duration::from_secs(SYNC_TIMEOUT_SECS))
+            .set("Authorization", &format!("Bearer {token}"))
+            .call();
+        let parsed: UsageResp = match resp {
+            Ok(r) => r.into_json().map_err(|_| "error".to_string())?,
+            Err(ureq::Error::Status(code, _)) => {
+                if code == 401 || code == 403 {
+                    account.invalidate_session();
+                    return Err("session_expired".to_string());
+                }
+                return Err("error".to_string());
+            }
+            Err(ureq::Error::Transport(_)) => return Err("offline".to_string()),
+        };
+        let mut counts: Vec<NsCount> = parsed
+            .counts
+            .into_iter()
+            .map(|(ns, count)| NsCount { ns, count })
+            .collect();
+        // 稳定顺序：按 ns 升序，便于前端与本地行对齐、渲染稳定。
+        counts.sort_by(|a, b| a.ns.cmp(&b.ns));
+        let total: u64 = counts.iter().map(|c| c.count).sum();
+        Ok(CloudUsage {
+            counts,
+            total,
+            bytes: parsed.bytes,
+        })
+    }
+
     /// 真实同步一个命名空间：上行 dirty 记录 + 回拉合并（updated_at 大者胜）。
     /// 仅在 [`Self::sync_gated`] 判定「已登录 + 已配置」后调用。
     ///
@@ -236,7 +347,7 @@ impl DataStore {
 
         // 2) 真实 HTTP：上行 + 取回远端记录（锁外）
         let url = format!("{endpoint}/data/{ns}");
-        let resp = ureq::post(&url)
+        let resp = crate::http::post(&url)
             .timeout(Duration::from_secs(SYNC_TIMEOUT_SECS))
             .set("Authorization", &format!("Bearer {token}"))
             .send_json(PushBody { records: push });

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-mirror-refresh"
+description = "Enables the plugin_mirror_refresh command without any pre-configured scope."
+commands.allow = ["plugin_mirror_refresh"]
+
+[[permission]]
+identifier = "deny-plugin-mirror-refresh"
+description = "Denies the plugin_mirror_refresh command without any pre-configured scope."
+commands.deny = ["plugin_mirror_refresh"]

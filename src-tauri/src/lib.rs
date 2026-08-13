@@ -1,8 +1,15 @@
 // iTools 主库入口：命令注册、协议、托盘、窗口、插件系统。
 mod account;
 mod commands;
+/// 前后端契约快照（纯测试模块：钉死跨 invoke 边界的字段名 + 导出机器可读清单）。
+#[cfg(test)]
+mod contract;
 mod db;
+/// 插件调试环境（开发者中心）：与正式插件物理隔离的加载源 / 存储 / 沙盒 / 授权 / 同步 Mock。
+mod dev;
 mod hotkey;
+/// **统一出站 HTTP 出口**：全应用所有对外请求都从这里取 Agent，网络代理才可能真正生效。
+mod http;
 mod launch;
 mod logging;
 mod plugin;
@@ -33,7 +40,7 @@ use sync::DataStore;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // 最先初始化文件日志（exe 同目录 itools.log），后续所有 [iTools] 日志都落文件+stderr
-    logging::init();
+    logging::init();
     tauri::Builder::default()
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
@@ -50,6 +57,15 @@ pub fn run() {
                 .map(|r| r.root.clone())
                 .unwrap_or_default();
             plugin::serve(&root, &request)
+        })
+        // 调试插件资源：itplugindev://localhost/<id>/<path>（Windows 上为 http://itplugindev.localhost）
+        // 与 itplugin 的区别：调试插件分散在多个调试根，按 id→目录映射表解析（见 dev::serve）。
+        .register_uri_scheme_protocol(dev::DEV_SCHEME, |ctx, request| {
+            use tauri::Manager;
+            match ctx.app_handle().try_state::<std::sync::Arc<dev::DevRuntime>>() {
+                Some(rt) => dev::serve(&rt, &request),
+                None => plugin::serve_status(503),
+            }
         })
         // 截图框选覆盖层：itoverlay://localhost/overlay.html（内嵌页）+ /frozen.png（冻结的整屏）
         .register_uri_scheme_protocol("itoverlay", |ctx, request| {
@@ -119,24 +135,67 @@ pub fn run() {
             let current = settings_store.get();
             // 用户手填的云端地址（设置里读；env/debug 兜底见 account::cloud_endpoint）装入运行期。
             account::set_user_endpoint(&current.sync_endpoint);
+            // 出站代理装入运行期：之后所有网络请求（插件下载 / 更新 / 云同步 / 登录 / itools.fetch）
+            // 都按它选链路（本机与内网地址恒直连，见 http::is_bypass_host）。
+            // 地址非法时 refresh 内部已 fail-closed 回退直连，这里只如实记一笔，不阻断启动。
+            if let Err(e) = http::refresh(current.proxy_enabled, &current.proxy_address) {
+                ilog!("[iTools] 代理配置无效，本次启动全部请求直连：{e}");
+            }
+            // 启用代理时 refresh 内部已记过一笔；这里补上「直连」那一半，
+            // 使日志里**永远**有一行说明本次启动的出站链路（排查用户网络问题的第一现场）。
+            if !http::proxy_configured() {
+                ilog!("[iTools] 出站链路：直连（未启用代理）");
+            }
+            // 插件下载源偏好（auto/official/mirror）装入运行期：镜像模块据此决定候选源。
+            plugin::mirror::set_mode(&current.plugin_mirror_mode);
 
             let search_index = SearchIndex::new(current.custom_apps.clone());
             // 「本地启动」清单里的项一并纳入搜索（可在主搜索栏搜到并打开）
             search_index.set_custom_items(current.local_launch_items.clone());
             // 解析插件根：dev 用项目 plugins/，打包用可写的 appData（首启从随包资源播种）
             let plugins_root = plugin::resolve_plugins_root(app.handle());
+            // 登记「随包内置插件」名单（resource_dir/plugins 下的目录名）：这些插件每次启动都会被
+            // 播种回来，禁止 Git 安装覆盖。必须在扫描/列表之前完成，否则 PluginInfo.builtin 会漏判。
+            // 传入插件根：只有「会被资源目录播种的那个可写根」才登记内置名单，
+            // 否则 dev 下（插件根是项目 plugins/，与 target/debug/plugins 是两份拷贝）会把 5 个示例插件全锁死。
+            plugin::install::init_builtins(app.handle(), &plugins_root);
+            // 清理上次进程崩溃残留的安装暂存（.staging/），避免半截包留在插件根下。
+            plugin::install::cleanup_staging(&plugins_root);
+            // 恢复「更新失败且回滚也失败」寄存在 .recover-<name>/ 的旧插件：
+            // 那种失败多半是目录被杀软/资源管理器临时锁住，重启这一刻锁已释放，直接搬回原位。
+            // 必须在 scan_plugins 之前，否则本次启动会漏掉刚恢复的插件。
+            plugin::install::recover_orphans(&plugins_root);
             if plugins_root.is_dir() {
                 ilog!("[iTools] 插件目录: {}", plugins_root.display());
             } else {
                 ilog!("[iTools] 插件目录不存在: {}", plugins_root.display());
             }
+            // 插件调试环境：独立的调试根 + 独立测试库 + 独立沙盒（与正式插件互不可见）。
+            // 必须在扫描 / 建索引之前建好——「调试插件进主搜索」开关开着时首屏就要并进去。
+            let dev_runtime = std::sync::Arc::new(dev::DevRuntime::new(
+                dev::dev_home(),
+                dev::resolve_fixed_root(),
+            ));
+            // 有新调试日志时给管理中心推 `dev-log` 事件（面板收到就立刻增量拉一次）。
+            // 只是加速器：面板本身有定时增量拉取兜底，事件丢了也不会丢日志。
+            dev_runtime.logs.attach(app.handle().clone());
+            let dev_n = dev_runtime.rescan(&current.dev_plugin_dirs);
+            ilog!(
+                "[iTools] 调试插件目录: {}（{dev_n} 个调试插件）",
+                dev_runtime.fixed_root.display()
+            );
+
             // 扫描插件目录并注入搜索（页面插件，搜到后回车打开插件页；禁用的不参与搜索）
             let loaded_plugins = plugin::scan_plugins(&plugins_root);
             let disabled_plugins = current.disabled_plugins.clone();
-            let plugin_cmds: Vec<_> = plugin::expand_commands(&loaded_plugins)
+            let mut plugin_cmds: Vec<_> = plugin::expand_commands(&loaded_plugins)
                 .into_iter()
                 .filter(|c| !disabled_plugins.contains(&c.plugin_id))
                 .collect();
+            // 调试插件默认**不进**主搜索；开关开启时才并入（id 带 dev: 前缀，回车走调试窗口）
+            if current.dev_search_visible {
+                plugin_cmds.extend(dev_runtime.search_commands());
+            }
             search_index.set_plugin_commands(plugin_cmds);
             app.manage(search_index);
             app.manage(store::UsageStore::load(db.clone()));
@@ -150,11 +209,19 @@ pub fn run() {
             app.manage(sync::AutoSync::default());
             // 统一 SQLite 库句柄：插件 KV 命令（plugin_db_*）注入它读写 plugin_kv 表
             app.manage(db);
-            // 插件运行期注册表（open_plugin_window / plugin_* 命令依赖）
+            // 插件运行期注册表（open_plugin_window / plugin_* 命令依赖）。
+            // 调试运行时同时挂在它上面（供 plugin_* 命令按会话分流）与作为独立 state（供 dev_* 命令）。
             let plugins_root_watch = plugins_root.clone();
-            app.manage(plugin::PluginRegistry::new(plugins_root, loaded_plugins));
+            app.manage(plugin::PluginRegistry::new(
+                plugins_root,
+                loaded_plugins,
+                dev_runtime.clone(),
+            ));
+            app.manage(dev_runtime);
             // 插件热更新：监听 plugins/ 目录，改动后自动重扫 + 刷新已打开插件窗（免重启 / 免手动重载）
             plugin::watch::start(app.handle(), plugins_root_watch);
+            // 从 Git 安装插件的暂存区（预览 → 确认之间的中转）
+            app.manage(plugin::install::InstallStaging::default());
             // 区域截图流程状态（冻结图 + 选区结果通道）
             app.manage(plugin::capture::CaptureFlow::default());
             // 插件全局热键注册表
@@ -267,6 +334,7 @@ pub fn run() {
             commands::account_login,
             commands::set_data_sync,
             commands::sync_now,
+            commands::data_usage,
             commands::logout_account,
             commands::delete_account,
             commands::pick_launch_files,
@@ -278,6 +346,9 @@ pub fn run() {
             commands::open_admin_window,
             commands::close_admin_window,
             commands::set_settings_persist,
+            // 网络：代理连通性实测 + 「当前实际生效的同步服务器地址」
+            http::test_proxy,
+            account::sync_endpoint_info,
             updater::check_update,
             updater::get_app_version,
             updater::open_release_page,
@@ -290,6 +361,18 @@ pub fn run() {
             plugin::commands::set_plugin_enabled,
             plugin::commands::set_plugin_permission,
             plugin::commands::delete_plugin,
+            plugin::install::plugin_install_preview,
+            plugin::install::plugin_install_confirm,
+            plugin::install::plugin_install_cancel,
+            plugin::install::plugin_check_updates,
+            plugin::install::plugin_update,
+            plugin::install::plugin_open_source_page,
+            plugin::mirror::plugin_mirror_config,
+            plugin::mirror::plugin_mirror_refresh,
+            plugin::mirror::plugin_mirror_test,
+            plugin::mirror::plugin_mirror_set_mode,
+            plugin::market::market_list,
+            plugin::market::market_install_preview,
             plugin::settings::plugin_readme,
             plugin::settings::plugin_settings_schema,
             plugin::settings::plugin_settings_values,
@@ -339,7 +422,30 @@ pub fn run() {
             plugin::commands::plugin_data_set,
             plugin::commands::plugin_data_remove,
             plugin::commands::plugin_data_keys,
-            plugin::commands::plugin_data_sync
+            plugin::commands::plugin_data_sync,
+            // 开发者中心（仅管理中心窗口可调）
+            dev::commands::dev_list_plugins,
+            dev::commands::dev_rescan,
+            dev::commands::dev_get_config,
+            dev::commands::dev_pick_dir,
+            dev::commands::dev_add_dir,
+            dev::commands::dev_remove_dir,
+            dev::commands::dev_set_search_visible,
+            dev::commands::dev_open_plugin,
+            dev::commands::dev_open_dir,
+            dev::commands::dev_set_permission,
+            dev::commands::dev_log_list,
+            dev::commands::dev_log_clear,
+            dev::commands::dev_get_mock,
+            dev::commands::dev_set_mock,
+            dev::storage::dev_storage_list,
+            dev::storage::dev_storage_set,
+            dev::storage::dev_storage_remove,
+            dev::storage::dev_storage_clear,
+            dev::storage::dev_storage_export,
+            dev::storage::dev_storage_import,
+            // 插件调试窗口的 bridge 探针上报（只在 capabilities/plugin-dev.json 放行）
+            dev::logs::dev_log_push
         ])
         .run(tauri::generate_context!())
         .expect("运行 iTools 失败");
@@ -411,15 +517,16 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
             }
             "admin" => open_admin(app),
             "reload_plugins" => {
-                if let (Some(reg), Some(idx), Some(st)) = (
+                if let (Some(reg), Some(st)) = (
                     app.try_state::<plugin::PluginRegistry>(),
-                    app.try_state::<SearchIndex>(),
                     app.try_state::<SettingsStore>(),
                 ) {
                     let cmds = reg.reload(&st.get().disabled_plugins);
                     let n = cmds.len();
-                    idx.set_plugin_commands(cmds);
-                    ilog!("[iTools] 托盘触发插件重载：{n} 条可搜索命令");
+                    // 同时重扫调试插件：托盘的「重新加载插件」对两边都该生效
+                    let dev_n = reg.dev.rescan(&st.get().dev_plugin_dirs);
+                    dev::apply_plugin_search(app, cmds);
+                    ilog!("[iTools] 托盘触发插件重载：{n} 条可搜索命令，{dev_n} 个调试插件");
                 }
             }
             "quit" => {

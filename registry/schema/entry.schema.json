@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/jimhy/iTools/blob/main/registry/schema/entry.schema.json",
+  "title": "iTools 插件收录条目",
+  "description": "registry/entries/<name>.json 的格式。作者提交这份文件；contentHash / auditedAt 由 CI 计算后写进 index.json，作者不要填。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "displayName", "description", "author", "repo", "version", "revision"],
+  "properties": {
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$",
+      "description": "插件唯一 id，必须等于 plugin.json 的 name、也等于插件目录名。全局唯一——重名会导致安装时目录冲突、数据命名空间(plugin:<name>)串数据，收录时必须把关。"
+    },
+    "displayName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 40,
+      "description": "市场里展示的名字，可用中文。"
+    },
+    "description": {
+      "type": "string",
+      "minLength": 4,
+      "maxLength": 200,
+      "description": "一句话说明这个插件做什么。"
+    },
+    "author": { "type": "string", "minLength": 1, "maxLength": 60 },
+    "homepage": { "type": "string", "format": "uri", "description": "插件主页/说明页，可与 repo 相同。" },
+
+    "repo": {
+      "type": "string",
+      "pattern": "^https://github\\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$",
+      "description": "安装源仓库（不带 .git 后缀、不带尾斜杠）。客户端据此拼安装 URL。"
+    },
+    "path": {
+      "type": "string",
+      "default": "",
+      "pattern": "^(|[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*)$",
+      "description": "仓库内子目录，空串表示仓库根即插件目录。每段只允许 ASCII 字母数字与 . _ -（与客户端 ?path= 的校验口径一致，中文/空格目录装不了）。"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^\\d+(\\.\\d+){0,3}$",
+      "description": "本次收录的版本，必须与 revision 那个 commit 下的 plugin.json version 完全一致（CI 会核对）。"
+    },
+    "revision": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$",
+      "description": "收录审核时的**完整 40 位 commit sha**。客户端只装这个确切 commit —— 作者之后往分支上推任何代码都不会自动到达用户，必须再次提审。这是整套信任模型的地基，不允许写分支名或 tag。"
+    },
+
+    "sourceRepo": {
+      "type": "string",
+      "format": "uri",
+      "description": "若 repo 里是构建产物（如 Vite 打包后的 dist），这里必须给出可复现的源码仓库地址。审核需要看得懂的代码。"
+    },
+    "buildCommand": {
+      "type": "string",
+      "maxLength": 200,
+      "description": "构建产物插件的构建命令，供复现（如 npm ci && npm run build）。"
+    },
+
+    "category": {
+      "type": "string",
+      "enum": ["效率", "开发", "文本", "图像", "系统", "网络", "娱乐", "其它"]
+    },
+    "tags": {
+      "type": "array",
+      "maxItems": 8,
+      "items": { "type": "string", "minLength": 1, "maxLength": 12 }
+    },
+    "keywords": {
+      "type": "array",
+      "description": "该插件在主搜索里的触发关键字，取自 plugin.json 的 features[].cmds。收录时用于提示与已有插件的关键字冲突（冲突不阻断，但要让作者知道）。",
+      "items": { "type": "string", "minLength": 1, "maxLength": 24 }
+    },
+
+    "permissions": {
+      "type": "array",
+      "description": "插件声明的高危能力，必须与 plugin.json 的 permissions 一致（CI 会核对）。",
+      "items": { "type": "string", "enum": ["runCommand", "network", "screen-capture", "audio-capture", "hotkey"] }
+    },
+    "permissionReasons": {
+      "type": "object",
+      "description": "每一项 permissions 都必须在这里说明用途。申请了却说不出用途、或代码里根本没用到的，收录时应当拒绝。",
+      "additionalProperties": { "type": "string", "minLength": 4, "maxLength": 120 }
+    },
+
+    "minAppVersion": {
+      "type": "string",
+      "pattern": "^\\d+(\\.\\d+){0,3}$",
+      "description": "所需的最低 iTools 版本。低于此版本的客户端会提示需要升级而不是装个跑不起来的插件。"
+    },
+    "license": { "type": "string", "maxLength": 40 },
+    "screenshots": {
+      "type": "array",
+      "maxItems": 6,
+      "items": { "type": "string", "format": "uri" }
+    },
+
+    "revoked": {
+      "type": "boolean",
+      "default": false,
+      "description": "吊销标记。客户端检查更新时发现被吊销，会警告并禁用该插件。用于事后发现问题的插件下架。"
+    },
+    "revokedReason": {
+      "type": "string",
+      "maxLength": 200,
+      "description": "吊销原因，会原样展示给已安装该插件的用户。revoked=true 时必填。"
+    },
+
+    "addedAt": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+      "description": "首次收录日期。"
+    },
+    "auditReport": {
+      "type": "string",
+      "format": "uri",
+      "description": "本次收录的审核记录（通常是收录 Issue / PR 的链接），供用户查证「凭什么信任它」。"
+    }
+  }
+}

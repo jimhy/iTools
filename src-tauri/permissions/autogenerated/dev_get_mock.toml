@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-dev-get-mock"
+description = "Enables the dev_get_mock command without any pre-configured scope."
+commands.allow = ["dev_get_mock"]
+
+[[permission]]
+identifier = "deny-dev-get-mock"
+description = "Denies the dev_get_mock command without any pre-configured scope."
+commands.deny = ["dev_get_mock"]

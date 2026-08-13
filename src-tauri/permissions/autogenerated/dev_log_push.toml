@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-dev-log-push"
+description = "Enables the dev_log_push command without any pre-configured scope."
+commands.allow = ["dev_log_push"]
+
+[[permission]]
+identifier = "deny-dev-log-push"
+description = "Denies the dev_log_push command without any pre-configured scope."
+commands.deny = ["dev_log_push"]

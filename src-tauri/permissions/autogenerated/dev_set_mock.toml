@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-dev-set-mock"
+description = "Enables the dev_set_mock command without any pre-configured scope."
+commands.allow = ["dev_set_mock"]
+
+[[permission]]
+identifier = "deny-dev-set-mock"
+description = "Denies the dev_set_mock command without any pre-configured scope."
+commands.deny = ["dev_set_mock"]

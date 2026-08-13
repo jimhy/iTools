@@ -6,9 +6,13 @@ import type { Theme } from "../types";
 import { toast } from "./ui";
 import { initDnd, clearDropZone } from "./dnd";
 import { renderAccount } from "./account";
+import { renderData } from "./data";
 import { renderSettings } from "./settings";
 import { renderLaunch } from "./launch";
 import { renderPlugins } from "./plugins";
+import { renderMarket } from "./market";
+import { renderNetwork } from "./network";
+import { renderDev } from "./dev";
 import { renderPlaceholder } from "./placeholder";
 
 const win = getCurrentWindow();
@@ -21,11 +25,55 @@ export interface AdminCtx {
   toast: (msg: string) => void;
   /** 即时应用主题（设置面板切主题时用） */
   applyTheme: (theme: Theme) => void;
+  /**
+   * 注册「离开本面板时要做的清理」（解绑 Tauri 事件监听、清定时器等）。
+   *
+   * 切换视图时框架只做 `contentEl.innerHTML = ""`，DOM 没了但 `listen()` 注册的 IPC 监听还挂着；
+   * 管理中心窗口是**只隐藏不销毁**的，这类监听会跨越整个 app 生命周期存活，
+   * 后端每 emit 一次就白白唤醒一次前端。面板凡是注册了 DOM 之外的东西，都必须在这里登记清理函数。
+   *
+   * 每个视图只保留最后一次登记的清理函数；切走时框架调用它，随后清空。
+   *
+   * ⚠ 边界：本机制**只在 switchView（切换左侧导航项）时触发**。点关闭 / Esc 走的是
+   * `close_admin_window` → `win.hide()`，窗口只隐藏不销毁、也不切页，此时清理函数**不会**被调用，
+   * 面板仍处于「已挂载」状态。凡是「窗口看不见时就不该干的活」（如后端 emit 驱动的自动刷新），
+   * 必须由面板自己按 `document.visibilityState` 另做门控（见 plugins.ts 的可见性门控），
+   * 不能指望这里。
+   */
+  registerDispose: (fn: () => void) => void;
+  /**
+   * 切到另一个左侧导航项（面板内的「前往 XX 设置」跳转用）。
+   *
+   * 必须走这里、不要自己 `contentEl.innerHTML = ""` 再渲染：switchView 会先跑上个面板
+   * registerDispose 登记的清理（解绑 IPC 监听、清定时器），绕过它会漏掉这一步。
+   */
+  goto: (view: ViewId) => void;
 }
 
-type ViewId = "account" | "data" | "settings" | "ai" | "launch" | "plugins" | "all" | "market";
+export type ViewId =
+  | "account"
+  | "data"
+  | "settings"
+  | "ai"
+  | "launch"
+  | "plugins"
+  | "dev"
+  | "all"
+  | "network"
+  | "market";
 
-const ctx: AdminCtx = { toast, applyTheme };
+/** 当前视图登记的清理函数（null = 无需清理）。 */
+let currentDispose: (() => void) | null = null;
+
+const ctx: AdminCtx = {
+  toast,
+  applyTheme,
+  registerDispose: (fn) => {
+    currentDispose = fn;
+  },
+  // switchView 是函数声明，提升到此处之前，直接引用安全
+  goto: (view) => switchView(view),
+};
 
 // ---------- 主题 ----------
 
@@ -48,12 +96,25 @@ media.addEventListener("change", () => {
 
 function switchView(view: ViewId): void {
   clearDropZone(); // 上个面板可能注册过拖放区，切换即清
+  // 上个面板登记的清理（Tauri 事件监听等）：innerHTML="" 只清 DOM，清不掉 IPC 监听
+  const dispose = currentDispose;
+  currentDispose = null;
+  if (dispose) {
+    try {
+      dispose();
+    } catch (err) {
+      console.error("面板清理失败", err);
+    }
+  }
   navItems.forEach((n) => n.classList.toggle("active", n.dataset.view === view));
   contentEl.innerHTML = "";
   contentEl.scrollTop = 0;
   switch (view) {
     case "account":
       void renderAccount(contentEl, ctx);
+      break;
+    case "network":
+      void renderNetwork(contentEl, ctx);
       break;
     case "settings":
       void renderSettings(contentEl, ctx);
@@ -64,8 +125,11 @@ function switchView(view: ViewId): void {
     case "plugins":
       void renderPlugins(contentEl, ctx);
       break;
+    case "dev":
+      void renderDev(contentEl, ctx);
+      break;
     case "data":
-      renderPlaceholder(contentEl, "我的数据", "插件功能完成后开放，敬请期待。");
+      void renderData(contentEl, ctx);
       break;
     case "ai":
       renderPlaceholder(contentEl, "AI Agent 连接", "后续规划中，敬请期待。");
@@ -74,7 +138,7 @@ function switchView(view: ViewId): void {
       renderPlaceholder(contentEl, "所有功能", "后续规划中，敬请期待。");
       break;
     case "market":
-      renderPlaceholder(contentEl, "插件应用市场", "后续规划中，敬请期待。");
+      void renderMarket(contentEl, ctx);
       break;
   }
 }

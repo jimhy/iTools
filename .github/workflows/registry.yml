@@ -1,0 +1,68 @@
+name: Registry
+
+# 插件收录条目的机械校验 + index.json 聚合。
+#
+# - PR 改动 registry/ 时：只校验（--check），不写文件，让作者在合并前就看到问题；
+# - 合并进 main 后：重新聚合 index.json 并提交回仓库，客户端拉的就是它。
+#
+# 注意「不会无限触发」：下面 push 的 paths 只盯 entries/schema/脚本，
+# 本工作流自己提交的是 registry/index.json，不在触发范围内。
+
+on:
+  pull_request:
+    paths:
+      - "registry/**"
+      - "scripts/registry/**"
+      - ".github/workflows/registry.yml"
+  push:
+    branches: [main]
+    paths:
+      - "registry/entries/**"
+      - "registry/schema/**"
+      - "scripts/registry/**"
+  workflow_dispatch:
+
+# 同一分支上只跑最新一次，避免连续合并时并发写 index.json
+concurrency:
+  group: registry-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: 校验条目
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20" # 需要内置 fetch（Node 18+）
+      - name: 机械校验（不写 index.json）
+        run: node scripts/registry/check.mjs --check
+
+  build-index:
+    name: 聚合 index.json
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # 需要把重新生成的 index.json 提交回 main
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: 校验并聚合
+        run: node scripts/registry/check.mjs
+
+      - name: 有变化才提交
+        run: |
+          if git diff --quiet -- registry/index.json; then
+            echo "index.json 没有变化，跳过提交"
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add registry/index.json
+          git commit -m "chore(registry): 重新聚合 index.json [skip ci]"
+          git push
