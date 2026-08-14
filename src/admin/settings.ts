@@ -3,7 +3,7 @@
 //! 改动即写入本地 settings 副本并防抖保存；主题切换即时应用。
 
 import type { AdminCtx } from "./main";
-import type { AppSettings, Theme } from "../types";
+import type { AppSettings, Theme, UpdateInfo } from "../types";
 import { AUTO_CLEAR_NEVER } from "../types";
 import { h, makeSwitch, bindHotkeyRecorder, formatHotkey } from "./ui";
 import * as api from "./api";
@@ -334,19 +334,8 @@ export async function renderSettings(root: HTMLElement, ctx: AdminCtx): Promise<
       installBtn.style.display = "none";
       try {
         const info = await api.checkUpdate();
-        versionBadge.textContent = `v${info.currentVersion}`;
-        if (info.hasUpdate) {
-          updateStatus.textContent = `发现新版本 v${info.latestVersion}，建议更新`;
-          latestUrl = info.releaseUrl;
-          latestMsi = info.msiUrl;
-          downloadBtn.style.display = "";
-          if (latestMsi) installBtn.style.display = "";
-          ctx.toast(`发现新版本 v${info.latestVersion}`);
-        } else {
-          updateStatus.textContent = `已是最新版本（v${info.currentVersion}）`;
-          ctx.toast("已是最新版本");
-        }
-        statusRow.style.display = "";
+        renderResult(info);
+        ctx.toast(info.hasUpdate ? `发现新版本 v${info.latestVersion}` : "已是最新版本");
       } catch (err) {
         console.error("check_update failed", err);
         updateStatus.textContent = "检查失败，请检查网络后重试";
@@ -359,9 +348,66 @@ export async function renderSettings(root: HTMLElement, ctx: AdminCtx): Promise<
     },
   });
 
+  /** 把一次检查结果渲染到状态行 + 决定要不要露出更新按钮。
+   *
+   *  手动检查与「进页面时读到的自动检查结果」共用它——两处各写一遍，
+   *  迟早出现「手动说有新版、自动那边还显示已是最新」的分叉。 */
+  function renderResult(info: UpdateInfo): void {
+    versionBadge.textContent = `v${info.currentVersion}`;
+    if (info.hasUpdate) {
+      updateStatus.textContent = `发现新版本 v${info.latestVersion}，建议更新`;
+      latestUrl = info.releaseUrl;
+      latestMsi = info.msiUrl;
+      downloadBtn.style.display = "";
+      if (latestMsi) installBtn.style.display = "";
+    } else {
+      updateStatus.textContent = `已是最新版本（v${info.currentVersion}）`;
+      downloadBtn.style.display = "none";
+      installBtn.style.display = "none";
+    }
+    statusRow.style.display = "";
+  }
+
+  /** 「N 分钟前」——用于说明这个结论是什么时候得出的。 */
+  function agoText(ms: number): string {
+    const diff = Date.now() - ms;
+    if (diff < 0) return "";
+    const mins = Math.floor(diff / 60000);
+    if (mins < 1) return "刚刚";
+    if (mins < 60) return `${mins} 分钟前`;
+    if (mins < 1440) return `${Math.floor(mins / 60)} 小时前`;
+    return new Date(ms).toLocaleString();
+  }
+
+  // 进页面就把**自动检查**的结果显示出来（本地瞬时、不发请求）。
+  // 不做这一步的话，「查过了没新版」与「压根没查成」在界面上完全一样，
+  // 用户只能反复手动点——这正是本轮要修的问题。
+  void api
+    .updateStatus()
+    .then((st) => {
+      versionBadge.textContent = `v${st.currentVersion}`;
+      if (st.checkedAt === 0) {
+        // 启动后还没到第一次自动检查（20 秒）——如实说，不要让人以为「检查过且没新版」
+        updateStatus.textContent = "启动后还没有自动检查过，可点右侧手动检查。";
+        statusRow.style.display = "";
+        return;
+      }
+      const when = agoText(st.checkedAt);
+      if (st.error) {
+        updateStatus.textContent = `${when}自动检查失败：${st.error}`;
+        statusRow.style.display = "";
+        return;
+      }
+      if (st.info) {
+        renderResult(st.info);
+        updateStatus.textContent += `（${when}自动检查）`;
+      }
+    })
+    .catch((err) => console.error("update_status failed", err));
+
   const about = group(
     "关于 iTools",
-    row("当前版本", "从 Gitee 检查是否有新版本", versionBadge, checkBtn, downloadBtn, installBtn),
+    row("当前版本", "每小时自动检查一次新版本；也可以随时手动检查", versionBadge, checkBtn, downloadBtn, installBtn),
     statusRow,
   );
 

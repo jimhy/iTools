@@ -449,6 +449,7 @@ pub fn run() {
             dev::commands::dev_submit_plugin,
             dev::commands::dev_submission_detail,
             mcp::mcp_status,
+            updater::update_status,
             dev::storage::dev_storage_list,
             dev::storage::dev_storage_set,
             dev::storage::dev_storage_remove,

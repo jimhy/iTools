@@ -369,5 +369,11 @@
     "msiUrl",
     "releaseNotes",
     "releaseUrl"
+  ],
+  "UpdateStatus": [
+    "checkedAt",
+    "currentVersion",
+    "error",
+    "info"
   ]
 }

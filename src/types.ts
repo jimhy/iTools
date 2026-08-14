@@ -500,6 +500,22 @@ export interface EndpointInfo {
   builtinDefault: string;
 }
 
+/** 上次更新检查的结果快照，与 Rust 侧 `UpdateStatus` 一致。**本地瞬时，不发请求**。
+ *
+ *  存在的意义：自动检查对失败刻意静默、没有新版时角标也不显示，于是
+ *  「查过了、已是最新」和「压根没查成」在界面上长得一模一样。有了它，
+ *  界面才能如实说出「什么时候查的、查出什么」。 */
+export interface UpdateStatus {
+  /** 上次检查完成的时刻（Unix 毫秒）；**0 = 本次启动后还没检查过**（别渲染成「已是最新」） */
+  checkedAt: number;
+  /** 上次检查成功时的结果；失败或还没查过为 null */
+  info: UpdateInfo | null;
+  /** 上次检查失败的真实原因；成功或还没查过为 null */
+  error: string | null;
+  /** 当前应用版本（无论查没查过都有） */
+  currentVersion: string;
+}
+
 /** 版本更新信息，与 Rust 侧 `UpdateInfo`（camelCase）一致 */
 export interface UpdateInfo {
   latestVersion: string;

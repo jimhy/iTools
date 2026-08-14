@@ -567,6 +567,19 @@ mod tests {
         // ---------- 更新 ----------
         freeze(
             &mut out,
+            "UpdateStatus",
+            &crate::updater::UpdateStatus {
+                checked_at: 0,
+                info: None,
+                error: None,
+                current_version: "1.1.1".into(),
+            },
+            &["checkedAt", "info", "error", "currentVersion"],
+            "本地瞬时快照，不发请求。**checkedAt=0 表示本次启动后还没检查过**——             界面不许把它渲染成「已是最新」，那正是「自动检查看起来没生效」的根源：             没有新版时角标不显示，于是「查过了」与「没查成」长得一模一样。",
+        );
+
+        freeze(
+            &mut out,
             "UpdateInfo",
             &UpdateInfo {
                 latest_version: "1.0.0".into(),

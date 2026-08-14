@@ -103,6 +103,7 @@
     "allow-dev-preflight",
     "allow-dev-submit-plugin",
     "allow-dev-submission-detail",
-    "allow-mcp-status"
+    "allow-mcp-status",
+    "allow-update-status"
   ]
 }

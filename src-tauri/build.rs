@@ -146,6 +146,8 @@ const COMMANDS: &[&str] = &[
         "dev_submission_detail",
         // 插件开发 MCP 服务器的运行状态（开发者中心面板显示连接地址用）
         "mcp_status",
+        // 上次更新检查的结果快照（本地瞬时，不发请求）
+        "update_status",
         // 由插件调试窗口（plugin-dev）的 bridge 探针调用，**不授予**正式插件窗口
         "dev_log_push",
 ];

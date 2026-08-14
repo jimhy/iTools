@@ -951,8 +951,11 @@ showHome();
 
 /** 启动后多久做第一次检查：让开机那阵子的磁盘/网络先让给正经事。 */
 const UPDATE_FIRST_CHECK_MS = 20_000;
-/** 之后的检查周期。更新不是紧急事，查太勤只会白耗流量、还容易撞 GitHub 限流。 */
-const UPDATE_INTERVAL_MS = 6 * 60 * 60 * 1000;
+/** 之后的检查周期：**每小时**一次。
+ *
+ *  GitHub 未认证 API 的限流是 60 次/小时/IP，每小时 1 次远在阈值之下；
+ *  而 iTools 是常驻应用，6 小时一次意味着上午发的版本下午才被发现。 */
+const UPDATE_INTERVAL_MS = 60 * 60 * 1000;
 
 /** 最近一次检查到的新版本信息；null = 没有新版（角标就不显示）。 */
 let pendingUpdate: UpdateInfo | null = null;

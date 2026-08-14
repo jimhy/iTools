@@ -32,6 +32,7 @@
 //! 「同步函数体 + `(async)`」只是把阻塞从 UI 线程搬到 tokio worker（worker 数 = CPU 核数，
 //! 低核机器上占住一个就让别的异步命令排队），必须再用 `spawn_blocking` 挪进专用阻塞线程池。
 
+use crate::logging::ilog;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -85,6 +86,71 @@ pub struct UpdateInfo {
     /// msi 安装包直链（release 附件里第一个 `.msi` 结尾者），无则 None。
     /// 前端据此决定是否提供「立即更新」（自动下载 + 调起安装）。
     pub msi_url: Option<String>,
+}
+
+/// 最近一次更新检查的结果快照（供「上次检查了什么」展示）。
+///
+/// # 为什么必须有它
+///
+/// 自动检查对失败是**刻意静默**的（联网不通时反复弹提示纯属骚扰），而没有新版时角标也不显示——
+/// 于是「查过了、已是最新」和「压根没查成」在界面上长得一模一样，用户只能反复手动点。
+/// 把「什么时候查的、查出什么」如实存下来给界面用，这个歧义才消失。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateStatus {
+    /// 上次检查完成的时刻（Unix 毫秒）；0 = 本次启动后还没检查过。
+    pub checked_at: i64,
+    /// 上次检查成功时的结果；失败或还没查过为 None。
+    pub info: Option<UpdateInfo>,
+    /// 上次检查失败的真实原因；成功或还没查过为 None。
+    pub error: Option<String>,
+    /// 当前应用版本（无论有没有查过都给，界面至少能显示自己的版本）。
+    pub current_version: String,
+}
+
+/// 最近一次检查的结果（进程内，重启即清空——它只是「本次运行期间查过什么」的备忘）。
+static LAST_CHECK: std::sync::Mutex<Option<(i64, Result<UpdateInfo, String>)>> =
+    std::sync::Mutex::new(None);
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+fn remember(result: Result<UpdateInfo, String>) {
+    if let Ok(mut g) = LAST_CHECK.lock() {
+        *g = Some((now_ms(), result));
+    }
+}
+
+/// 命令：上次更新检查的结果快照。**本地瞬时、不发任何请求**。
+///
+/// 界面进入时调它即可知道「自动检查跑没跑、结论是什么」，不必再手动点一次触发网络请求。
+#[tauri::command]
+pub fn update_status() -> UpdateStatus {
+    let current_version = env!("CARGO_PKG_VERSION").to_string();
+    match LAST_CHECK.lock().ok().and_then(|g| g.clone()) {
+        Some((at, Ok(info))) => UpdateStatus {
+            checked_at: at,
+            info: Some(info),
+            error: None,
+            current_version,
+        },
+        Some((at, Err(e))) => UpdateStatus {
+            checked_at: at,
+            info: None,
+            error: Some(e),
+            current_version,
+        },
+        None => UpdateStatus {
+            checked_at: 0,
+            info: None,
+            error: None,
+            current_version,
+        },
+    }
 }
 
 /// 单个 release 的最小化字段（GitHub REST v3；Gitee v5 的同名字段完全一致）。
@@ -165,25 +231,43 @@ pub async fn check_update() -> Result<UpdateInfo, String> {
 }
 
 /// [`check_update`] 的阻塞实现（跑在 `spawn_blocking` 线程上）。
+///
+/// **每次检查都留一行日志**：自动检查是后台行为，前端对失败刻意静默（免得联网不通时反复骚扰），
+/// 于是「查过了没有新版」与「压根没查成」在界面上长得一模一样。没有日志时，
+/// 连开发者都无法判断自动检查到底跑没跑——本轮就为此绕了一圈。
 fn check_blocking() -> Result<UpdateInfo, String> {
     let current = env!("CARGO_PKG_VERSION").to_string();
-    let release = fetch_release()?;
+    let release = match fetch_release() {
+        Ok(r) => r,
+        Err(e) => {
+            ilog!("[iTools] 检查更新失败（当前 v{current}）：{e}");
+            remember(Err(e.clone()));
+            return Err(e);
+        }
+    };
     let latest = release.tag_name.trim_start_matches('v').to_string();
     let has_update = version_gt(&latest, &current);
+    if has_update {
+        ilog!("[iTools] 检查更新：发现新版本 v{latest}（当前 v{current}）");
+    } else {
+        ilog!("[iTools] 检查更新：已是最新（当前 v{current}，远端 v{latest}）");
+    }
     // 从附件里挑第一个 .msi 直链
     let msi_url = release
         .assets
         .into_iter()
         .map(|a| a.browser_download_url)
         .find(|u| u.to_ascii_lowercase().ends_with(".msi"));
-    Ok(UpdateInfo {
+    let info = UpdateInfo {
         latest_version: latest,
         current_version: current,
         has_update,
         release_url: release.html_url,
         release_notes: release.body,
         msi_url,
-    })
+    };
+    remember(Ok(info.clone()));
+    Ok(info)
 }
 
 /// 命令：在系统默认浏览器打开 release 下载页。

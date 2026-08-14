@@ -10,6 +10,7 @@ import type {
   SyncResult,
   DataUsage,
   UpdateInfo,
+  UpdateStatus,
   ProxyTestResult,
   EndpointInfo,
   SettingsSchema,
@@ -59,6 +60,10 @@ export const dataUsage = () => invoke<DataUsage>("data_usage");
 // ---------- 版本更新（Gitee Releases 源） ----------
 export const getAppVersion = () => invoke<string>("get_app_version");
 export const checkUpdate = () => invoke<UpdateInfo>("check_update");
+/** 上次更新检查的结果快照（**本地瞬时、不发请求**）。
+ *  进页面时用它显示「什么时候自动查的、查出什么」——没有它，
+ *  「查过了没新版」与「压根没查成」在界面上无法区分。 */
+export const updateStatus = () => invoke<UpdateStatus>("update_status");
 export const openReleasePage = (url: string) =>
   invoke<void>("open_release_page", { url });
 export const downloadUpdate = (url: string) =>
