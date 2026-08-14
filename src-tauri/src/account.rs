@@ -39,7 +39,10 @@ pub const DEV_DEFAULT_ENDPOINT: &str = "http://127.0.0.1:8787";
 ///
 /// 输入框**不预填**它（保持空），因为「空」在这里的语义是「跟随默认」而不是「不连服务器」；
 /// 预填进去反而会让用户以为这是自己填过的值，清空时不知道会回落到哪。
-pub const BUILTIN_DEFAULT_ENDPOINT: &str = "https://api.jimhy.cn";
+///
+/// ⚠ **端口不能省**：服务跑在 7101 上，写成 `https://api.jimhy.cn` 会去连 443，
+/// 那个端口上是另一个服务（TLS 握手直接失败），表现为「登录不了、市场拉不到」而毫无线索。
+pub const BUILTIN_DEFAULT_ENDPOINT: &str = "https://api.jimhy.cn:7101";
 
 /// 用户在「账号 → 数据同步」里**手动填写**的云端地址（运行期从 `AppSettings.sync_endpoint` 同步进来）。
 /// 源码/二进制不含任何写死的服务端地址；地址只在运行期从环境变量或用户设置获得，绝不随仓库上传。

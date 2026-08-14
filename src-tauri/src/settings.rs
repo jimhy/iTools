@@ -115,7 +115,7 @@ pub struct AppSettings {
     pub dev_search_visible: bool,
 
     // ---------- 云同步 ----------
-    /// 云同步服务器地址（用户在「账号 → 数据同步」里手动填写，如 https://api.jimhy.cn:7010）。
+    /// 云同步服务器地址（用户在「设置 → 网络」里手动填写，如 https://api.jimhy.cn:7101）。
     /// **绝不写死在源码、也不随仓库上传**；release 未填 = 云端未接入（诚实降级为纯本地）。空 = 未接入。
     #[serde(default)]
     pub sync_endpoint: String,

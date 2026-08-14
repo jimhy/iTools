@@ -75,7 +75,7 @@ export interface AppSettings {
   screenshot_hotkey: string;
   /** 贴图全局快捷键（宿主内置原生贴图：读剪贴板贴成浮窗，空 = 不启用） */
   pin_hotkey: string;
-  /** 云同步服务器地址（用户手填，如 https://api.jimhy.cn:7010）。空 = 云端未接入。不随程序内置。 */
+  /** 云同步服务器地址（用户手填，如 https://api.jimhy.cn:7101）。空 = 使用内置默认服务，见 EndpointInfo.builtinDefault。 */
   sync_endpoint: string;
   /** 开发者中心的调试插件目录（用户手动添加的绝对路径；固定的 `dev-plugins/` 不在此列）。
    *  **后端独占字段**：由 `dev_add_dir` / `dev_remove_dir` 独占维护，整包保存时被
