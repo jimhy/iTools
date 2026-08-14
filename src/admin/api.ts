@@ -183,7 +183,7 @@ export const devRescan = () => invoke<number>("dev_rescan");
 export const devGetConfig = () => invoke<DevConfig>("dev_get_config");
 /** 原生目录选择器；用户取消返回 null。 */
 export const devPickDir = () => invoke<string | null>("dev_pick_dir");
-/** 添加一个调试目录（可指向 plugin-src/xxx/dist 这类构建产物），返回新的配置快照。 */
+/** 添加一个调试目录（可指向 <插件源码>/dist 这类构建产物），返回新的配置快照。 */
 export const devAddDir = (path: string) => invoke<DevConfig>("dev_add_dir", { path });
 /** 移除一个调试目录（固定的 dev-plugins/ 不可移除，后端会拒绝），返回新的配置快照。 */
 export const devRemoveDir = (path: string) => invoke<DevConfig>("dev_remove_dir", { path });

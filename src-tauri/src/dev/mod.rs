@@ -358,7 +358,7 @@ impl DevRuntime {
 /// 扫描全部调试根，返回（插件列表, 目录统计）。
 ///
 /// 每个根支持两种形态：
-/// - 根目录本身就是一个插件（`<root>/plugin.json` 存在）——直接把 `plugin-src/xxx/dist`
+/// - 根目录本身就是一个插件（`<root>/plugin.json` 存在）——直接把 `<插件源码>/dist`
 ///   这类构建产物目录加进来时就是这种；
 /// - 根目录是插件的容器（扫描其一级子目录）——固定的 `dev-plugins/` 是这种。
 fn scan_all(fixed_root: &Path, extra_dirs: &[String]) -> (Vec<DevPlugin>, Vec<DevDirInfo>) {
@@ -880,7 +880,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&b);
     }
 
-    /// 用户添加的目录**本身就是插件**（plugin-src/xxx/dist 这类构建产物）也要能加载。
+    /// 用户添加的目录**本身就是插件**（`<插件源码>/dist` 这类构建产物）也要能加载。
     #[test]
     fn extra_dir_can_be_the_plugin_itself() {
         let base = temp_root("dist");

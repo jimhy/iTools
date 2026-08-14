@@ -172,10 +172,25 @@ export async function renderDev(root: HTMLElement, ctx: AdminCtx): Promise<void>
     box.appendChild(h("div", { class: "dev-sec-title", text: "让 AI 帮你写插件（MCP）" }));
 
     if (!mcp) {
-      box.appendChild(h("div", { class: "dev-sec-desc", text: "正在读取 MCP 服务器状态…" }));
+      box.appendChild(
+        h(
+          "div",
+          { class: "dev-mcp-state" },
+          h("span", { class: "dev-mcp-dot" }),
+          h("span", { class: "dev-mcp-state-text", text: "正在读取状态…" }),
+        ),
+      );
       return box;
     }
     if (!mcp.running) {
+      box.appendChild(
+        h(
+          "div",
+          { class: "dev-mcp-state" },
+          h("span", { class: "dev-mcp-dot dev-mcp-dot-off" }),
+          h("span", { class: "dev-mcp-state-text", text: "未运行" }),
+        ),
+      );
       box.appendChild(
         h(
           "div",
@@ -191,6 +206,16 @@ export async function renderDev(root: HTMLElement, ctx: AdminCtx): Promise<void>
       return box;
     }
 
+    // ⚠ 状态必须**显式**说出来：只摆一个地址，用户无从判断服务器是不是真在跑
+    //（原来就是这样，海风哥一眼就发现「状态没显示」）。这里的取值来自后端实际的监听结果。
+    box.appendChild(
+      h(
+        "div",
+        { class: "dev-mcp-state" },
+        h("span", { class: "dev-mcp-dot dev-mcp-dot-on" }),
+        h("span", { class: "dev-mcp-state-text", text: `运行中 · 监听端口 ${mcp.port}` }),
+      ),
+    );
     box.appendChild(
       h("div", {
         class: "dev-sec-desc",
@@ -221,12 +246,20 @@ export async function renderDev(root: HTMLElement, ctx: AdminCtx): Promise<void>
       h("div", { class: "dev-path-row" }, h("span", { class: "dev-path-label", text: "地址" }), h("code", { class: "dev-path", text: mcp.url })),
       pre,
       h("div", { class: "dev-run-actions" }, copyBtn, copyUrlBtn),
-      h("div", {
-        class: "dev-hint",
-        text:
-          "⚠ 这个端点只监听本机（127.0.0.1），但**没有鉴权**：本机上任何程序都能调用它，" +
-          "其中包括「提交审核」这类会改变线上状态的操作。要关掉它，设环境变量 ITOOLS_MCP=off 后重启。",
-      }),
+      // 这条是整张卡片上最该被看见的一句（它说明了一个真实的安全边界），
+      // 用最淡的 dev-hint 渲染等于埋掉它——改用告警样式。
+      h(
+        "div",
+        { class: "info-box info-box-warn" },
+        h("div", { text: "这个端点没有鉴权" }),
+        h("div", {
+          class: "info-box-detail",
+          text:
+            "它只监听本机（127.0.0.1、不对外），但本机上任何程序都能调用它 —— " +
+            "其中包括「提交审核」，那会用你已登录的账号把插件传去审核。" +
+            "这是面向本地开发场景的取舍；要关掉它，设环境变量 ITOOLS_MCP=off 后重启 iTools。",
+        }),
+      ),
     );
     return box;
   }
@@ -369,7 +402,7 @@ export async function renderDev(root: HTMLElement, ctx: AdminCtx): Promise<void>
       ),
       h("div", {
         class: "dev-sec-desc",
-        text: "这些目录下的每个子目录（含 plugin.json 与 index.html）都会被当作一个调试插件加载。可以直接指向构建产物目录，例如 plugin-src/xxx/dist。",
+        text: "这些目录下的每个子目录（含 plugin.json 与 index.html）都会被当作一个调试插件加载。可以直接指向构建产物目录，例如 <你的插件源码>/dist。",
       }),
       list,
       searchRow,
@@ -445,7 +478,7 @@ export async function renderDev(root: HTMLElement, ctx: AdminCtx): Promise<void>
             : h("span", { class: "dev-muted", text: "（后端未返回固定调试目录）" }),
         ),
         h("li", {}, h("span", {
-          text: "或者点上面的「添加调试目录」，指向任意本地目录 —— 包括构建产物，例如 plugin-src/deskbox/dist，这样改完代码重新构建就能直接调试。",
+          text: "或者点上面的「添加调试目录」，指向任意本地目录 —— 包括构建产物，例如 <你的插件源码>/dist，这样改完代码重新构建就能直接调试。",
         })),
       ),
       h("div", {

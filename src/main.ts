@@ -1,4 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
+// release notes 是 Markdown，复用管理中心那份零依赖渲染器（无 innerHTML，无 XSS 面）
+import { renderMarkdown } from "./admin/markdown";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { LogicalSize, LogicalPosition } from "@tauri-apps/api/dpi";
 import { listen } from "@tauri-apps/api/event";
@@ -1015,11 +1017,19 @@ function askUpdate(info: UpdateInfo): Promise<boolean> {
     meta.className = "update-modal-meta";
     meta.textContent = `当前 v${info.currentVersion} → v${info.latestVersion}`;
 
-    // 更新说明：release notes 可能很长，限高滚动；没有就不占位
+    // 更新说明：release notes 是 **Markdown**，必须渲染。
+    // 原来直接 textContent 塞原文，于是「## 标题」「---」「| 表格 |」全以字面量示人——
+    // 一屏乱码般的符号，用户根本读不出这版改了什么。
+    // 远端图片一律不加载：这个弹窗在未经用户同意更新的情况下就会弹出来，
+    // 让它去请求 release notes 里的外链图片等于把 IP/UA 送出去。
     const notes = document.createElement("div");
     notes.className = "update-modal-notes";
-    notes.textContent = (info.releaseNotes || "").trim();
-    if (!notes.textContent) notes.hidden = true;
+    const raw = (info.releaseNotes || "").trim();
+    if (raw) {
+      notes.appendChild(renderMarkdown(raw, { allowRemoteImages: false }));
+    } else {
+      notes.hidden = true;
+    }
 
     const warn = document.createElement("div");
     warn.className = "update-modal-warn";

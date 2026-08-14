@@ -3314,6 +3314,36 @@ select {
   color: var(--text-faint);
 }
 
+/* MCP 服务器的运行状态：一个点 + 一句话。
+   只摆连接地址而不说「在不在跑」，用户无从判断它是不是活着——必须显式说出来。
+   取值来自后端实际的监听结果，不是配置项的回显。 */
+.dev-mcp-state {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 2px 0 10px;
+}
+.dev-mcp-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-faint);
+  flex: 0 0 auto;
+}
+.dev-mcp-dot-on {
+  background: #22a86c;
+  box-shadow: 0 0 0 3px rgba(34, 168, 108, 0.16);
+}
+.dev-mcp-dot-off {
+  background: var(--danger);
+  box-shadow: 0 0 0 3px var(--danger-weak);
+}
+.dev-mcp-state-text {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
 /* ---------- 开发者中心「发布」tab（提审与审核状态） ---------- */
 
 .dev-pub-card {

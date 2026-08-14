@@ -470,7 +470,7 @@ body,
   z-index: 200;
 }
 .update-modal {
-  width: 400px;
+  width: 460px;
   max-width: calc(100% - 32px);
   background: var(--menu-bg);
   border-radius: 12px;
@@ -479,26 +479,140 @@ body,
   color: var(--fg);
 }
 .update-modal-title {
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 600;
+  color: var(--fg);
 }
 .update-modal-meta {
   margin-top: 4px;
   font-size: 12px;
   color: var(--fg-secondary);
 }
-/* 更新说明可能很长：限高滚动，别把窗口撑爆 */
+/* 更新说明可能很长：限高滚动，别把窗口撑爆。
+   ⚠ 正文颜色**不能**用 --fg-secondary（0.55 不透明度的灰）：那是给「当前 v1.1.1 → v1.2.0」
+   这类附注用的，拿来渲染整段正文会糊成一片、根本读不清。这里用接近正文的对比度。 */
 .update-modal-notes {
-  margin-top: 10px;
-  max-height: 160px;
+  margin-top: 12px;
+  /* 320 是权衡：太矮则一屏塞不下一段完整说明（用户以为内容被截断，实际是要滚），
+     太高则弹窗顶到屏幕边。超出部分照常滚动。 */
+  max-height: 320px;
   overflow-y: auto;
+  overflow-x: hidden;
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--fg);
+  padding: 12px 14px;
+  border-radius: 8px;
+  background: var(--icon-bg);
+  /* 让滚动条不贴着文字 */
+  scrollbar-gutter: stable;
+}
+
+/* ---- 渲染后的 Markdown 排版（作用域限定在弹窗内，不影响别处） ---- */
+.update-modal-notes > :first-child {
+  margin-top: 0;
+}
+.update-modal-notes > :last-child {
+  margin-bottom: 0;
+}
+.update-modal-notes p {
+  margin: 8px 0;
+}
+.update-modal-notes h1,
+.update-modal-notes h2,
+.update-modal-notes h3,
+.update-modal-notes h4 {
+  margin: 14px 0 6px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--fg);
+}
+.update-modal-notes h1 { font-size: 15.5px; }
+.update-modal-notes h2 {
+  font-size: 14px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--hairline);
+}
+/* h3 靠**字号 + 左侧标记**区分层级，不靠调淡颜色——
+   把正文级的小标题染成 0.55 不透明度的灰，就是又一处「看不清楚」。 */
+.update-modal-notes h3,
+.update-modal-notes h4 {
+  font-size: 13px;
+  color: var(--fg);
+  padding-left: 8px;
+  border-left: 3px solid var(--accent);
+}
+.update-modal-notes ul,
+.update-modal-notes ol {
+  margin: 8px 0;
+  padding-left: 20px;
+}
+.update-modal-notes li {
+  margin: 3px 0;
+}
+.update-modal-notes hr {
+  margin: 12px 0;
+  border: none;
+  border-top: 1px solid var(--hairline);
+}
+.update-modal-notes code {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11.5px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--bg-tint);
+}
+.update-modal-notes pre {
+  margin: 8px 0;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: var(--bg-tint);
+  /* 折行而不是横向滚动：弹窗只有 460px 宽，一行配置 JSON 横着滚用户根本看不全，
+     而这类内容（安装命令、MCP 配置）恰恰是要读全甚至照抄的。 */
   white-space: pre-wrap;
-  font-size: 12px;
-  line-height: 1.6;
+  word-break: break-word;
+}
+.update-modal-notes pre code {
+  padding: 0;
+  background: none;
+}
+.update-modal-notes blockquote {
+  margin: 8px 0;
+  padding-left: 10px;
+  border-left: 3px solid var(--hairline);
   color: var(--fg-secondary);
 }
+.update-modal-notes a {
+  color: var(--accent);
+  text-decoration: none;
+}
+.update-modal-notes a:hover {
+  text-decoration: underline;
+}
+/* 表格容易撑破 400px 的弹窗，压紧并允许横向滚动 */
+.update-modal-notes table {
+  width: 100%;
+  margin: 8px 0;
+  border-collapse: collapse;
+  font-size: 11.5px;
+}
+.update-modal-notes th,
+.update-modal-notes td {
+  padding: 4px 8px;
+  border: 1px solid var(--hairline);
+  text-align: left;
+}
+.update-modal-notes th {
+  font-weight: 600;
+  background: var(--bg-tint);
+}
+.update-modal-notes img {
+  max-width: 100%;
+  border-radius: 6px;
+}
+
 .update-modal-warn {
-  margin-top: 10px;
+  margin-top: 12px;
   font-size: 12px;
   line-height: 1.6;
   color: var(--fg-secondary);

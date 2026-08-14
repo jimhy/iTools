@@ -206,7 +206,7 @@ window.itools.onEnter(async (info) => {
 
 **关键约束**：插件页是严格 CSP（`script-src 'self'`），**不能用 CDN**。用 Vite 把 React 打包成 bundle 放进插件目录，`index.html` 用相对路径引用（`'self'` 放行）。已验证：module script + CSS 在插件 CSP 下正常加载运行（自定义协议 `serve()` 返回 `Access-Control-Allow-Origin:*` 满足 `crossorigin` 的 CORS）。
 
-**脚手架结构**（照抄 `plugin-src/deskbox/`）：
+**脚手架结构**（构建型插件的典型布局）：
 ```
 plugin-src/<id>/            # 源码（与加载目录分离；node_modules 走全局 .gitignore）
   package.json              # react + react-dom + zustand；devDeps: vite + @vitejs/plugin-react + typescript
@@ -234,7 +234,8 @@ build: {
 
 **分层规范（设计模式）**：services（底层封装，唯一碰全局 API）→ state（zustand）→ components（只做展示 + 交互）。数据 / 持久化 / 加密逻辑放 store 或 services，**别塞进组件**。TypeScript 严格、CSS Modules、每个组件独立文件。
 
-**完整范例**：`plugin-src/deskbox/`——笔记树 + 加密、待办分类 + 优先级 + 进度、密码库 + 强度 + 分类，三界面按 services/state/components 分层的真实实现，可当模板复制。
+**完整范例**：本仓库不再内置插件源码（插件在各自的仓库里独立开发）。
+需要参考真实实现时，看 `plugins/` 下已构建的插件产物，或用「开发者中心 → MCP」让 AI 直接读规范生成骨架。
 
 ## 九、参考文件（按需读）
 
