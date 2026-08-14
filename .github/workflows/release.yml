@@ -40,6 +40,13 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 默认服务端地址由**构建期**注入，源码里一个字符都不写（公开仓库不暴露运维拓扑，
+          # 克隆仓库自己编译的人也不会莫名其妙连到官方服务器上）。
+          # 在仓库 Settings → Secrets and variables → Actions 里配 ITOOLS_DEFAULT_ENDPOINT，
+          # 形如 https://你的域名:端口（**端口不能省**）。
+          # 没配这个 secret 时构建照常成功，只是发行版没有默认地址——
+          # 用户需在「设置 → 网络」自己填，界面会如实显示「云端未接入」。
+          ITOOLS_DEFAULT_ENDPOINT: ${{ secrets.ITOOLS_DEFAULT_ENDPOINT }}
         with:
           tagName: ${{ github.event.inputs.version || github.ref_name }}
           releaseName: "iTools ${{ github.event.inputs.version || github.ref_name }}"

@@ -135,6 +135,7 @@
   "InstallPreview": [
     "alreadyInstalled",
     "author",
+    "builtinBlocked",
     "cmds",
     "description",
     "downloadSource",

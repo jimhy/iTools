@@ -337,7 +337,12 @@ impl MarketService {
             "name": m.name,
             "displayName": m.display_name,
             "description": m.description,
-            "author": if m.author.is_empty() { author.clone() } else { m.author.clone() },
+            // 作者一律用**服务端确认的提审账号**，不采信 plugin.json 里的 author：
+            // 那个字段是作者自己填的，可以随便写成别人的名字（deskbox 就写着模板占位的 "you"）。
+            // 市场页上「作者」这一栏必须是可追责的身份，否则它什么也证明不了。
+            "author": author,
+            // 作者自称的署名另存一份，供插件详情页展示「作者自己写的是什么」，不与上面混为一谈。
+            "authorDeclared": m.author,
             "version": m.version,
             "contentHash": staged.content_hash,
             "fileCount": staged.file_count,

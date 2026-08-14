@@ -32,17 +32,23 @@ pub const DEV_DEFAULT_ENDPOINT: &str = "http://127.0.0.1:8787";
 
 /// **内置默认端点**：用户没填、也没设环境变量时生效的官方服务地址。
 ///
-/// 这是一条**产品决定**，与「不写死服务端地址」的初衷并不冲突，但要说清楚区别：
-/// 那条红线防的是「把私人服务器地址硬编码进发行版、用户不知情也改不掉」。这里的地址是
-/// iTools 的**公开官方服务**，且三点都成立——用户随时可以在「设置 → 网络」里改掉或清空、
-/// 环境变量优先级更高、界面上如实标注「当前生效的地址来自内置默认」。
+/// # 地址不写在源码里，由**构建期**注入
 ///
-/// 输入框**不预填**它（保持空），因为「空」在这里的语义是「跟随默认」而不是「不连服务器」；
+/// 取自编译时的环境变量 `ITOOLS_DEFAULT_ENDPOINT`（`option_env!` 在编译期求值）。
+/// 官方发行版由 CI 从仓库 secret 注入；**仓库源码里一个字符的服务器地址都没有**，
+/// 克隆仓库自己编译的人不会莫名其妙连到别人的服务器上，公开仓库也不暴露运维拓扑。
+///
+/// 没注入时返回 `None` —— 此时「留空」的语义退回「云端未接入，纯本地」，
+/// 界面按 `source = "none"` 如实呈现，不会假装连着某台服务器。
+///
+/// 输入框**不预填**它（保持空）：「空」的语义是「跟随默认」而不是「不连服务器」，
 /// 预填进去反而会让用户以为这是自己填过的值，清空时不知道会回落到哪。
 ///
-/// ⚠ **端口不能省**：服务跑在 7101 上，写成 `https://api.jimhy.cn` 会去连 443，
-/// 那个端口上是另一个服务（TLS 握手直接失败），表现为「登录不了、市场拉不到」而毫无线索。
-pub const BUILTIN_DEFAULT_ENDPOINT: &str = "https://api.jimhy.cn:7101";
+/// ⚠ 注入时**端口不能省**：写成 `https://example.com` 会去连 443，而服务多半在别的端口上，
+/// 表现为「登录不了、市场拉不到」且毫无线索。
+pub fn builtin_default_endpoint() -> Option<&'static str> {
+    option_env!("ITOOLS_DEFAULT_ENDPOINT").map(str::trim).filter(|s| !s.is_empty())
+}
 
 /// 用户在「账号 → 数据同步」里**手动填写**的云端地址（运行期从 `AppSettings.sync_endpoint` 同步进来）。
 /// 源码/二进制不含任何写死的服务端地址；地址只在运行期从环境变量或用户设置获得，绝不随仓库上传。
@@ -71,8 +77,8 @@ pub fn set_user_endpoint(raw: &str) {
 /// 1) `env`：环境变量 `ITOOLS_SYNC_ENDPOINT`（本机 / CI 显式覆盖，也是 dev 联调本地服务端的开关）；
 /// 2) `user`：用户在「账号 → 数据同步」里**手填**的服务器地址（`AppSettings.sync_endpoint`）；
 /// 3) `devDefault`：**仅 debug 构建**兜底 [`DEV_DEFAULT_ENDPOINT`]（开发时连本地服务端）；
-/// 4) `builtin`：[`BUILTIN_DEFAULT_ENDPOINT`]，官方默认服务；
-/// 5) `none`：**仅测试构建**——云端未接入（诚实降级为纯本地）。
+/// 4) `builtin`：[`builtin_default_endpoint`]，构建期注入的默认服务（官方发行版才有）；
+/// 5) `none`：以上都没有 —— 云端未接入（诚实降级为纯本地）。
 ///
 /// [`cloud_endpoint`] 与 [`endpoint_info`] 都只能走它：这两处一旦各写一遍优先级，
 /// 「设置里显示的地址」与「实际请求的地址」就会分叉——那正是用户这次困惑的根源
@@ -92,7 +98,11 @@ fn resolve_endpoint() -> (Option<String>, &'static str) {
     if cfg!(test) {
         return (None, "none");
     }
-    (Some(BUILTIN_DEFAULT_ENDPOINT.to_string()), "builtin")
+    match builtin_default_endpoint() {
+        Some(ep) => (Some(ep.to_string()), "builtin"),
+        // 构建期没注入默认地址（自行编译的版本就是这种）→ 诚实降级为纯本地
+        None => (None, "none"),
+    }
 }
 
 /// 解析云端 base URL（优先级与来源判定见 [`resolve_endpoint`]）。
@@ -145,7 +155,7 @@ fn endpoint_info(raw_user: &str) -> EndpointInfo {
         effective,
         source: source.to_string(),
         user_value: raw_user.to_string(),
-        builtin_default: BUILTIN_DEFAULT_ENDPOINT.to_string(),
+        builtin_default: builtin_default_endpoint().unwrap_or_default().to_string(),
     }
 }
 

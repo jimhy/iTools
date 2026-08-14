@@ -409,7 +409,7 @@ docker compose up -d --build
   实在编不动就在别的机器上 `docker build` 完导出镜像再 `docker load` 进群晖。
 - **持久化**：compose 已把 `./data/mysql` 与 `./data/packages` 挂出来。**这两个目录不能删**——
   前者是账号与数据，后者是市场里所有插件的包。
-- **反向代理**：用群晖的「反向代理」把 `api.jimhy.cn:7101` 指到容器端口时，
+- **反向代理**：用群晖的「反向代理」把你的域名+端口指到容器端口时，
   **必须设 `SYNC_TRUST_PROXY=true`**，否则所有客户端在服务端看来都是同一个 IP，
   会共用一个限流桶、互相误伤。
 - **上传体积**：提审包最大 32MB（`SYNC_MAX_UPLOAD_MB`）。群晖反代 / Nginx 侧

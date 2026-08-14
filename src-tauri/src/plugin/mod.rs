@@ -801,12 +801,32 @@ pub fn resolve_plugins_root(app: &tauri::AppHandle) -> PathBuf {
     if let Ok(res) = app.path().resource_dir() {
         let seed = res.join("plugins");
         if seed.is_dir() {
-            if let Err(e) = copy_dir_merge(&seed, &writable) {
+            // 已从插件市场装过的同名插件**整个跳过播种**：市场版是经过审核的完整包，
+            // 「缺啥补啥」会把内置版独有的旧文件补进去，让目录变成两个版本的混合物
+            // （内容哈希对不上、旧 JS 还可能被 index.html 引到）。
+            let skip = seed_skip_names(&writable);
+            if !skip.is_empty() {
+                ilog!("[iTools] 这些插件已从市场安装，跳过内置播种：{skip:?}");
+            }
+            if let Err(e) = copy_dir_merge_except(&seed, &writable, &skip) {
                 ilog!("[iTools] 内置插件播种（缺啥补啥）部分失败: {e}");
             }
         }
     }
     writable
+}
+
+/// 播种时要跳过的插件名：**锁文件里记着市场来源的那些**。
+///
+/// 没有这一步，内置插件就没有真正的升级通道——用户从市场装了新版，下次启动内置版的文件
+/// 又被补回去。读锁文件失败 / 没有记录时返回空集，退化成原来的全量播种（安全的默认）。
+fn seed_skip_names(root: &Path) -> std::collections::HashSet<String> {
+    install::read_lock(root)
+        .plugins
+        .iter()
+        .filter(|(_, e)| e.source.is_market())
+        .map(|(name, _)| name.clone())
+        .collect()
 }
 
 /// 「打包分支」的可写插件根：`%LOCALAPPDATA%\itools\plugins`。
@@ -830,6 +850,43 @@ pub fn is_seeded_root(root: &Path) -> bool {
     match (expect.canonicalize(), root.canonicalize()) {
         (Ok(a), Ok(b)) => a == b,
         _ => expect == root,
+    }
+}
+
+/// 顶层「缺啥补啥」播种，但跳过 `skip` 里的插件目录（已从市场安装的那些，见 [`seed_skip_names`]）。
+fn copy_dir_merge_except(
+    src: &Path,
+    dst: &Path,
+    skip: &std::collections::HashSet<String>,
+) -> std::io::Result<()> {
+    if skip.is_empty() {
+        return copy_dir_merge(src, dst);
+    }
+    std::fs::create_dir_all(dst)?;
+    let mut had_err = false;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if skip.contains(&name) {
+            continue;
+        }
+        let to = dst.join(entry.file_name());
+        let res = if entry.file_type()?.is_dir() {
+            copy_dir_merge(&entry.path(), &to)
+        } else if to.exists() {
+            Ok(())
+        } else {
+            std::fs::copy(entry.path(), &to).map(|_| ())
+        };
+        if let Err(e) = res {
+            had_err = true;
+            ilog!("[iTools] 播种失败 {}: {e}", to.display());
+        }
+    }
+    if had_err {
+        Err(std::io::Error::other("部分文件播种失败"))
+    } else {
+        Ok(())
     }
 }
 
@@ -957,6 +1014,55 @@ mod tests {
     /// ——于是开发机上 5 个示例插件全被判成内置、更新与覆盖安装一律被拒。
     /// 注意也不能用「seed 目录 != 插件根」判定：dev 下这两个路径本来就是两份不同的拷贝，
     /// 那样判等于没判。真正的区别是有没有**播种关系**。
+    #[test]
+    #[test]
+    fn market_installed_plugins_are_skipped_when_seeding() {
+        // 「装了市场版、重启又被内置版盖回去」是内置插件升级通道的死穴：
+        // copy_dir_merge 是「缺啥补啥」，内置版独有的旧文件会被补进市场版目录，
+        // 让它变成两个版本的混合物（内容哈希对不上、旧 JS 还可能被 index.html 引到）。
+        // 目录名必须**进程内唯一**：用 process::id() 会让同一进程里的两次执行撞进同一个目录、
+        // 互相 remove_dir_all 掉对方的文件（这个坑本身就是写这条用例时踩到的）。
+        let uniq = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let root = std::env::temp_dir().join(format!("itools-seedskip-{uniq}"));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("deskbox")).unwrap();
+        std::fs::create_dir_all(root.join("base64")).unwrap();
+
+        // deskbox 来自市场，base64 来自 Git
+        install::write_lock_for_test(
+            &root,
+            &[
+                ("deskbox", "itools-market://deskbox"),
+                ("base64", "https://github.com/u/itools-base64.git"),
+            ],
+        );
+
+        let skip = seed_skip_names(&root);
+        assert!(skip.contains("deskbox"), "市场装的插件必须跳过播种");
+        assert!(!skip.contains("base64"), "Git 装的插件不该被跳过");
+
+        // 播种：deskbox 目录不该被写入任何东西，base64 该照常补齐
+        // seed 放在 root **外面**：放里面会被自己遍历到，测的就不是播种逻辑了
+        let seed = std::env::temp_dir().join(format!("itools-seedsrc-{uniq}"));
+        let _ = std::fs::remove_dir_all(&seed);
+        std::fs::create_dir_all(seed.join("deskbox")).unwrap();
+        std::fs::create_dir_all(seed.join("base64")).unwrap();
+        std::fs::write(seed.join("deskbox").join("old.js"), b"builtin-only").unwrap();
+        std::fs::write(seed.join("base64").join("index.html"), b"x").unwrap();
+        copy_dir_merge_except(&seed, &root, &skip).unwrap();
+
+        assert!(
+            !root.join("deskbox").join("old.js").exists(),
+            "内置版独有的文件绝不能被补进市场版目录"
+        );
+        assert!(root.join("base64").join("index.html").exists(), "非市场来源应照常播种");
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&seed);
+    }
+
     #[test]
     fn seeded_root_only_matches_packaged_dir() {
         let packaged = packaged_plugins_root();

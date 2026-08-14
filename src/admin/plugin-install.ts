@@ -246,7 +246,7 @@ export function openInstallModal(ctx: InstallModalCtx): void {
       mainBtn.textContent = preview?.alreadyInstalled ? "更新中…" : "安装中…";
       mainBtn.disabled = true;
     } else if (stage === "preview" && preview) {
-      if (preview.isBuiltin) {
+      if (preview.builtinBlocked) {
         mainBtn.textContent = "无法安装";
         mainBtn.disabled = true;
       } else if (preview.alreadyInstalled) {
@@ -444,11 +444,23 @@ export function openInstallModal(ctx: InstallModalCtx): void {
     previewBox.appendChild(permBox);
 
     // 已安装 / 内置提示
-    if (p.isBuiltin) {
+    if (p.builtinBlocked) {
       previewBox.appendChild(
         h("div", {
           class: "install-notice install-notice-warn",
-          text: `「${p.name}」是随安装包分发的内置插件，不可被 Git 包覆盖。`,
+          text:
+            `「${p.name}」是随安装包分发的内置插件，不可被 Git 包覆盖。` +
+            `它的更新请走插件市场 —— 那条路的每个版本都过了服务端审核。`,
+        }),
+      );
+    } else if (p.isBuiltin) {
+      // 市场安装内置插件：允许，但要说清楚会发生什么
+      previewBox.appendChild(
+        h("div", {
+          class: "install-notice",
+          text:
+            `「${p.name}」随安装包内置了一份，本次将用市场版 v${p.version} 覆盖它。` +
+            `之后启动不会再被内置版本盖回去（插件的用户数据不在插件目录内，不会被清除）。`,
         }),
       );
     } else if (p.alreadyInstalled) {
@@ -504,7 +516,7 @@ export function openInstallModal(ctx: InstallModalCtx): void {
   }
 
   async function doInstall(): Promise<void> {
-    if (!preview || preview.isBuiltin || stage !== "preview") return;
+    if (!preview || preview.builtinBlocked || stage !== "preview") return;
     const p = preview;
     clearError();
     stage = "installing";

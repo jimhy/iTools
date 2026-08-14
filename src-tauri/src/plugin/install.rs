@@ -154,8 +154,17 @@ pub struct InstallPreview {
     /// 装完 runCommand / network 立刻可用——弹窗若一律显示「安装后默认不授权，需逐项开启」
     /// 就是一句谎话。前端据此分支渲染文案。全新安装 / 换来源时为 false。
     pub same_source: bool,
-    /// 同名的是随包内置插件（内置插件每次启动会被播种回来，禁止覆盖）。
+    /// 同名的是随包分发的内置插件。**这不表示本次安装会被拒**——见 [`Self::builtin_blocked`]。
     pub is_builtin: bool,
+    /// 本次安装是否**因为内置规则被拒**（= 是内置插件 **且** 来源是 Git 直装）。
+    ///
+    /// 与 [`Self::is_builtin`] 分成两个字段，是因为它们要驱动不同的 UI：
+    /// - `builtin_blocked` → 按钮禁用 + 说明为什么不能装；
+    /// - `is_builtin && !builtin_blocked` → 按钮可用，但要告诉用户「这会覆盖随包内置的那份」。
+    ///
+    /// 只有一个字段时，市场里明明已上架的内置插件（如 deskbox）会显示成「无法安装」——
+    /// 上架了却点不动，正是这次要修的问题。
+    pub builtin_blocked: bool,
     pub file_count: usize,
     pub total_bytes: u64,
     /// 本次归档实际是从哪个源下载的（如 `github.com（官方直连）` / `gh-proxy.com`）。
@@ -1091,6 +1100,25 @@ pub fn read_lock(root: &Path) -> LockFile {
     lock
 }
 
+/// 测试辅助：按 `(插件名, 来源 URL)` 造一份锁文件。
+///
+/// 只给测试用（`mod.rs` 的播种跳过用例要它），生产代码一律走 [`update_lock`]。
+#[cfg(test)]
+pub(crate) fn write_lock_for_test(root: &Path, entries: &[(&str, &str)]) {
+    let mut lock = LockFile::default();
+    for (name, url) in entries {
+        lock.plugins.insert(
+            (*name).to_string(),
+            InstalledEntry {
+                source: parse_git_url(url).expect("测试来源 URL 必须可解析"),
+                resolved_version: "1.0.0".into(),
+                installed_at: now_rfc3339(),
+            },
+        );
+    }
+    write_lock(root, &lock).expect("测试锁文件应能写入");
+}
+
 /// 写安装来源锁文件：**先写临时文件再 rename**，避免进程中断留下半截 JSON。
 ///
 /// 临时文件名带唯一后缀（不是固定的 `.installed.json.tmp`）：固定名意味着两个并发写入者
@@ -1199,6 +1227,19 @@ pub fn init_builtins(app: &AppHandle, plugins_root: &Path) {
 /// 某插件名是否为随包内置插件。
 pub fn is_builtin(name: &str) -> bool {
     BUILTIN_NAMES.get().is_some_and(|s| s.contains(name))
+}
+
+/// 这个来源是否**不允许**覆盖同名内置插件。
+///
+/// 只有 **Git 直装**被挡：那条路没有任何审核，任何仓库都能顶掉一个随包分发的插件，
+/// 而客户端是按插件名归属用户授权与数据的——这是实打实的提权面。
+///
+/// **插件市场放行**：市场里的每个版本都过了服务端的机械校验与代码审核，且落地后锁文件里
+/// 记着 `itools-market://` 来源，[`super::seed_skip_names`] 会据此让启动播种跳过它，
+/// 不会出现「装了市场版、重启又被内置版盖回去」。内置插件因此有了正常的升级通道——
+/// 在此之前它们只能等应用整体发版，而市场里明明已经有新版却显示「无法安装」。
+pub(crate) fn blocks_builtin(source: &GitSource) -> bool {
+    !source.is_market()
 }
 
 // ==================== 暂存区 ====================
@@ -1750,6 +1791,7 @@ pub(super) async fn preview_from_market_package(
         installed_version,
         same_source: prior_url.as_deref() == Some(source.url.as_str()),
         is_builtin: is_builtin(&name),
+        builtin_blocked: is_builtin(&name) && blocks_builtin(&source),
         file_count,
         total_bytes,
         download_source: staged.download_source.clone(),
@@ -1840,6 +1882,7 @@ async fn preview_impl(
         // 与 plugin_install_confirm 的清授权条件严格一致（那里也是比 prior_url == source.url）
         same_source: prior_url.as_deref() == Some(source.url.as_str()),
         is_builtin: is_builtin(&name),
+        builtin_blocked: is_builtin(&name) && blocks_builtin(&source),
         file_count,
         total_bytes,
         download_source: staged.download_source.clone(),
@@ -1892,12 +1935,14 @@ pub async fn plugin_install_confirm(
         ilog!("[iTools] 安装确认失败：token={} 在暂存区里找不到", &token[..8.min(token.len())]);
         "安装会话已失效（可能已超时或已被处理），请重新解析仓库地址".to_string()
     })?;
-    if is_builtin(&pending.name) {
+    // 内置插件只挡 **Git 安装**，市场安装放行（见 [`blocks_builtin`]）。
+    if is_builtin(&pending.name) && blocks_builtin(&pending.source) {
         // 暂存树可能有几十 MB，这一下删除同样丢给阻塞线程池
         let dir = pending.dir.clone();
         let _ = tauri::async_runtime::spawn_blocking(move || std::fs::remove_dir_all(dir)).await;
         return Err(format!(
-            "「{}」是随安装包分发的内置插件，不能被 Git 安装覆盖（每次启动都会被内置版本播种回来）",
+            "「{}」是随安装包分发的内置插件，不能被 Git 安装覆盖。它的更新请走插件市场——\
+             那条路的每个版本都过了服务端审核，安装后也不会被内置版本播种回来。",
             pending.name
         ));
     }
@@ -2373,6 +2418,18 @@ mod tests {
         .expect("市场来源必须被 Git 下载路径拒绝");
         assert!(err.contains("插件市场"), "{err}");
         assert!(err.contains("deskbox"), "{err}");
+    }
+
+    #[test]
+    fn builtin_blocks_git_but_not_market() {
+        // 这条是 deskbox「上架了却点不动」那个问题的收口：
+        // Git 直装没有任何审核，任何仓库都能顶掉内置插件（提权面）→ 必须挡；
+        // 市场版过了服务端机械校验 + 代码审核，且落地后播种会跳过它 → 放行。
+        let git = parse_git_url_with("https://github.com/who/ever.git", &hosts()).unwrap();
+        assert!(blocks_builtin(&git), "Git 直装必须继续被挡");
+
+        let market = parse_git_url("itools-market://deskbox").unwrap();
+        assert!(!blocks_builtin(&market), "市场安装必须放行，否则内置插件永远没有升级通道");
     }
 
     #[test]

@@ -289,6 +289,7 @@ mod tests {
             installed_version: None,
             same_source: false,
             is_builtin: false,
+            builtin_blocked: false,
             file_count: 0,
             total_bytes: 0,
             download_source: crate::plugin::mirror::official_label(
@@ -304,7 +305,7 @@ mod tests {
             &[
                 "token", "name", "version", "description", "author", "permissions", "featureCount",
                 "cmds", "logo", "readme", "source", "alreadyInstalled", "installedVersion",
-                "sameSource", "isBuiltin", "fileCount", "totalBytes", "downloadSource", "viaMirror",
+                "sameSource", "isBuiltin", "builtinBlocked", "fileCount", "totalBytes", "downloadSource", "viaMirror",
                 "hashVerified",
             ],
             "sameSource / downloadSource / viaMirror / hashVerified 是安装弹窗必须如实展示的四项。",
@@ -552,7 +553,7 @@ mod tests {
                 effective: Some(crate::account::DEV_DEFAULT_ENDPOINT.into()),
                 source: "devDefault".into(),
                 user_value: String::new(),
-                builtin_default: crate::account::BUILTIN_DEFAULT_ENDPOINT.into(),
+                builtin_default: "https://cloud.example.com:7101".into(),
             },
             &["effective", "source", "userValue", "builtinDefault"],
             "source ∈ env | user | devDefault | builtin | none。userValue 为空而 effective 有值时，\
