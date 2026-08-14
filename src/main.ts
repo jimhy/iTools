@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { LogicalSize, LogicalPosition } from "@tauri-apps/api/dpi";
 import { listen } from "@tauri-apps/api/event";
-import type { AppSettings, HomeData, SearchItem } from "./types";
+import type { AppSettings, HomeData, SearchItem, UpdateInfo } from "./types";
 import { AUTO_CLEAR_NEVER } from "./types";
 import { TOOL_ICONS } from "./tool-icons";
 import { SYSTEM_ICONS } from "./system-icons";
@@ -25,6 +25,8 @@ const input = document.querySelector<HTMLInputElement>("#query")!;
 const list = document.querySelector<HTMLUListElement>("#results")!;
 const pane = document.querySelector<HTMLDivElement>("#home")!;
 const avatarEl = document.querySelector<HTMLDivElement>("#avatar")!;
+const avatarLetterEl = document.querySelector<HTMLSpanElement>("#avatar-letter")!;
+const updateBadgeEl = document.querySelector<HTMLSpanElement>("#update-badge")!;
 
 // ---------- 状态 ----------
 
@@ -456,7 +458,8 @@ async function refreshHome(): Promise<void> {
   // 问候语与头像常驻搜索栏
   const user = homeData.user;
   if (user) {
-    avatarEl.textContent = user[0].toUpperCase();
+    // 只改字母那个子元素：直接给 #avatar 设 textContent 会连更新角标一起抹掉
+    avatarLetterEl.textContent = user[0].toUpperCase();
   }
   updatePlaceholder();
   if (mode === "home") renderHome();
@@ -802,6 +805,8 @@ appWindow.onFocusChanged(({ payload: focused }) => {
   } else {
     // 拖动窗口引起的短暂失焦不隐藏（否则一按住拖动/点边缘就把面板隐藏掉）
     if (Date.now() < suppressHideUntil) return;
+    // 更新弹窗开着时同理：点弹窗按钮的瞬间若把面板藏了，用户就再也点不到「立即更新」
+    if (updateModalOpen) return;
     void hideKeepState();
     justHidden = true;
     scheduleAutoClear(); // 失焦按设置定时清除搜索内容
@@ -941,3 +946,133 @@ void listen("profile-changed", () => void refreshHome());
 
 input.focus();
 showHome();
+
+// ---------- 版本更新：自动检查 + 头像角标 + 确认弹窗 ----------
+
+/** 启动后多久做第一次检查：让开机那阵子的磁盘/网络先让给正经事。 */
+const UPDATE_FIRST_CHECK_MS = 20_000;
+/** 之后的检查周期。更新不是紧急事，查太勤只会白耗流量、还容易撞 GitHub 限流。 */
+const UPDATE_INTERVAL_MS = 6 * 60 * 60 * 1000;
+
+/** 最近一次检查到的新版本信息；null = 没有新版（角标就不显示）。 */
+let pendingUpdate: UpdateInfo | null = null;
+/** 更新弹窗是否开着——开着时必须抑制「失焦隐藏」，否则点按钮的瞬间面板就没了。 */
+let updateModalOpen = false;
+
+/**
+ * 静默检查更新：**失败一律不打扰用户**。
+ *
+ * 检查更新是后台行为，网络不通、GitHub 限流、被墙都很常见；为此弹错误提示纯属骚扰。
+ * 失败就当作「暂时没有新版」，下个周期再说；用户真想知道，设置页还有手动检查（那里会报错）。
+ */
+async function checkUpdateSilently(): Promise<void> {
+  try {
+    const info = await invoke<UpdateInfo>("check_update");
+    pendingUpdate = info.hasUpdate ? info : null;
+  } catch {
+    pendingUpdate = null; // 查不到 ≠ 没有新版，但绝不据此谎报「有更新」
+  }
+  updateBadgeEl.hidden = pendingUpdate === null;
+  if (pendingUpdate) {
+    updateBadgeEl.title = `有新版本 v${pendingUpdate.latestVersion}，点击更新`;
+  }
+}
+
+/** 更新确认弹窗。返回用户是否点了「立即更新」。 */
+function askUpdate(info: UpdateInfo): Promise<boolean> {
+  return new Promise((resolve) => {
+    updateModalOpen = true;
+    const mask = document.createElement("div");
+    mask.className = "update-mask";
+    let settled = false;
+    const close = (ok: boolean): void => {
+      if (settled) return;
+      settled = true;
+      updateModalOpen = false;
+      document.removeEventListener("keydown", onKey, true);
+      mask.remove();
+      void resizeToContent();
+      resolve(ok);
+    };
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === "Escape") {
+        // 必须拦住：否则 Esc 会继续走到主面板的「关闭并藏窗」
+        e.stopPropagation();
+        e.preventDefault();
+        close(false);
+      }
+    };
+
+    const box = document.createElement("div");
+    box.className = "update-modal";
+    const title = document.createElement("div");
+    title.className = "update-modal-title";
+    title.textContent = `发现新版本 v${info.latestVersion}`;
+    const meta = document.createElement("div");
+    meta.className = "update-modal-meta";
+    meta.textContent = `当前 v${info.currentVersion} → v${info.latestVersion}`;
+
+    // 更新说明：release notes 可能很长，限高滚动；没有就不占位
+    const notes = document.createElement("div");
+    notes.className = "update-modal-notes";
+    notes.textContent = (info.releaseNotes || "").trim();
+    if (!notes.textContent) notes.hidden = true;
+
+    const warn = document.createElement("div");
+    warn.className = "update-modal-warn";
+    // 如实告知：安装要退出 app，且 msi 会走系统安装向导（需要管理员授权）
+    warn.textContent = info.msiUrl
+      ? "更新将下载安装包并启动系统安装程序，iTools 会先退出。安装需要管理员授权。"
+      : "本次发布没有提供安装包直链，将为你打开下载页手动下载。";
+
+    const actions = document.createElement("div");
+    actions.className = "update-modal-actions";
+    const later = document.createElement("button");
+    later.className = "update-btn";
+    later.textContent = "稍后";
+    later.addEventListener("click", () => close(false));
+    const go = document.createElement("button");
+    go.className = "update-btn update-btn-primary";
+    go.textContent = info.msiUrl ? "立即更新" : "前往下载";
+    go.addEventListener("click", () => close(true));
+    actions.append(later, go);
+
+    box.append(title, meta, notes, warn, actions);
+    mask.appendChild(box);
+    mask.addEventListener("mousedown", (e) => {
+      if (e.target === mask) close(false);
+    });
+    document.addEventListener("keydown", onKey, true);
+    document.body.appendChild(mask);
+    void resizeToContent();
+    go.focus();
+  });
+}
+
+/** 执行更新：下载 msi → 调起安装并退出；没有直链则打开下载页。 */
+async function runUpdate(info: UpdateInfo): Promise<void> {
+  if (!info.msiUrl) {
+    void invoke("open_release_page", { url: info.releaseUrl });
+    return;
+  }
+  updateBadgeEl.title = "正在下载更新…";
+  try {
+    const path = await invoke<string>("download_update", { url: info.msiUrl });
+    await invoke("launch_installer_and_quit", { path }); // 调起安装向导并退出本进程
+  } catch (err) {
+    console.error("update failed", err);
+    // 下载/调起失败：退回下载页，别让用户卡在「点了没反应」
+    updateBadgeEl.title = "更新失败，点击前往下载页";
+    void invoke("open_release_page", { url: info.releaseUrl });
+  }
+}
+
+updateBadgeEl.addEventListener("click", async (e) => {
+  e.stopPropagation(); // 别触发头像的「打开管理中心」
+  if (!pendingUpdate) return;
+  const info = pendingUpdate;
+  if (await askUpdate(info)) await runUpdate(info);
+});
+
+window.setTimeout(() => void checkUpdateSilently(), UPDATE_FIRST_CHECK_MS);
+window.setInterval(() => void checkUpdateSilently(), UPDATE_INTERVAL_MS);

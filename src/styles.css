@@ -258,6 +258,38 @@ body,
   filter: brightness(1.12);
 }
 
+/* 头像右下角的「有新版」角标。position 相对头像定位，故头像需要 relative */
+.avatar {
+  position: relative;
+}
+.update-badge {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #34c759;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* 与头像同色的描边：让角标在渐变头像上也能看清边界 */
+  box-shadow: 0 0 0 2px var(--menu-bg);
+  cursor: pointer;
+  transition: transform 0.12s ease;
+}
+.update-badge[hidden] {
+  display: none;
+}
+.update-badge:hover {
+  transform: scale(1.15);
+}
+.update-badge svg {
+  width: 9px;
+  height: 9px;
+}
+
 /* ---------- 网格面板（主面板 + 搜索结果网格共用） ---------- */
 #home {
   display: none;
@@ -425,4 +457,76 @@ body,
   background: var(--fg-secondary);
   background-clip: padding-box;
   border: 2px solid transparent;
+}
+
+/* ---------- 更新确认弹窗（主面板内） ---------- */
+.update-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.32);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+}
+.update-modal {
+  width: 400px;
+  max-width: calc(100% - 32px);
+  background: var(--menu-bg);
+  border-radius: 12px;
+  padding: 18px 20px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.28);
+  color: var(--fg);
+}
+.update-modal-title {
+  font-size: 15px;
+  font-weight: 600;
+}
+.update-modal-meta {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--fg-secondary);
+}
+/* 更新说明可能很长：限高滚动，别把窗口撑爆 */
+.update-modal-notes {
+  margin-top: 10px;
+  max-height: 160px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--fg-secondary);
+}
+.update-modal-warn {
+  margin-top: 10px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--fg-secondary);
+}
+.update-modal-actions {
+  margin-top: 16px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+.update-btn {
+  padding: 6px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--hairline);
+  background: transparent;
+  color: var(--fg);
+  font-size: 13px;
+  cursor: pointer;
+}
+.update-btn:hover {
+  background: var(--icon-bg);
+}
+.update-btn-primary {
+  background: var(--accent);
+  border-color: transparent;
+  color: #fff;
+}
+.update-btn-primary:hover {
+  filter: brightness(1.08);
+  background: var(--accent);
 }

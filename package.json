@@ -1,6 +1,6 @@
 {
   "name": "itools",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "iTools — macOS 风格的效率启动器（Tauri 2 + Rust + HTML）",
   "type": "module",
   "scripts": {

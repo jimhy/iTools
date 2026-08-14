@@ -29,7 +29,17 @@
             spellcheck="false"
             placeholder="Hi"
           />
-          <div id="avatar" class="avatar">i</div>
+          <div id="avatar" class="avatar">
+            <!-- 字母单独成元素：直接给 #avatar 设 textContent 会把下面的角标一起抹掉 -->
+            <span id="avatar-letter">i</span>
+            <!-- 有新版本时才显示：右下角一个小箭头角标（隐藏时不占位、不可点） -->
+            <span id="update-badge" class="update-badge" hidden title="有新版本可更新">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"
+                   stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M12 19V5M5 12l7-7 7 7" />
+              </svg>
+            </span>
+          </div>
         </div>
         <div id="home"></div>
         <ul id="results" class="results"></ul>
