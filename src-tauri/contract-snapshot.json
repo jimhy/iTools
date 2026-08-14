@@ -342,6 +342,23 @@
     "groups",
     "version"
   ],
+  "SkillTarget": [
+    "clientDetected",
+    "dir",
+    "id",
+    "installed",
+    "installedVersion",
+    "label",
+    "managed",
+    "note",
+    "outdated"
+  ],
+  "SkillsStatus": [
+    "bundledVersion",
+    "sourceAvailable",
+    "sourceError",
+    "targets"
+  ],
   "Submission": [
     "contentHash",
     "createdAt",

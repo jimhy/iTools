@@ -785,6 +785,43 @@ mod tests {
             "running / port / url 都来自**实际的监听结果**，不是配置项的回显：             端口被占用时 running=false 且 error 里是真实原因，面板不许显示一个假的「运行中」             或一个连不上的地址。",
         );
 
+        // ---------- skill 一键安装（skills.rs） ----------
+        freeze(
+            &mut out,
+            "SkillTarget",
+            &crate::skills::SkillTarget {
+                id: "claude".into(),
+                label: "Claude Code".into(),
+                dir: "C:\\Users\\me\\.claude\\skills\\itools-plugin-dev".into(),
+                client_detected: true,
+                installed: true,
+                managed: true,
+                installed_version: Some("1.2.0".into()),
+                outdated: false,
+                note: None,
+            },
+            &[
+                "id", "label", "dir", "clientDetected", "installed", "managed",
+                "installedVersion", "outdated", "note",
+            ],
+            "写的是**别的程序**的配置目录，所以 dir 必须在面板上显示出来（点之前就知道写到哪）；\
+             managed=false 表示那个目录不是 iTools 装的，此时安装与卸载都必须拒绝、\
+             并在 note 里说明原因——绝不覆盖或删除用户自己放的同名 skill。",
+        );
+        freeze(
+            &mut out,
+            "SkillsStatus",
+            &crate::skills::SkillsStatus {
+                source_available: true,
+                source_error: None,
+                bundled_version: "1.2.0".into(),
+                targets: Vec::new(),
+            },
+            &["sourceAvailable", "sourceError", "bundledVersion", "targets"],
+            "sourceAvailable=false 时安装按钮要**禁用**并显示 sourceError，\
+             不能让用户点了才发现安装包里根本没带 skill。",
+        );
+
         // ---------- 插件提审（dev/submit.rs） ----------
         freeze(
             &mut out,

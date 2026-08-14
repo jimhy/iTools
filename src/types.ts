@@ -674,6 +674,37 @@ export interface McpStatus {
   error: string | null;
 }
 
+/** 一个 AI 客户端的 skill 安装状态，与 Rust 侧 `SkillTarget` 一致。 */
+export interface SkillTarget {
+  /** 客户端 id（`claude` / `codex`），安装/卸载时传它。 */
+  id: string;
+  label: string;
+  /** 完整目标路径。**必须显示出来**——这是写别人的配置目录，用户点之前有权知道写到哪。 */
+  dir: string;
+  /** 家目录下有没有该客户端的配置目录（没有多半是没装它，但仍允许安装）。 */
+  clientDetected: boolean;
+  installed: boolean;
+  /** 是不是 iTools 装的。installed 为真而这里为假 = 用户自己的同名 skill，我们不碰。 */
+  managed: boolean;
+  /** 已装版本（非托管目录读不到，为 null）。 */
+  installedVersion: string | null;
+  /** 已装版本与随包版本不一致，该更新了。 */
+  outdated: boolean;
+  /** 需要额外说清楚的情况（如「这个目录不是 iTools 装的」）。 */
+  note: string | null;
+}
+
+/** skill 安装总状态，与 Rust 侧 `SkillsStatus` 一致。
+ *  sourceAvailable=false 时安装按钮要**禁用**并显示 sourceError，
+ *  不能让用户点了才发现安装包里没带 skill。 */
+export interface SkillsStatus {
+  sourceAvailable: boolean;
+  sourceError: string | null;
+  /** 随包 skill 的版本（= 当前 iTools 版本）。 */
+  bundledVersion: string;
+  targets: SkillTarget[];
+}
+
 /** 开发者中心的全局配置快照，与 Rust 侧 `DevConfig` 一致。 */
 export interface DevConfig {
   /** 调试插件是否参与主搜索（默认 false）。 */

@@ -3076,6 +3076,19 @@ select {
   flex: 1 1 auto;
   min-width: 0;
 }
+/* skill 一键安装：每个客户端一块，块之间用分隔线断开，
+   免得两行路径 + 两组按钮糊成一片看不出谁是谁 */
+.dev-skill-item {
+  padding: 10px 0;
+}
+.dev-skill-item + .dev-skill-item {
+  border-top: 1px solid var(--border);
+}
+/* 这里的按钮紧跟在路径行下面，不需要 dev-run-actions 那样大的上边距 */
+.dev-skill-item .dev-run-actions {
+  margin-top: 8px;
+}
+
 .dev-kv-bar {
   display: flex;
   align-items: center;

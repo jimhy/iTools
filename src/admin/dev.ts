@@ -18,7 +18,16 @@
 //! - 正常降级（没有调试插件 / 目录为空 / 没有日志）一律渲染成引导或空态，**不渲染成故障**。
 
 import type { AdminCtx } from "./main";
-import type { DevConfig, DevFeature, DevIssue, DevMockConfig, DevPluginInfo, McpStatus } from "../types";
+import type {
+  DevConfig,
+  DevFeature,
+  DevIssue,
+  DevMockConfig,
+  DevPluginInfo,
+  McpStatus,
+  SkillTarget,
+  SkillsStatus,
+} from "../types";
 import { h, makeSwitch } from "./ui";
 import * as api from "./api";
 import { errText, permLabel } from "./plugin-install";
@@ -262,6 +271,154 @@ export async function renderDev(root: HTMLElement, ctx: AdminCtx): Promise<void>
       ),
     );
     return box;
+  }
+
+  /** skill 安装状态（异步读到后重绘这一块）。 */
+  let skills: SkillsStatus | null = null;
+
+  /** 「给 AI 装上插件开发 skill」卡片。
+   *
+   *  与 MCP 卡片的分工：MCP 让 AI 能**驱动**开发者中心（跑模拟器 / 读日志 / 提审），
+   *  skill 让它**知道 iTools 插件该怎么写**。
+   *
+   *  ⚠ 这个功能会往用户的 `~/.claude`、`~/.codex` 里写文件 —— 那是**别的程序的地盘**。
+   *  所以完整路径、装的是不是 iTools 版、能不能动，全部如实摆在界面上；
+   *  后端会拒绝的情况（目录不是 iTools 装的），这里**不摆按钮**，而不是让用户点了才吃一个错误。 */
+  function skillCard(): HTMLElement {
+    const box = h("div", { class: "dev-dirs" });
+    box.appendChild(h("div", { class: "dev-sec-title", text: "给 AI 装上插件开发 skill" }));
+    box.appendChild(
+      h("div", {
+        class: "dev-sec-desc",
+        text:
+          "MCP 让 AI 能驱动开发者中心（跑触发模拟器、读调试日志、提审），skill 让它知道 iTools 插件该怎么写 —— 两者互补。" +
+          "装上之后直接说「给 iTools 做个 XX 插件」就行，不用再把规范贴给它。",
+      }),
+    );
+
+    if (!skills) {
+      box.appendChild(
+        h(
+          "div",
+          { class: "dev-mcp-state" },
+          h("span", { class: "dev-mcp-dot" }),
+          h("span", { class: "dev-mcp-state-text", text: "正在读取安装状态…" }),
+        ),
+      );
+      return box;
+    }
+
+    // 源都没有就别摆按钮：点了必然失败的控件等于骗人
+    if (!skills.sourceAvailable) {
+      box.appendChild(
+        h(
+          "div",
+          { class: "info-box info-box-warn" },
+          h("div", { text: "这个安装包里没带 skill 源文件，装不了。" }),
+          h("div", { class: "info-box-detail", text: skills.sourceError ?? "（后端没有给出原因）" }),
+        ),
+      );
+      return box;
+    }
+
+    const list = h("div", { class: "dev-dir-list" });
+    for (const t of skills.targets) list.appendChild(skillRow(t));
+    box.appendChild(list);
+    return box;
+  }
+
+  /** 一个客户端的安装行。 */
+  function skillRow(t: SkillTarget): HTMLElement {
+    const bundled = skills?.bundledVersion ?? "";
+    const tags = h("div", { class: "dev-dir-tags" });
+
+    if (t.installed && t.managed) {
+      tags.appendChild(
+        h("span", {
+          class: "plugin-badge" + (t.outdated ? " dev-badge-err" : " plugin-badge-muted"),
+          text: t.outdated ? `已装 v${t.installedVersion ?? "?"} · 可更新` : `已装 v${t.installedVersion ?? "?"}`,
+          title: t.outdated ? `随包版本是 v${bundled}，装的是旧的` : "与随包版本一致",
+        }),
+      );
+    } else if (t.installed) {
+      tags.appendChild(
+        h("span", {
+          class: "plugin-badge dev-badge-err",
+          text: "非 iTools 安装",
+          title: "这个目录不是 iTools 装的，安装与卸载都不会碰它",
+        }),
+      );
+    } else {
+      tags.appendChild(h("span", { class: "plugin-badge plugin-badge-muted", text: "未安装" }));
+    }
+    if (!t.clientDetected) {
+      tags.appendChild(
+        h("span", {
+          class: "plugin-badge plugin-badge-muted",
+          text: "未检测到该客户端",
+          title: "家目录下没有它的配置目录。仍然可以装（之后再装客户端也认得），只是它现在多半没在用。",
+        }),
+      );
+    }
+
+    const item = h(
+      "div",
+      { class: "dev-skill-item" },
+      h(
+        "div",
+        { class: "dev-path-row" },
+        h("span", { class: "dev-path-label", text: t.label }),
+        h("code", { class: "dev-path", text: t.dir, title: t.dir }),
+        tags,
+      ),
+    );
+
+    // 非托管目录：如实说明为什么这里没有按钮
+    if (t.note) {
+      item.appendChild(
+        h(
+          "div",
+          { class: "info-box info-box-warn" },
+          h("div", { class: "info-box-detail", text: t.note }),
+        ),
+      );
+      return item;
+    }
+
+    const actions = h("div", { class: "dev-run-actions" });
+    const run = async (btn: HTMLButtonElement, op: () => Promise<SkillsStatus>, okMsg: string) => {
+      btn.disabled = true;
+      try {
+        skills = await op();
+        ctx.toast(okMsg);
+        paint();
+      } catch (err) {
+        console.error("skills op failed", err);
+        // 后端拒绝的原因（如「这个目录不是 iTools 装的」）要原样给用户看，不改写成泛泛的失败
+        ctx.toast(errText(err, "操作失败"));
+        btn.disabled = false;
+      }
+    };
+
+    const installLabel = !t.installed ? "安装" : t.outdated ? `更新到 v${bundled}` : "重新安装";
+    const installBtn = h("button", {
+      class: "btn btn-sm" + (t.installed && !t.outdated ? "" : " btn-primary"),
+      text: installLabel,
+    }) as HTMLButtonElement;
+    installBtn.addEventListener("click", () => {
+      void run(installBtn, () => api.skillsInstall(t.id), `已安装到 ${t.label}`);
+    });
+    actions.appendChild(installBtn);
+
+    if (t.installed && t.managed) {
+      const rmBtn = h("button", { class: "btn btn-sm", text: "卸载" }) as HTMLButtonElement;
+      rmBtn.addEventListener("click", () => {
+        void run(rmBtn, () => api.skillsUninstall(t.id), `已从 ${t.label} 卸载`);
+      });
+      actions.appendChild(rmBtn);
+    }
+    item.appendChild(actions);
+    return item;
   }
 
   function dirsCard(): HTMLElement {
@@ -968,7 +1125,7 @@ export async function renderDev(root: HTMLElement, ctx: AdminCtx): Promise<void>
     const main = plugins.length
       ? h("div", { class: "dev-main" }, listPane(), detailPane())
       : h("div", { class: "dev-main dev-main-empty" }, emptyGuide());
-    scroll.append(intro(), mcpCard(), dirsCard(), main);
+    scroll.append(intro(), mcpCard(), skillCard(), dirsCard(), main);
   }
 
   /** 列表指纹：只覆盖会影响界面的字段。用来判断「后台刷新到底有没有变化」，
@@ -1031,6 +1188,27 @@ export async function renderDev(root: HTMLElement, ctx: AdminCtx): Promise<void>
       if (active !== instance) return;
       console.error("mcp_status failed", err);
       mcp = { running: false, port: 0, url: "", error: `读取状态失败：${errText(err, "未知错误")}` };
+      paint();
+    });
+
+  // skill 安装状态同理：读失败就把原因显示成「源不可用」，不假装成「未安装」——
+  // 后者会让用户一直点安装、一直失败。
+  void api
+    .skillsStatus()
+    .then((st) => {
+      if (active !== instance) return;
+      skills = st;
+      paint();
+    })
+    .catch((err) => {
+      if (active !== instance) return;
+      console.error("skills_status failed", err);
+      skills = {
+        sourceAvailable: false,
+        sourceError: `读取安装状态失败：${errText(err, "未知错误")}`,
+        bundledVersion: "",
+        targets: [],
+      };
       paint();
     });
 

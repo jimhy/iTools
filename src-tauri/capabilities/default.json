@@ -104,6 +104,9 @@
     "allow-dev-submit-plugin",
     "allow-dev-submission-detail",
     "allow-mcp-status",
+    "allow-skills-status",
+    "allow-skills-install",
+    "allow-skills-uninstall",
     "allow-update-status"
   ]
 }

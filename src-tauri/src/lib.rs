@@ -18,6 +18,7 @@ mod plugin;
 mod profile;
 mod search;
 mod settings;
+mod skills;
 mod store;
 mod sync;
 mod updater;
@@ -449,6 +450,9 @@ pub fn run() {
             dev::commands::dev_submit_plugin,
             dev::commands::dev_submission_detail,
             mcp::mcp_status,
+            skills::skills_status,
+            skills::skills_install,
+            skills::skills_uninstall,
             updater::update_status,
             dev::storage::dev_storage_list,
             dev::storage::dev_storage_set,
