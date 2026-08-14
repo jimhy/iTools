@@ -1,6 +1,6 @@
 ---
 name: itools-plugin-dev
-description: 开发 iTools 插件——iTools 是一款 macOS 风格的效率启动器，插件是「关键词触发 → 弹出 HTML 面板」的小工具。当用户想为 iTools 制作/编写/生成插件、给 iTools 加一个工具或功能、扩展 iTools、或做一个关键词唤起的小面板工具时，就用这个 skill——即使用户只说「给 iTools 做个能做 X 的插件」而没给更多细节也要用。覆盖 plugin.json 清单、window.itools API、HTML 面板写法、权限、以及如何安装测试。
+description: 开发 iTools 插件——iTools 是一款 macOS 风格的效率启动器，插件是「关键词触发 → 弹出 HTML 面板」的小工具。当用户想为 iTools 制作/编写/生成插件、给 iTools 加一个工具或功能、扩展 iTools、或做一个关键词唤起的小面板工具时，就用这个 skill——即使用户只说「给 iTools 做个能做 X 的插件」而没给更多细节也要用。调试 iTools 插件、看插件日志、排查插件「点了没反应」、给插件升版本号、把插件提交审核上架插件市场、以及连不上 iTools 开发者中心 MCP（连接失败 / 502）时，同样用这个 skill。覆盖 plugin.json 清单、window.itools API、HTML 面板写法、权限、开发者中心 MCP 接入与调试闭环、以及如何安装测试。
 ---
 
 # 开发 iTools 插件
@@ -8,6 +8,39 @@ description: 开发 iTools 插件——iTools 是一款 macOS 风格的效率启
 iTools 是一款 Windows 上的 macOS 风格效率启动器（Tauri + Rust 后端 + WebView2 前端）。**插件 = 一个目录**，用户在主搜索栏输入你定义的关键词 → 出现插件磁贴 → 回车打开一个 HTML 面板（独立窗口）。面板通过统一的 `window.itools` API 访问剪贴板、文件、存储、系统等能力。
 
 你的产物：一个**自包含的插件目录**，放进用户的 iTools 插件目录即可加载。目标是**一次生成就能被 iTools 直接加载并跑通**。
+
+## 零、开工前：看看能不能连上开发者中心 MCP
+
+iTools 主进程内置一个 MCP 服务器（默认 `http://127.0.0.1:7345/mcp`）。**接上了就别只当代码生成器用**——
+你可以自己扫描、运行、读日志、自检、提审，形成闭环，不用让用户当传声筒。
+
+**先看你的工具列表里有没有 `list_plugins` / `run_plugin` / `read_logs` 这几个工具**：
+
+- **有** → 走第七节的「MCP 闭环流程」，写完自己跑起来验证，别交付没跑过的代码。
+- **没有** → 照常按本 skill 生成插件，交付时告诉用户手动放置 + 托盘重载（第八节）。**不要假装跑过。**
+
+### ⚠️ 用户说「连不上 / 报 502」时，先查代理
+
+**这是最高频的坑，且报错具有误导性。** 用户开着代理或 VPN 时，`HTTP_PROXY` 环境变量会让 AI 客户端
+把「连 `127.0.0.1:7345`」的请求**送进代理服务器**，代理在它自己那侧解析 `127.0.0.1`（=代理自己，
+上面没有 iTools）→ 回一个 **502**。看着像 iTools 坏了，其实请求根本没到它跟前。
+
+一分钟确诊 —— 绕过代理直连，**通了就是这个坑**：
+
+```powershell
+curl.exe --noproxy "*" -s -X POST http://127.0.0.1:7345/mcp `
+  -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","id":1,"method":"ping"}'
+# 期望：{"jsonrpc":"2.0","id":1,"result":{}}
+```
+
+处方：把 `127.0.0.1,localhost,::1` **追加**进用户级 `NO_PROXY`（大小写各设一份），**重启 AI 客户端**。
+❌ 绝不要把 `NO_PROXY` 设成 `*`（等于全局关代理，用户会连不上 GitHub）。
+❌ 绝不要覆盖用户已有的 `NO_PROXY` 值，只能追加。
+
+> 别和插件里的 `itools.fetch` 搞混：那条路访问本机地址由 iTools 原生层保证直连、永不走代理。
+> 坏的是 **AI 客户端 → MCP 端点**这一段，走的是客户端自己的网络栈，iTools 管不着。
+
+完整接入方式、工具清单、其它连不上的原因见 **`references/mcp-dev-center.md`**。
 
 ## 一、插件长什么样
 
@@ -189,7 +222,36 @@ window.itools.onEnter(async (info) => {
 
 **逐条核对清单**：目录名==name ✓ · 有 index.html ✓ · 关键字是裸字符串 ✓ · 只用 window.itools、无 Node/外链/外网 ✓ · 高危能力仅在需要时声明 permissions ✓ · 深浅色适配 ✓。
 
-## 八、安装与测试（告诉用户怎么用）
+### 七点五、接了 MCP 就走这个闭环（写完自己跑起来验证）
+
+工具列表里有 `list_plugins` 时，别停在「生成文件」——**跑起来看结果，再交付**：
+
+```
+list_plugins                 → 拿调试目录路径（往 fixed=true 的那个目录下建）+ 看现有插件
+（用文件工具写插件目录）
+rescan → list_plugins        → 确认扫到了，且 issues 里没有 level=error（有就先修）
+run_plugin(id, code)         → 实际打开调试窗口跑一次
+read_logs                    → 看它发出的调用与报错
+   ↑ 有问题就改 → rescan → run_plugin → read_logs，直到干净
+```
+
+要提审时再往下走（**用户要求了才做，别自作主张往市场传东西**）：
+
+```
+（改 plugin.json 的 version —— iTools 不会替你升，已上线过的必须严格高于线上版本）
+preflight(id)                → 自检；版本号被拦时返回的 suggestedVersion 可直接用
+submit(id) → publish_status  → 提审、查结论；被驳回时里面是模型给出的逐条理由
+```
+
+几条要记住的：
+
+- **改完文件必须 `rescan`**，否则 `list_plugins` 给你的是旧清单，白排查半天。
+- **`read_logs` 是「点了没反应」的首选**——被后端拒绝的调用会带上拒绝原因。日志不落盘，重启 iTools 即清零。
+- **`preflight` 通过 ≠ 会过审**。代码审核在服务端的大模型那侧，本地看不出结论，别向用户承诺能过。
+- **调试环境刻意放宽了部分校验**（如 `name` ≠ 目录名只报告警）。「调试能跑」不等于「能发布」，提审前把 `issues` 清到零。
+- 汇报时**如实区分**「跑过了」和「只是写完了」。没调 `run_plugin` 就别说验证过。
+
+## 八、安装与测试（没接 MCP 时，告诉用户怎么用）
 
 1. 把插件目录放进 iTools 的插件目录：
    - 开发/项目内：iTools 项目根的 `plugins/` 目录。
@@ -239,6 +301,7 @@ build: {
 
 ## 九、参考文件（按需读）
 
+- `references/mcp-dev-center.md` — **开发者中心 MCP**：接入配置、8 个工具详解、调试闭环、**代理/VPN 连不上的完整诊断与处方**、其它连不上的原因。
 - `references/plugin-spec.md` — plugin.json 完整字段、所有 cmd 类型、权限、目录约定、加载机制。
 - `references/window-itools-api.md` — `window.itools` 每个方法的完整签名、参数、返回、注意事项。
 - `references/plugin-settings-spec.md` — 插件设置 `settings.json` 规范（声明设置项、控件类型、`itools.settings` 只读读取）。
