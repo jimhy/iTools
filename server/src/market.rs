@@ -275,6 +275,13 @@ impl MarketService {
             }
         }
 
+        // 被驳回的包不会有人再用它，留在磁盘上只是慢性泄漏（每次提审最多 32MB）。
+        // **只删 rejected**：`manual` 是「自动审核没做成、等维护者人工看」——
+        // 把待审的包删掉，人工审核就无从下手了。
+        if status_ == status::REJECTED {
+            self.discard_package(&package_file, &id);
+        }
+
         if let Err(e) = self
             .store
             .finish_submission(&id, &status_, &message, &review_raw, now)
@@ -282,6 +289,26 @@ impl MarketService {
         {
             tracing::error!("[market] 回填提审单 {id} 结论失败：{e}");
         }
+    }
+
+    /// 删掉一个不会再被使用的提审包（连同空掉的插件目录）。
+    ///
+    /// 失败只记日志：包没删掉不影响任何功能，但把它当成致命错误会让一次磁盘权限问题
+    /// 演变成「提审单永远没有结论」。
+    fn discard_package(&self, package_file: &str, id: &str) {
+        let path = self.config.market.packages_dir.join(package_file);
+        if let Err(e) = std::fs::remove_file(&path) {
+            // 文件本就不存在时不值得报警（重试、并发清理都可能走到这里）
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!("[market] 提审单 {id} 的包清理失败（{}）：{e}", path.display());
+            }
+            return;
+        }
+        // 该插件目录若已空则一并删掉，不留一堆空目录。非空（有其它版本）时会失败，忽略即可。
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::remove_dir(dir);
+        }
+        tracing::info!("[market] 提审单 {id} 被驳回，已清理其插件包");
     }
 
     /// 把审核通过的包写进市场条目并重建索引。
@@ -551,5 +578,59 @@ mod tests {
     fn owner_masked() {
         assert_eq!(mask("jimhy"), "j***y");
         assert_eq!(mask("ab"), "a*");
+    }
+
+    /// 造一个包目录指向临时路径的服务实例（存储层懒连接，本用例不碰数据库）。
+    fn svc_with_packages_dir(dir: &std::path::Path) -> Arc<MarketService> {
+        let mut env = std::collections::HashMap::new();
+        env.insert(
+            "SYNC_PACKAGES_DIR".to_string(),
+            dir.to_string_lossy().into_owned(),
+        );
+        let config = Arc::new(Config::from_map(&env).unwrap());
+        let store = Arc::new(crate::store::MariaDbStore::lazy(&config.db));
+        MarketService::new(store, config, Arc::new(|| 0))
+    }
+
+    // sqlx 的连接池构造要求 Tokio 上下文（即便是 lazy、不真连库），故用 tokio::test
+    #[tokio::test]
+    async fn discard_removes_package_and_empty_dir() {
+        // 被驳回的包留在磁盘上是慢性泄漏（每次最多 32MB），必须真的删掉
+        let tmp = tempfile::tempdir().unwrap();
+        let svc = svc_with_packages_dir(tmp.path());
+        let pkg = tmp.path().join("demo").join("1.0.0.zip");
+        std::fs::create_dir_all(pkg.parent().unwrap()).unwrap();
+        std::fs::write(&pkg, b"zip").unwrap();
+
+        svc.discard_package("demo/1.0.0.zip", "sub1");
+        assert!(!pkg.exists(), "包文件应被删除");
+        assert!(!tmp.path().join("demo").exists(), "空掉的插件目录应一并删除");
+    }
+
+    // sqlx 的连接池构造要求 Tokio 上下文（即便是 lazy、不真连库），故用 tokio::test
+    #[tokio::test]
+    async fn discard_keeps_other_versions() {
+        // 同一插件的其它版本还在时，只删这一个版本，目录要保留
+        let tmp = tempfile::tempdir().unwrap();
+        let svc = svc_with_packages_dir(tmp.path());
+        let dir = tmp.path().join("demo");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("1.0.0.zip"), b"old").unwrap();
+        std::fs::write(dir.join("1.0.1.zip"), b"new").unwrap();
+
+        svc.discard_package("demo/1.0.1.zip", "sub2");
+        assert!(!dir.join("1.0.1.zip").exists());
+        assert!(dir.join("1.0.0.zip").exists(), "其它版本不该被牵连");
+        assert!(dir.exists(), "目录非空时不该被删");
+    }
+
+    // sqlx 的连接池构造要求 Tokio 上下文（即便是 lazy、不真连库），故用 tokio::test
+    #[tokio::test]
+    async fn discard_is_idempotent_and_never_panics() {
+        // 清理失败绝不能演变成「提审单永远没有结论」——重复调用、文件不存在都要安静收场
+        let tmp = tempfile::tempdir().unwrap();
+        let svc = svc_with_packages_dir(tmp.path());
+        svc.discard_package("nope/9.9.9.zip", "sub3");
+        svc.discard_package("nope/9.9.9.zip", "sub3");
     }
 }
