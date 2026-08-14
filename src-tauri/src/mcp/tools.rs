@@ -37,14 +37,42 @@ plugin.json 字段、可用的 window.itools API、权限模型都在里面，�
 4. run_plugin                          打开调试窗口实际跑一次
 5. read_logs                           看插件发出的调用、console 输出与报错
 6. 反复改 → rescan → run_plugin → read_logs
-7. preflight                           发布前自检（会现查线上版本比对版本号）
-8. submit                              提交审核（服务端会跑机械校验 + 大模型读代码）
-9. publish_status                      查审核结论；被驳回时里面有模型给出的逐条理由
+7. **改 plugin.json 的 version**       已上线过的插件必须先升版本号（规则见下）
+8. preflight                           发布前自检（会现查线上版本并比对版本号）
+9. submit                              提交审核（服务端会跑机械校验 + 大模型读代码）
+10. publish_status                     查审核结论；被驳回时里面有模型给出的逐条理由
 
-要点：
+════════ 版本号规则（最容易卡住的一步，请主动做，别等被拦） ════════
+
+**iTools 不会自动升版本号。** 它只来自 plugin.json 的 version 字段，得你用文件工具改。
+
+何时必须升：
+- 只要 preflight / publish_status 里的 onlineVersion 不是 null（= 已上线过），
+  提交前就必须把 version 改到**严格高于**它 —— 哪怕只改了一行代码。
+- 首次提审（onlineVersion 为 null）没有这个约束，填什么都行（惯例 1.0.0）。
+
+升哪一段（语义化版本 MAJOR.MINOR.PATCH）：
+- 修 bug、改文案、调样式         → 升 PATCH：1.0.0 → 1.0.1
+- 加新功能、加新 feature/关键字   → 升 MINOR：1.0.1 → 1.1.0
+- 破坏性改动（删功能、改数据格式导致老数据读不了）→ 升 MAJOR：1.1.0 → 2.0.0
+- 拿不准就升 PATCH。preflight 返回里的 suggestedVersion 就是「末段 +1」，可直接用。
+
+硬性约束（违反会被拒或造成用户收不到更新）：
+- 比较方式是**按 `.` 分段的数值比较**，缺失段补 0（`1.2` 等价于 `1.2.0`）。
+- ❌ **不要用预发布后缀**（`-beta` / `-rc`）：解析不出数字的段按 0 处理，
+  于是 `1.2.0-beta` 被读成 `1.2.0`（与正式版判定相等、互相收不到更新），
+  而 `1.2.0-beta.1` 反而被读成 `1.2.0.1`、**高于**正式版 `1.2.0`。行为与 SemVer 规范相反。
+- ❌ **不要靠降版本号回滚**：客户端只认「远端更高」，把 1.2.0 改回 1.1.9 既不会提示更新、
+  也不会把用户拉回旧版，用户会一直卡在坏版本上。正确做法是**继续往上升**（发 1.2.1）。
+- ⚠ 不升版本号的后果不只是提交被拒：客户端的更新检查**只比这一个值**，
+  版本号没变的话，已经装了这个插件的用户永远收不到你的新版。
+
+════════════════════════════════════════════════════════
+
+其它要点：
 - issues 里 level=error 的插件跑不起来，必须先修；level=warn 不影响调试但发布前要清。
 - 改了插件文件后要 rescan，否则 list_plugins 拿到的还是旧清单。
-- 提交审核需要用户已登录 iTools 云账号；版本号必须高于已上线版本，否则会被拦下。
+- 提交审核需要用户已登录 iTools 云账号。
 - 审核由大模型读代码判断（恶意行为、权限是否名副其实、描述是否相符），不是走过场。"#;
 
 // ==================== 嵌入的规范文档 ====================
@@ -140,7 +168,7 @@ pub fn list() -> Vec<Value> {
             "name": "preflight",
             "description": "提交审核前的自检：缺 index.html、name 不合法、features 为空、\
                 **版本号不高于已上线版本**等「服务端一定会拒」的项。\
-                通过自检不代表会过审——代码审核在服务端的大模型那一侧。",
+                返回里带 onlineVersion 与 suggestedVersion —— 版本号被拦时把 plugin.json 的 \n                version 改成 suggestedVersion（或按语义化规则自己定一个更高的）再重试即可。\n                通过自检不代表会过审——代码审核在服务端的大模型那一侧。",
             "inputSchema": {
                 "type": "object",
                 "properties": { "id": { "type": "string", "description": "插件 id" } },
@@ -151,7 +179,7 @@ pub fn list() -> Vec<Value> {
             "name": "submit",
             "description": "把插件打包上传、提交审核。服务端先做机械校验，再由大模型通读代码\
                 （恶意行为、申请的权限是否名副其实、描述是否与实际功能相符），通过即自动上线到插件市场。\
-                需要用户已登录 iTools 云账号。提交后用 publish_status 查结论（要几十秒到几分钟）。",
+                **前置条件两条**：① 用户已登录 iTools 云账号；② 若该插件已上线过\n                （publish_status 的 onlineVersion 不为 null），必须先把 plugin.json 的 version \n                升到高于线上版本 —— iTools 不会替你升，没升会在打包前就被拦下。\n                提交后用 publish_status 查结论（要几十秒到几分钟）。",
             "inputSchema": {
                 "type": "object",
                 "properties": { "id": { "type": "string", "description": "插件 id" } },
@@ -314,19 +342,53 @@ fn preflight(app: &AppHandle, args: &Value) -> Result<String, String> {
     // 现查线上版本：版本号比对必须用最新值，否则会出现「自检放行、提交被拒」
     let online = crate::plugin::market::latest_version(&info.name).unwrap_or(None);
     let pre = crate::dev::submit::preflight(&dir, &info.name, &info.version, &info.issues, online.as_deref());
+    // 版本号被拦时把「该改成多少」直接算给 AI —— 只讲规则不给值，它还得自己解析版本号
+    let suggested = online.as_deref().map(bump_patch);
+    let version_blocked = online
+        .as_deref()
+        .map(|o| !crate::plugin::install::version_gt(&info.version, o))
+        .unwrap_or(false);
     pretty(&json!({
         "ok": pre.ok(),
         "blockers": pre.blockers,
         "warnings": pre.warnings,
         "localVersion": info.version,
         "onlineVersion": online,
+        "suggestedVersion": suggested,
+        "versionBlocked": version_blocked,
         "hint": if pre.ok() {
             "自检通过，可以调 submit 提交。注意：**通过自检不代表会过审**——\
-             代码审核在服务端的大模型那一侧，本地看不出结论。"
+             代码审核在服务端的大模型那一侧，本地看不出结论。".to_string()
+        } else if version_blocked {
+            format!(
+                "版本号过不了：本地 v{} 不高于已上线的 v{}。请用文件工具把这个插件 plugin.json 里的 version 改成 {}（修 bug 升末段 / 加功能升中段 / 破坏性改动升首段），改完再调一次 preflight。",
+                info.version,
+                online.as_deref().unwrap_or("?"),
+                suggested.as_deref().unwrap_or("?")
+            )
         } else {
-            "blockers 里每一条都会让服务端拒绝，必须先改掉。"
+            "blockers 里每一条都会让服务端拒绝，必须先改掉。".to_string()
         },
     }))
+}
+
+/// 「末段 +1」的版本号建议（`1.0.0` → `1.0.1`）。
+///
+/// 只做最保守的那一档：升 minor / major 是**语义**判断（加了功能？破坏了兼容？），
+/// 只有写代码的人知道，这里不替他猜——猜错会让用户收到一个语义错误的版本号。
+fn bump_patch(online: &str) -> String {
+    let trimmed = online.trim().trim_start_matches(['v', 'V']);
+    let mut parts: Vec<String> = trimmed.split('.').map(str::to_string).collect();
+    match parts.last().and_then(|p| p.trim().parse::<u64>().ok()) {
+        Some(n) => {
+            let last = parts.len() - 1;
+            parts[last] = (n + 1).to_string();
+            parts.join(".")
+        }
+        // 末段不是数字（如带了预发布后缀）：追加一段而不是瞎改，
+        // 至少保证结果在「按 . 分段数值比较」下确实更大
+        None => format!("{trimmed}.1"),
+    }
 }
 
 fn submit(app: &AppHandle, args: &Value) -> Result<String, String> {
@@ -438,6 +500,30 @@ mod tests {
             let d = t["description"].as_str().unwrap_or("");
             assert!(d.len() > 20, "{} 的说明太短，模型会用不对时机", t["name"]);
             assert!(t["inputSchema"]["type"] == json!("object"), "inputSchema 必须是 object");
+        }
+    }
+
+    #[test]
+    fn bump_patch_suggests_a_strictly_higher_version() {
+        // 「只讲规则不给值」等于让 AI 自己解析版本号，多一个出错的地方
+        assert_eq!(bump_patch("1.0.0"), "1.0.1");
+        assert_eq!(bump_patch("v2.3.9"), "2.3.10");
+        assert_eq!(bump_patch("1.2"), "1.3");
+        assert_eq!(bump_patch("1.0.0-beta"), "1.0.0-beta.1");
+        // 建议值必须真的高于线上，否则给了也白给
+        for v in ["1.0.0", "v2.3.9", "1.2", "1.0.0-beta"] {
+            assert!(
+                crate::plugin::install::version_gt(&bump_patch(v), v),
+                "{v} 的建议版本必须严格更高"
+            );
+        }
+    }
+
+    #[test]
+    fn instructions_state_the_version_rules() {
+        // 只说「会被拦下」不够，要写清楚**规则**：什么时候升、升哪一段、什么不能干
+        for must in ["不会自动升版本号", "PATCH", "MINOR", "MAJOR", "预发布后缀", "降版本号回滚"] {
+            assert!(SERVER_INSTRUCTIONS.contains(must), "版本号规则里缺了「{must}」");
         }
     }
 
