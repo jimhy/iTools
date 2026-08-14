@@ -19,7 +19,9 @@ path = "src/main.rs"
 axum = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "signal", "fs"] }
 tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.6", features = ["trace"] }
+# fs：官网静态站与安装包下载用 ServeDir。它自带路径穿越防护（拒绝 `..` 与绝对路径）
+# 并支持 Range 请求（安装包几 MB，断点续传是刚需）——比自己拼路径读文件安全得多。
+tower-http = { version = "0.6", features = ["trace", "fs"] }
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["server-auto", "tokio"] }
 # TLS 终止（可选：配了证书才启用）。统一走 rustls + ring provider，不引 aws-lc-rs

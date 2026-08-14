@@ -70,6 +70,26 @@ impl LlmConfig {
     }
 }
 
+/// 官网静态站与安装包下载（都是可选的）。
+///
+/// # 为什么让 API 服务顺带托管它们
+///
+/// NAS 在内网，外网访问要经「腾讯云 frps → 群晖 frpc」，每开一个对外端口都要同时
+/// 过云安全组与主机 ufw 两道墙（漏一道就是静默超时）。而 `:7101` 这条链路早就通了、
+/// TLS 也在本进程终止——把静态站挂进来，比新起一个 web 容器再打一遍端口省得多。
+///
+/// # 目录不存在就**不挂载**
+///
+/// 而不是挂上去让每个请求 404。理由是「有没有官网」这件事必须在启动日志里说清楚，
+/// 否则运维只能靠猜；而且 API 是主职责，静态站缺失绝不该影响它。
+#[derive(Debug, Clone, Default)]
+pub struct SiteConfig {
+    /// 静态站根目录（`index.html` 所在）。`None` = 不启用。
+    pub root: Option<PathBuf>,
+    /// 安装包目录，挂在 `/download` 下。`None` = 不启用。
+    pub downloads: Option<PathBuf>,
+}
+
 /// 插件市场与提审。
 #[derive(Debug, Clone)]
 pub struct MarketConfig {
@@ -110,6 +130,8 @@ pub struct Config {
     pub llm: LlmConfig,
     /// 插件市场与提审
     pub market: MarketConfig,
+    /// 官网静态站与安装包下载（都可选，目录不存在则不挂载）
+    pub site: SiteConfig,
     /// 是否允许「首次登录即自动注册」（自托管默认开）
     pub allow_register: bool,
     /// 会话令牌随机字节数
@@ -314,6 +336,20 @@ impl Config {
             submit_cooldown_sec: num_env(get(env, "SYNC_SUBMIT_COOLDOWN_SEC"), 60.0, 0.0, 86_400.0) as i64,
         };
 
+        // 官网静态站与安装包目录。**空串等于没配**（容器里 env 常被写成空字符串），
+        // 目录存不存在留到 routes 那边判断——config 只负责解析意图，不碰文件系统，
+        // 这样单测不必造目录。
+        let site = SiteConfig {
+            root: get(env, "SYNC_SITE_DIR")
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from),
+            downloads: get(env, "SYNC_DOWNLOADS_DIR")
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from),
+        };
+
         let tls = match (get(env, "SYNC_TLS_CERT_FILE"), get(env, "SYNC_TLS_KEY_FILE")) {
             (Some(c), Some(k)) if !c.trim().is_empty() && !k.trim().is_empty() => Some(TlsConfig {
                 cert_file: PathBuf::from(c),
@@ -329,6 +365,7 @@ impl Config {
             mirrors,
             llm,
             market,
+            site,
             allow_register: bool_env(get(env, "SYNC_ALLOW_REGISTER"), true),
             token_bytes: plain_num(get(env, "SYNC_TOKEN_BYTES"), 32),
             logger: bool_env(get(env, "SYNC_LOG"), true),

@@ -31,6 +31,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{json, Value};
+use tower_http::services::ServeDir;
 
 use crate::config::Config;
 use crate::market::MarketService;
@@ -57,7 +58,7 @@ pub struct AppState {
 /// 这样测试里构造 Router 不会偷偷起定时器打外网。
 pub fn build_router(state: Arc<AppState>) -> Router {
     let upload_limit = state.config.market.max_upload_bytes as usize;
-    Router::new()
+    let router = Router::new()
         .route("/health", get(health))
         .route("/api/mirrors", get(get_mirrors))
         .route("/auth/login", post(login))
@@ -78,7 +79,61 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         )
         .route("/api/plugins/submissions", get(my_submissions))
         .route("/api/plugins/submissions/{id}", get(one_submission))
-        .with_state(state)
+        .with_state(Arc::clone(&state));
+
+    mount_site(router, &state.config.site)
+}
+
+/// 把官网静态站与安装包目录挂到 API 路由之后。
+///
+/// # 顺序与优先级
+///
+/// 静态站走 `fallback_service`，只接**没被任何 API 路由匹配到**的请求，所以不可能
+/// 顶掉 `/health`、`/api/*`、`/auth/*`、`/data/*`。`/download` 用 `nest_service` 挂在
+/// 一个专属前缀下，与现有端点也没有交集。
+///
+/// # 目录不存在就不挂
+///
+/// 挂一个指向空气的 ServeDir 只会让每个请求 404，而运维看不出「是没配还是配错了」。
+/// 这里如实分三种情况写日志：没配 / 配了但目录不存在（**当作错误喊出来**）/ 挂载成功。
+///
+/// # 安全
+///
+/// 用 `ServeDir` 而不是自己拼路径读文件：它拒绝 `..` 与绝对路径（路径穿越），
+/// 并原生支持 Range 请求——安装包好几 MB，断点续传是刚需。
+fn mount_site(router: Router, site: &crate::config::SiteConfig) -> Router {
+    let mut router = router;
+
+    match &site.downloads {
+        Some(dir) if dir.is_dir() => {
+            tracing::info!("安装包下载已挂载：/download → {}", dir.display());
+            router = router.nest_service("/download", ServeDir::new(dir));
+        }
+        Some(dir) => {
+            tracing::error!(
+                "SYNC_DOWNLOADS_DIR 指向的目录不存在：{}，/download 未挂载（安装包将无法下载）",
+                dir.display()
+            );
+        }
+        None => tracing::info!("未配置 SYNC_DOWNLOADS_DIR，不提供安装包下载"),
+    }
+
+    match &site.root {
+        Some(dir) if dir.is_dir() => {
+            tracing::info!("官网静态站已挂载：/ → {}", dir.display());
+            // append_index_html_on_directories 默认开启：`/` 会落到 index.html
+            router = router.fallback_service(ServeDir::new(dir));
+        }
+        Some(dir) => {
+            tracing::error!(
+                "SYNC_SITE_DIR 指向的目录不存在：{}，官网未挂载（/ 将返回 404）",
+                dir.display()
+            );
+        }
+        None => tracing::info!("未配置 SYNC_SITE_DIR，不提供官网静态站"),
+    }
+
+    router
 }
 
 /// TCP 对端地址（限流计数的基准）。
@@ -665,5 +720,103 @@ async fn authenticate(st: &AppState, headers: &HeaderMap) -> Result<String, Resp
             "未授权（需有效会话令牌）",
         )),
         Err(e) => Err(store_error("查询会话", e)),
+    }
+}
+
+#[cfg(test)]
+mod site_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    /// 只带一条 API 路由的最小 Router，用来验证静态站有没有顶掉它。
+    fn api_only() -> Router {
+        Router::new().route("/health", get(|| async { "api-alive" }))
+    }
+
+    async fn get_status(app: Router, uri: &str) -> (StatusCode, String) {
+        let res = app
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).expect("构造请求"))
+            .await
+            .expect("路由应当返回响应");
+        let status = res.status();
+        let bytes = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap_or_default();
+        (status, String::from_utf8_lossy(&bytes).to_string())
+    }
+
+    fn tmp_site(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("itools-site-test-{tag}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("建临时站点目录");
+        dir
+    }
+
+    /// 挂了静态站之后，**API 路由必须照常命中**。
+    ///
+    /// fallback_service 只接没被任何路由匹配到的请求；这条要是挂了，
+    /// 整个同步服务会被一个静态站顶掉——比没有官网严重得多。
+    #[tokio::test]
+    async fn static_site_never_shadows_api_routes() {
+        let dir = tmp_site("shadow");
+        std::fs::write(dir.join("index.html"), "<h1>官网</h1>").expect("写 index.html");
+        let app = mount_site(
+            api_only(),
+            &crate::config::SiteConfig { root: Some(dir.clone()), downloads: None },
+        );
+
+        let (status, body) = get_status(app.clone(), "/health").await;
+        assert_eq!(status, StatusCode::OK, "API 路由必须优先于静态站");
+        assert_eq!(body, "api-alive", "/health 必须还是那个 API，不能被 index.html 顶掉");
+
+        // 而没被 API 匹配到的路径才落到静态站
+        let (status, body) = get_status(app, "/").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("官网"), "/ 应当落到 index.html");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 目录不存在时**不挂载**，而不是挂上去让每个请求 404 —— 两者对运维的含义完全不同。
+    #[tokio::test]
+    async fn missing_dir_is_not_mounted() {
+        let app = mount_site(
+            api_only(),
+            &crate::config::SiteConfig {
+                root: Some(std::path::PathBuf::from("这个目录不存在")),
+                downloads: Some(std::path::PathBuf::from("这个也不存在")),
+            },
+        );
+        // API 照常
+        assert_eq!(get_status(app.clone(), "/health").await.0, StatusCode::OK);
+        // 没挂载 → 404（而不是 500 或别的）
+        assert_eq!(get_status(app, "/").await.0, StatusCode::NOT_FOUND);
+    }
+
+    /// 安装包目录挂在 /download 下，且**路径穿越必须被拒**。
+    #[tokio::test]
+    async fn downloads_are_served_and_traversal_is_rejected() {
+        let base = tmp_site("dl");
+        let dl = base.join("downloads");
+        std::fs::create_dir_all(&dl).expect("建下载目录");
+        std::fs::write(dl.join("iTools-latest-setup.exe"), b"FAKE-INSTALLER").expect("写假安装包");
+        // 放一个「上级目录里的秘密文件」，穿越成功就会读到它
+        std::fs::write(base.join("secret.txt"), "绝不能被下载到").expect("写秘密文件");
+
+        let app = mount_site(
+            api_only(),
+            &crate::config::SiteConfig { root: None, downloads: Some(dl.clone()) },
+        );
+
+        let (status, body) = get_status(app.clone(), "/download/iTools-latest-setup.exe").await;
+        assert_eq!(status, StatusCode::OK, "安装包应当能下载");
+        assert_eq!(body, "FAKE-INSTALLER");
+
+        // 路径穿越：ServeDir 必须拒绝，绝不能读到上级目录
+        for evil in ["/download/../secret.txt", "/download/%2e%2e/secret.txt"] {
+            let (status, body) = get_status(app.clone(), evil).await;
+            assert_ne!(status, StatusCode::OK, "{evil} 不该成功");
+            assert!(!body.contains("绝不能被下载到"), "{evil} 读到了上级目录的文件");
+        }
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
