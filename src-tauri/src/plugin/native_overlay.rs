@@ -244,7 +244,7 @@ fn make_bmi(w: i32, h: i32) -> BITMAPINFO {
     bmi.bmiHeader.biHeight = -h; // top-down
     bmi.bmiHeader.biPlanes = 1;
     bmi.bmiHeader.biBitCount = 32;
-    bmi.bmiHeader.biCompression = BI_RGB as u32;
+    bmi.bmiHeader.biCompression = BI_RGB;
     bmi
 }
 
@@ -271,9 +271,9 @@ unsafe fn init_buffers(st: &mut State) {
     st.black_dc = CreateCompatibleDC(sdc);
     let bb = CreateCompatibleBitmap(sdc, 1, 1);
     SelectObject(st.black_dc, bb as _);
-    let mut bmi1 = make_bmi(1, 1);
+    let bmi1 = make_bmi(1, 1);
     let black = [0u8, 0, 0, 255];
-    SetDIBits(st.black_dc, bb, 0, 1, black.as_ptr() as *const _, &mut bmi1, DIB_RGB_COLORS);
+    SetDIBits(st.black_dc, bb, 0, 1, black.as_ptr() as *const _, &bmi1, DIB_RGB_COLORS);
     st.black_bmp = bb;
     // 冻结画面位图：直接 BitBlt 屏幕（此刻覆盖层还没显示 → 抓的是干净桌面）
     st.frozen_dc = CreateCompatibleDC(sdc);
@@ -288,7 +288,7 @@ unsafe fn init_buffers(st: &mut State) {
 unsafe fn draw_op(dc: HDC, op: &Op, dx: i32, dy: i32, frozen_dc: HDC) {
     match op {
         Op::Rect { r, c, w } | Op::Ellipse { r, c, w } => {
-            let pen = CreatePen(PS_SOLID as i32, *w, *c);
+            let pen = CreatePen(PS_SOLID, *w, *c);
             let op_pen = SelectObject(dc, pen as _);
             let op_br = SelectObject(dc, GetStockObject(HOLLOW_BRUSH));
             let (l, t, ri, b) = (r.left + dx, r.top + dy, r.right + dx, r.bottom + dy);
@@ -302,7 +302,7 @@ unsafe fn draw_op(dc: HDC, op: &Op, dx: i32, dy: i32, frozen_dc: HDC) {
             DeleteObject(pen as _);
         }
         Op::Line { a, b, c, w } => {
-            let pen = CreatePen(PS_SOLID as i32, *w, *c);
+            let pen = CreatePen(PS_SOLID, *w, *c);
             let op_pen = SelectObject(dc, pen as _);
             MoveToEx(dc, a.x + dx, a.y + dy, std::ptr::null_mut());
             LineTo(dc, b.x + dx, b.y + dy);
@@ -310,7 +310,7 @@ unsafe fn draw_op(dc: HDC, op: &Op, dx: i32, dy: i32, frozen_dc: HDC) {
             DeleteObject(pen as _);
         }
         Op::Arrow { a, b, c, w } => {
-            let pen = CreatePen(PS_SOLID as i32, *w, *c);
+            let pen = CreatePen(PS_SOLID, *w, *c);
             let op_pen = SelectObject(dc, pen as _);
             let (ax, ay, bx, by) = (a.x + dx, a.y + dy, b.x + dx, b.y + dy);
             MoveToEx(dc, ax, ay, std::ptr::null_mut());
@@ -342,7 +342,7 @@ unsafe fn draw_op(dc: HDC, op: &Op, dx: i32, dy: i32, frozen_dc: HDC) {
                 return;
             }
             let lw = if matches!(op, Op::Marker { .. }) { *w * 4 } else { *w };
-            let pen = CreatePen(PS_SOLID as i32, lw, *c);
+            let pen = CreatePen(PS_SOLID, lw, *c);
             let op_pen = SelectObject(dc, pen as _);
             let shifted: Vec<POINT> = pts.iter().map(|p| POINT { x: p.x + dx, y: p.y + dy }).collect();
             Polyline(dc, shifted.as_ptr(), shifted.len() as i32);
@@ -371,7 +371,7 @@ unsafe fn draw_op(dc: HDC, op: &Op, dx: i32, dy: i32, frozen_dc: HDC) {
             let rr = 14;
             let br = CreateSolidBrush(*c);
             let ob = SelectObject(dc, br as _);
-            let pen = CreatePen(PS_SOLID as i32, 1, *c);
+            let pen = CreatePen(PS_SOLID, 1, *c);
             let op = SelectObject(dc, pen as _);
             Ellipse(dc, x + dx - rr, y + dy - rr, x + dx + rr, y + dy + rr);
             let font = CreateFontW(
@@ -399,7 +399,7 @@ unsafe fn draw_op(dc: HDC, op: &Op, dx: i32, dy: i32, frozen_dc: HDC) {
             let block = 10;
             let sw = (w / block).max(1);
             let sh = (h / block).max(1);
-            SetStretchBltMode(dc, COLORONCOLOR as i32);
+            SetStretchBltMode(dc, COLORONCOLOR);
             // 源坐标是 frozen_dc 的绝对坐标（client），目标含 dx,dy 偏移
             StretchBlt(dc, l + dx, t + dy, w, h, frozen_dc, l, t, sw, sh, SRCCOPY);
             let _ = (sw, sh);
@@ -475,7 +475,7 @@ unsafe fn fill_rect(dc: HDC, r: &RECT, color: u32) {
 unsafe fn round_fill(dc: HDC, r: &RECT, color: u32, rad: i32) {
     let br = CreateSolidBrush(color);
     let ob = SelectObject(dc, br as _);
-    let pen = CreatePen(PS_SOLID as i32, 1, color);
+    let pen = CreatePen(PS_SOLID, 1, color);
     let op = SelectObject(dc, pen as _);
     RoundRect(dc, r.left, r.top, r.right, r.bottom, rad, rad);
     SelectObject(dc, op);
@@ -503,7 +503,7 @@ unsafe fn draw_label(dc: HDC, r: &RECT, s: &str, color: u32, size: i32, font_nam
 
 /// 画工具栏图标（矢量线条，col 为线色）。
 unsafe fn draw_tool_icon(dc: HDC, r: &RECT, t: Tool, col: u32) {
-    let pen = CreatePen(PS_SOLID as i32, 2, col);
+    let pen = CreatePen(PS_SOLID, 2, col);
     let op = SelectObject(dc, pen as _);
     let ob = SelectObject(dc, GetStockObject(HOLLOW_BRUSH));
     let (l, t2, ri, b) = (r.left + 8, r.top + 8, r.right - 8, r.bottom - 8);
@@ -532,7 +532,7 @@ unsafe fn draw_tool_icon(dc: HDC, r: &RECT, t: Tool, col: u32) {
             LineTo(dc, ri, b);
         }
         Tool::Marker => {
-            let pen2 = CreatePen(PS_SOLID as i32, 5, col);
+            let pen2 = CreatePen(PS_SOLID, 5, col);
             let o2 = SelectObject(dc, pen2 as _);
             MoveToEx(dc, l, b, std::ptr::null_mut());
             LineTo(dc, ri, t2);
@@ -579,7 +579,7 @@ unsafe fn draw_toolbar(st: &State, dc: HDC) {
     let hov_bg = rgb(54, 57, 63);
     // 背板：深色圆角 + 细边框
     round_fill(dc, &st.tb, rgb(37, 38, 43), 16);
-    let pen = CreatePen(PS_SOLID as i32, 1, rgb(58, 60, 66));
+    let pen = CreatePen(PS_SOLID, 1, rgb(58, 60, 66));
     let opn = SelectObject(dc, pen as _);
     let ob0 = SelectObject(dc, GetStockObject(HOLLOW_BRUSH));
     RoundRect(dc, st.tb.left, st.tb.top, st.tb.right, st.tb.bottom, 16, 16);
@@ -601,7 +601,7 @@ unsafe fn draw_toolbar(st: &State, dc: HDC) {
         let g = group_of(&it.kind);
         if i > 0 && g != prev_group {
             let sx = it.r.left - 3;
-            let vp = CreatePen(PS_SOLID as i32, 1, rgb(60, 62, 68));
+            let vp = CreatePen(PS_SOLID, 1, rgb(60, 62, 68));
             let ovp = SelectObject(dc, vp as _);
             MoveToEx(dc, sx, st.tb.top + 8, std::ptr::null_mut());
             LineTo(dc, sx, st.tb.bottom - 8);
@@ -630,7 +630,7 @@ unsafe fn draw_toolbar(st: &State, dc: HDC) {
                 let border = if *c == rgb(255, 255, 255) { rgb(150, 150, 155) } else { *c };
                 let br = CreateSolidBrush(*c);
                 let ob = SelectObject(dc, br as _);
-                let bp = CreatePen(PS_SOLID as i32, 1, border);
+                let bp = CreatePen(PS_SOLID, 1, border);
                 let obp = SelectObject(dc, bp as _);
                 Ellipse(dc, cx - rr, cy - rr, cx + rr, cy + rr);
                 SelectObject(dc, ob);
@@ -638,7 +638,7 @@ unsafe fn draw_toolbar(st: &State, dc: HDC) {
                 DeleteObject(br as _);
                 DeleteObject(bp as _);
                 if *c == st.color {
-                    let ring = CreatePen(PS_SOLID as i32, 2, rgb(255, 255, 255));
+                    let ring = CreatePen(PS_SOLID, 2, rgb(255, 255, 255));
                     let orn = SelectObject(dc, ring as _);
                     let oh = SelectObject(dc, GetStockObject(HOLLOW_BRUSH));
                     Ellipse(dc, cx - rr - 3, cy - rr - 3, cx + rr + 3, cy + rr + 3);
@@ -698,7 +698,7 @@ unsafe fn paint(st: &mut State) {
             if let Some(t) = &st.temp {
                 draw_op(back, t, 0, 0, st.frozen_dc);
             }
-            let pen = CreatePen(PS_SOLID as i32, 2, rgb(76, 157, 255));
+            let pen = CreatePen(PS_SOLID, 2, rgb(76, 157, 255));
             let op = SelectObject(back, pen as _);
             let ob = SelectObject(back, GetStockObject(HOLLOW_BRUSH));
             Rectangle(back, x, y, x + w, y + h);
@@ -760,7 +760,7 @@ unsafe fn draw_op_compose(dc: HDC, op: &Op, dx: i32, dy: i32, frozen_dc: HDC) {
             let block = 10;
             let sw = (w / block).max(1);
             let sh = (h / block).max(1);
-            SetStretchBltMode(dc, COLORONCOLOR as i32);
+            SetStretchBltMode(dc, COLORONCOLOR);
             StretchBlt(dc, l + dx, t + dy, w, h, frozen_dc, l, t, sw, sh, SRCCOPY);
         }
         return;
@@ -783,7 +783,7 @@ unsafe fn draw_handles(dc: HDC, x: i32, y: i32, w: i32, h: i32) {
     let s = 4;
     let br = CreateSolidBrush(rgb(255, 255, 255));
     let ob = SelectObject(dc, br as _);
-    let pen = CreatePen(PS_SOLID as i32, 1, rgb(76, 157, 255));
+    let pen = CreatePen(PS_SOLID, 1, rgb(76, 157, 255));
     let op = SelectObject(dc, pen as _);
     for (px, py) in pts {
         Rectangle(dc, px - s, py - s, px + s, py + s);
@@ -1198,11 +1198,14 @@ pub fn run(vx: i32, vy: i32, vw: i32, vh: i32, full: bool) -> Option<NativeResul
             DispatchMessageW(&msg);
         }
 
-        let out = if st.cancelled || st.action.is_none() {
-            None
-        } else {
-            let action = st.action.unwrap().to_string();
-            compose(&st).map(|(rgba, w, h)| NativeResult { action, rgba, w, h })
+        // 只有「没取消 且 选了动作」才出结果。用 match 直接把动作解出来，
+        // 免得再 unwrap 一次（`Option<&'static str>` 是 Copy，这里不会移动 st）
+        let out = match st.action {
+            Some(action) if !st.cancelled => {
+                let action = action.to_string();
+                compose(&st).map(|(rgba, w, h)| NativeResult { action, rgba, w, h })
+            }
+            _ => None,
         };
         // 清理 GDI
         for (dc, bmp) in [
