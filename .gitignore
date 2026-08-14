@@ -5,8 +5,18 @@ dist/
 /server/target/
 /src-tauri/gen/schemas/
 
-# 本地开发插件目录（插件源码在独立仓库 iTools-plugins，勿把部署副本混入宿主仓库）
-/plugins/
+# 插件目录**已正式纳入仓库**：`tauri.conf.json` 的 resources 把 ../plugins 整个打进安装包，
+# 它就是「随应用分发的内置插件」的唯一真相源——不入库的话，别人 clone 下来构建出的
+# 安装包里一个插件都没有，而且这里的改动（如 plugin.json 新增字段）无处追溯。
+#
+# 只排除**运行期状态**，它们是本机产物、因机器而异。
+# 注意：gitignore **不支持行尾注释**（`/path  # 说明` 会被当成含空格与 # 的完整模式），
+# 所以说明只能写在自己的行上。
+#
+# 安装暂存（下载解压的中间物，安装完即删）
+/plugins/.staging/
+# 本机的插件安装来源记录（谁从哪个 commit 装的）
+/plugins/.installed.json
 
 # 开发者中心的固定调试目录（dev 构建下由 DevRuntime 自动创建在项目根，见 src-tauri/src/dev/mod.rs）
 # 里面是半成品调试插件，比 /plugins/ 更不该进仓库——不忽略的话跑一次 tauri dev 就会被 git add 误提交

@@ -1,0 +1,91 @@
+{
+  "version": 1,
+  "groups": [
+    {
+      "title": "截图",
+      "items": [
+        {
+          "key": "instantShot",
+          "type": "boolean",
+          "label": "唤起后立即截图",
+          "description": "从主搜索唤起「截图」时直接开始区域框选；关掉则先显示面板。",
+          "default": true
+        }
+      ]
+    },
+    {
+      "title": "贴图",
+      "items": [
+        {
+          "key": "pinOpacity",
+          "type": "number",
+          "label": "贴图默认透明度(%)",
+          "description": "从本插件面板贴图时的初始不透明度（全局贴图快捷键在 iTools 设置里配）。",
+          "default": 100,
+          "min": 20,
+          "max": 100,
+          "step": 5
+        },
+        {
+          "key": "pinThenCopy",
+          "type": "boolean",
+          "label": "贴图后同时复制到剪贴板",
+          "default": false
+        }
+      ]
+    },
+    {
+      "title": "保存",
+      "items": [
+        {
+          "key": "filenamePrefix",
+          "type": "text",
+          "label": "文件名前缀",
+          "description": "「另存为」的默认文件名前缀，后面自动接时间戳。",
+          "default": "PixShot_",
+          "placeholder": "PixShot_"
+        },
+        {
+          "key": "saveThenCopy",
+          "type": "boolean",
+          "label": "保存后同时复制到剪贴板",
+          "default": false
+        },
+        {
+          "key": "historyLimit",
+          "type": "number",
+          "label": "最近截图保留数量",
+          "description": "首页「最近截图」保留的张数（0 = 不保留）。",
+          "default": 3,
+          "min": 0,
+          "max": 10,
+          "step": 1
+        }
+      ]
+    },
+    {
+      "title": "OCR",
+      "items": [
+        {
+          "key": "ocrLayout",
+          "type": "select",
+          "label": "识别文字排版",
+          "description": "OCR 复制到剪贴板时的换行处理。",
+          "default": "auto",
+          "options": [
+            { "value": "auto", "label": "自动（保留原换行）" },
+            { "value": "single", "label": "合并为单行" },
+            { "value": "multi", "label": "按行分段" }
+          ]
+        },
+        {
+          "key": "ocrHalfPunct",
+          "type": "boolean",
+          "label": "标点转半角",
+          "description": "把识别结果里的全角标点转成半角。",
+          "default": false
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>PixShot 截图</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #f4f5f7; --panel: #fff; --line: #e5e7eb; --text: #1f2937; --sub: #6b7280;
+    --accent: #3b82f6; --accent-soft: #dbeafe; --danger: #ef4444; --canvas-bg: #e9eaee;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #17181a; --panel: #232527; --line: #35383c; --text: #e8eaed; --sub: #9aa0a6; --accent: #4f8cf7; --accent-soft: #1e3a5f; --canvas-bg: #101113; }
+  }
+  html, body { height: 100%; }
+  body { background: var(--bg); color: var(--text); overflow: hidden; font: 14px system-ui, "Segoe UI", "Microsoft YaHei", sans-serif; }
+  .hidden { display: none !important; }
+  button { font: inherit; color: inherit; cursor: pointer; border: 1px solid var(--line); background: var(--panel); border-radius: 8px; }
+  button:hover { border-color: var(--accent); }
+
+  #vHome { height: 100vh; display: flex; flex-direction: column; padding: 26px 30px 18px; gap: 18px; }
+  .brand { display: flex; align-items: center; gap: 12px; }
+  .brand .mark { width: 40px; height: 40px; border-radius: 10px; flex: none; background: linear-gradient(135deg, #7c3aed, #3b82f6); position: relative; }
+  .brand .mark::before { content: ""; position: absolute; inset: 10px; border: 2.5px solid #fff; border-radius: 4px;
+    clip-path: polygon(0 0, 30% 0, 30% 30%, 0 30%, 0 0, 100% 0, 100% 30%, 70% 30%, 70% 0, 100% 0, 100% 100%, 70% 100%, 70% 70%, 100% 70%, 100% 100%, 0 100%, 0 70%, 30% 70%, 30% 100%, 0 100%); }
+  .brand h1 { font-size: 18px; }
+  .brand p { color: var(--sub); font-size: 12.5px; margin-top: 2px; }
+  .actions { display: flex; gap: 12px; }
+  .bigBtn { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 20px 10px 16px; border-radius: 12px; font-size: 14.5px; }
+  .bigBtn svg { width: 30px; height: 30px; stroke: var(--accent); fill: none; stroke-width: 1.8; }
+  .bigBtn small { color: var(--sub); font-size: 11.5px; }
+  .bigBtn.primary { border-color: var(--accent); background: var(--accent-soft); }
+  .homeRow { display: flex; align-items: center; gap: 14px; color: var(--sub); font-size: 12.5px; flex-wrap: wrap; }
+  .homeRow label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+  .homeRow code { background: var(--canvas-bg); padding: 1px 6px; border-radius: 5px; }
+  .homeRow a { color: var(--accent); cursor: pointer; text-decoration: none; }
+  #histWrap h2 { font-size: 13px; color: var(--sub); font-weight: 600; margin-bottom: 8px; }
+  #histList { display: flex; gap: 10px; }
+  .histItem { width: 148px; cursor: pointer; }
+  .histItem img { width: 100%; height: 92px; object-fit: cover; border-radius: 8px; border: 1px solid var(--line); background: var(--canvas-bg); display: block; }
+  .histItem span { display: block; font-size: 11px; color: var(--sub); margin-top: 4px; text-align: center; }
+  #authCard { border: 1px solid var(--danger); border-radius: 12px; padding: 14px 16px; background: var(--panel); font-size: 13px; line-height: 1.8; }
+  #authCard b { color: var(--danger); }
+  .spacer { flex: 1; }
+  .footTip { color: var(--sub); font-size: 12px; text-align: center; }
+  #wait { position: fixed; inset: 0; z-index: 50; background: var(--bg); display: flex; align-items: center; justify-content: center; color: var(--sub); font-size: 13.5px; }
+</style>
+</head>
+<body>
+<div id="vHome">
+  <div class="brand">
+    <div class="mark"></div>
+    <div>
+      <h1>PixShot 截图</h1>
+      <p>区域 / 全屏截图 · 框选后就地标注（PixPin 风格）· 贴图钉在屏幕上</p>
+    </div>
+  </div>
+
+  <div id="authCard" class="hidden">
+    <b>需要授权才能截图</b><br />
+    请打开 iTools「插件管理」→ 找到 <b>pixshot</b> → 打开「screen-capture」授权开关，然后点
+    <a href="javascript:void 0" id="btnRetry">重试截图</a>。
+    <div id="authErr" style="color:var(--sub);font-size:12px;word-break:break-all"></div>
+  </div>
+
+  <div class="actions">
+    <button class="bigBtn primary" id="btnRegion">
+      <svg viewBox="0 0 24 24"><path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3" /><rect x="8.5" y="8.5" width="7" height="7" rx="1" /></svg>
+      区域截图 <small>框选后就地标注</small>
+    </button>
+    <button class="bigBtn" id="btnFull">
+      <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="1.5" /><path d="M8 20h8" /></svg>
+      全屏截图 <small>整屏 + 标注</small>
+    </button>
+    <button class="bigBtn" id="btnPinClip">
+      <svg viewBox="0 0 24 24"><path d="M12 3l4 4-1.5 1.5L18 12l-4 1-3 6-1.5-4.5L5 13l6-3 1-4z" /></svg>
+      贴图 <small>把剪贴板图片钉在屏幕上</small>
+    </button>
+  </div>
+
+  <div class="homeRow">
+    <div class="footTip" style="margin:0">立即截图 / 文件名前缀 / 历史数量等在「插件管理 → PixShot → 设置」里配置；截图 / 贴图全局快捷键在 iTools「设置 → 截图 / 贴图快捷键」里配置。</div>
+  </div>
+
+  <div id="histWrap" class="hidden">
+    <h2>最近截图（点击复制到剪贴板）</h2>
+    <div id="histList"></div>
+  </div>
+
+  <div class="spacer"></div>
+  <div class="footTip">框选后：工具栏就在选区旁，标注完点 复制/保存/贴图/OCR · 贴图窗：拖动 / 滚轮缩放 / Ctrl+双击变缩略图 / 双击还原 / Esc 关闭</div>
+</div>
+
+<div id="wait" class="hidden">正在截图，请在屏幕上框选…</div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+// 配置来自 iTools「插件设置」（schema 见同目录 settings.json）；此处仅作默认值兜底。
+let cfg = {
+  instantShot: true,
+  pinOpacity: 100, pinThenCopy: false,
+  filenamePrefix: "PixShot_", saveThenCopy: false, historyLimit: 3,
+  ocrLayout: "auto", ocrHalfPunct: false,
+};
+// OCR 文本按设置排版：single 合并单行 / multi 按行分段 / auto 原样；可选全角标点转半角。
+function formatOcr(text, layout, halfPunct) {
+  let t = String(text);
+  if (layout === "single") t = t.replace(/\s*\n\s*/g, " ").trim();
+  else if (layout === "multi") t = t.split(/\n/).map(s => s.trim()).filter(Boolean).join("\n\n");
+  if (halfPunct) {
+    const map = { "，": ",", "。": ".", "；": ";", "：": ":", "！": "!", "？": "?", "（": "(", "）": ")", "、": ",", "“": '"', "”": '"', "‘": "'", "’": "'" };
+    t = t.replace(/[，。；：！？（）、“”‘’]/g, m => map[m] || m);
+  }
+  return t;
+}
+let busy = false, authBlocked = false;
+
+function showWait(on) { $("wait").classList.toggle("hidden", !on); }
+function isAuthErr(e) { return /授权|screen-capture|permission/i.test(String(e)); }
+function showAuthHelp(err) { authBlocked = true; $("authErr").textContent = err ? String(err) : ""; $("authCard").classList.remove("hidden"); }
+
+/* ---------- 截图（原生 PixPin 覆盖层） ---------- */
+async function startCapture(full) {
+  if (busy) return;
+  busy = true; authBlocked = false; $("authCard").classList.add("hidden"); showWait(true);
+  try {
+    let res;
+    try {
+      res = await itools.captureRegion({ full: !!full });
+    } catch (e) {
+      showWait(false);
+      if (isAuthErr(e)) showAuthHelp(e); else itools.showToast("截图失败：" + e);
+      return;
+    }
+    showWait(false);
+    if (!res) return;                  // 用户取消
+    // busy 保持到动作（含保存对话框）走完，避免此间 Enter/热键再起一次截图
+    await doAction(res.action, res.image);
+    saveHistory(res.image);
+  } finally {
+    busy = false;
+  }
+}
+
+// 覆盖层里用户点的动作：copy/save/pin/ocr
+async function doAction(action, buf) {
+  try {
+    if (action === "save") {
+      const name = (cfg.filenamePrefix || "PixShot_") + new Date().toISOString().replace(/[:T]/g, "-").slice(0, 19) + ".png";
+      const path = await itools.saveImage(buf, name);
+      if (path) itools.showToast("已保存：" + path);
+      if (cfg.saveThenCopy) { try { await itools.writeImage(buf); } catch (_) {} }
+    } else if (action === "pin") {
+      await itools.createPin(buf, (cfg.pinOpacity || 100) / 100);
+      itools.showToast("已贴图：拖动 · 滚轮缩放 · Ctrl+双击缩略图 · 双击关闭");
+      if (cfg.pinThenCopy) { try { await itools.writeImage(buf); } catch (_) {} }
+    } else if (action === "ocr") {
+      const text = await itools.ocr(buf);
+      if (text && text.trim()) { await itools.copyText(formatOcr(text, cfg.ocrLayout, cfg.ocrHalfPunct)); itools.showToast("已识别文字并复制到剪贴板"); }
+      else itools.showToast("没识别到文字");
+    } else { // copy（默认）
+      await itools.writeImage(buf);
+      itools.showToast("已复制到剪贴板");
+    }
+  } catch (e) {
+    if (isAuthErr(e)) showAuthHelp(e); else itools.showToast("操作失败：" + e);
+  }
+}
+
+/* ---------- 贴图（剪贴板来源） ---------- */
+async function pinFromClipboard() {
+  let buf = null;
+  try { buf = await itools.readImage(); } catch (_) { buf = null; }
+  if (!buf || !buf.byteLength) { itools.showToast("剪贴板里没有图片"); return; }
+  try {
+    await itools.createPin(buf, (cfg.pinOpacity || 100) / 100);
+    itools.showToast("已贴图：拖动 · 滚轮缩放 · Ctrl+双击缩略图 · 双击关闭");
+    if (cfg.pinThenCopy) { try { await itools.writeImage(buf); } catch (_) {} }
+  } catch (e) { itools.showToast("贴图失败：" + e); }
+}
+
+/* ---------- 历史（全图存沙盒文件，KV 只放缩略图，避免 KV 膨胀） ---------- */
+function bufToB64(buf) { const u8 = new Uint8Array(buf); let bin = ""; for (let i = 0; i < u8.length; i += 0x8000) bin += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(bin); }
+function loadImage(src) { return new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = () => rej(new Error("解码失败")); im.src = src; }); }
+async function makeThumb(dataUrl) {
+  const img = await loadImage(dataUrl);
+  const k = Math.min(1, 260 / img.width);
+  const c = document.createElement("canvas"); c.width = Math.max(1, Math.round(img.width * k)); c.height = Math.max(1, Math.round(img.height * k));
+  c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+  return c.toDataURL("image/jpeg", 0.7);
+}
+async function saveHistory(buf) {
+  try {
+    const ts = Date.now();
+    const b64 = bufToB64(buf);
+    const thumb = await makeThumb("data:image/png;base64," + b64);
+    await itools.writeFile("hist/" + ts + ".b64", b64);        // 全图进沙盒文件
+    let hist = (await itools.db.get("hist")) || [];
+    hist.unshift({ ts, thumb });
+    const keep = Math.max(0, cfg.historyLimit == null ? 3 : cfg.historyLimit);
+    const drop = hist.slice(keep); hist = hist.slice(0, keep);  // 保留数量由设置控制
+    await itools.db.set("hist", hist);
+    for (const d of drop) { itools.removeFile("hist/" + d.ts + ".b64").catch(() => {}); }
+    renderHistory(hist);
+  } catch (_) {}
+}
+function renderHistory(hist) {
+  const wrap = $("histWrap"), list = $("histList");
+  list.innerHTML = ""; wrap.classList.toggle("hidden", !hist || !hist.length);
+  (hist || []).forEach(h => {
+    const div = document.createElement("div"); div.className = "histItem";
+    const img = document.createElement("img"); img.src = h.thumb;
+    const span = document.createElement("span"); span.textContent = new Date(h.ts).toLocaleString();
+    div.append(img, span);
+    div.onclick = async () => {
+      try {
+        const b64 = await itools.readFile("hist/" + h.ts + ".b64");
+        if (b64 && b64.length > 8) { await itools.writeImage(b64); itools.showToast("已复制到剪贴板"); }
+        else itools.showToast("该截图已被清理");
+      } catch (_) { itools.showToast("该截图已被清理"); }
+    };
+    list.appendChild(div);
+  });
+}
+
+/* ---------- 按钮 / 键盘 ---------- */
+$("btnRegion").onclick = () => startCapture(false);
+$("btnFull").onclick = () => startCapture(true);
+$("btnPinClip").onclick = pinFromClipboard;
+$("btnRetry").onclick = () => { authBlocked = false; startCapture(false); };
+// 截图行为改由 iTools「插件设置」控制（读取见下方 onEnter / settings.onChange）。
+window.addEventListener("keydown", e => {
+  if (e.key === "Escape") { itools.hide(); return; }
+  if (e.key === "Enter" && e.target === document.body && !busy) startCapture(false);
+});
+
+/* ---------- 进入插件 ---------- */
+itools.onEnter(async info => {
+  // 配置从 iTools「插件设置」读取（用户在管理中心配置，schema 见 settings.json）
+  // 截图/贴图全局快捷键已归 iTools 本体（设置 → 截图/贴图快捷键），本插件不再注册全局热键。
+  try { cfg = Object.assign(cfg, await itools.settings.all()); } catch (_) {}
+  try { renderHistory((await itools.db.get("hist")) || []); } catch (_) {}
+  if (info && info.code === "pin") { pinFromClipboard(); return; }
+  // 热键唤起（关着面板时经 open_plugin 传 query="__hotkey__"）：无视 instantShot，直接执行对应动作
+  if (info && info.code === "shot" && info.query === "__hotkey__") { if (!busy) startCapture(false); return; }
+  if (busy) return;
+  if (cfg.instantShot && !authBlocked) startCapture(false);
+});
+// 用户在 iTools 管理中心改了本插件设置 → 实时生效
+itools.settings.onChange(values => {
+  cfg = Object.assign(cfg, values);
+});
+</script>
+</body>
+</html>

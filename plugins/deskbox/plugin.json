@@ -1,0 +1,29 @@
+{
+  "name": "deskbox",
+  "displayName": "云端笔记",
+  "version": "1.0.0",
+  "description": "笔记 · 待办 · 密码：树形笔记（可加密上锁）、待办清单、加密密码管家，支持搜索",
+  "author": "you",
+  "dataSets": [
+    { "key": "notes.tree", "label": "笔记", "countBy": "length" },
+    { "key": "todos", "label": "待办", "countBy": "length" },
+    { "key": "vault", "label": "密码", "countBy": "length" }
+  ],
+  "features": [
+    {
+      "code": "notes",
+      "explain": "树形笔记（支持加密上锁 · 搜索）",
+      "cmds": ["笔记", "记事本", "notes", "note"]
+    },
+    {
+      "code": "todo",
+      "explain": "待办清单 / 任务管理",
+      "cmds": ["待办", "todo", "任务", "todolist"]
+    },
+    {
+      "code": "passwords",
+      "explain": "加密密码管家（主密码保护）",
+      "cmds": ["密码", "密码管理", "password", "vault"]
+    }
+  ]
+}
