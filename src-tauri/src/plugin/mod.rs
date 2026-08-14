@@ -1015,7 +1015,6 @@ mod tests {
     /// 注意也不能用「seed 目录 != 插件根」判定：dev 下这两个路径本来就是两份不同的拷贝，
     /// 那样判等于没判。真正的区别是有没有**播种关系**。
     #[test]
-    #[test]
     fn market_installed_plugins_are_skipped_when_seeding() {
         // 「装了市场版、重启又被内置版盖回去」是内置插件升级通道的死穴：
         // copy_dir_merge 是「缺啥补啥」，内置版独有的旧文件会被补进市场版目录，
