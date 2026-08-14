@@ -758,6 +758,20 @@ mod tests {
              为 null 时 UI 显示「—」，不许编造时间。",
         );
 
+        // ---------- 插件开发 MCP 服务器（mcp/mod.rs） ----------
+        freeze(
+            &mut out,
+            "McpStatus",
+            &crate::mcp::McpStatus {
+                running: true,
+                port: 7345,
+                url: "http://127.0.0.1:7345/mcp".into(),
+                error: None,
+            },
+            &["running", "port", "url", "error"],
+            "running / port / url 都来自**实际的监听结果**，不是配置项的回显：             端口被占用时 running=false 且 error 里是真实原因，面板不许显示一个假的「运行中」             或一个连不上的地址。",
+        );
+
         // ---------- 插件提审（dev/submit.rs） ----------
         freeze(
             &mut out,

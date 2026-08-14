@@ -645,6 +645,19 @@ export interface DevKv {
   updatedAt: string | null;
 }
 
+/** 插件开发 MCP 服务器的运行状态，与 Rust 侧 `McpStatus` 一致。
+ *  running / port / url 都来自**实际的监听结果**，不是配置项的回显——
+ *  起不来时 running=false 且 error 里是真实原因，界面不许显示一个假的「运行中」。 */
+export interface McpStatus {
+  running: boolean;
+  /** 实际监听的端口（未运行为 0） */
+  port: number;
+  /** 给 AI 客户端填的完整地址（未运行为空串） */
+  url: string;
+  /** 未能启动时的真实原因 */
+  error: string | null;
+}
+
 /** 开发者中心的全局配置快照，与 Rust 侧 `DevConfig` 一致。 */
 export interface DevConfig {
   /** 调试插件是否参与主搜索（默认 false）。 */

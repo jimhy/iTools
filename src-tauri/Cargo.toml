@@ -69,6 +69,7 @@ xcap = "0.9"
 tokio = { version = "1", features = ["sync", "time"] }
 # 麦克风/系统声录音（WASAPI 底层）
 cpal = "0.15"
+tiny_http = { version = "0.12.0", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

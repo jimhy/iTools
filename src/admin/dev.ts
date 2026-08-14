@@ -18,7 +18,7 @@
 //! - 正常降级（没有调试插件 / 目录为空 / 没有日志）一律渲染成引导或空态，**不渲染成故障**。
 
 import type { AdminCtx } from "./main";
-import type { DevConfig, DevFeature, DevIssue, DevMockConfig, DevPluginInfo } from "../types";
+import type { DevConfig, DevFeature, DevIssue, DevMockConfig, DevPluginInfo, McpStatus } from "../types";
 import { h, makeSwitch } from "./ui";
 import * as api from "./api";
 import { errText, permLabel } from "./plugin-install";
@@ -160,6 +160,77 @@ export async function renderDev(root: HTMLElement, ctx: AdminCtx): Promise<void>
   }
 
   // ---------- 调试目录管理 ----------
+  /** MCP 服务器状态（异步读到后重绘那一块，读不到就如实显示原因）。 */
+  let mcp: McpStatus | null = null;
+
+  /** 「AI 助手接入」卡片：把可复制的连接配置直接摆出来。
+   *
+   *  显示的地址来自后端**实际的监听结果**——服务器没起来就显示失败原因，
+   *  绝不给一个「看着能连、连了没反应」的地址。 */
+  function mcpCard(): HTMLElement {
+    const box = h("div", { class: "dev-dirs" });
+    box.appendChild(h("div", { class: "dev-sec-title", text: "让 AI 帮你写插件（MCP）" }));
+
+    if (!mcp) {
+      box.appendChild(h("div", { class: "dev-sec-desc", text: "正在读取 MCP 服务器状态…" }));
+      return box;
+    }
+    if (!mcp.running) {
+      box.appendChild(
+        h(
+          "div",
+          { class: "info-box info-box-warn" },
+          h("div", { text: "MCP 服务器没有在运行，AI 助手连不上。" }),
+          h("div", { class: "info-box-detail", text: mcp.error ?? "（后端没有给出原因）" }),
+          h("div", {
+            class: "info-box-detail",
+            text: "端口被占用时可用环境变量 ITOOLS_MCP_PORT 换一个（设 0 由系统分配），重启 iTools 生效。",
+          }),
+        ),
+      );
+      return box;
+    }
+
+    box.appendChild(
+      h("div", {
+        class: "dev-sec-desc",
+        text:
+          "在 AI 编程助手（Claude Code / Cursor 等）里加上下面这段配置，它就能直接读插件开发规范、" +
+          "跑触发模拟器、看调试日志、做发布前自检并提交审核 —— 一台装好 iTools 的电脑，填一行就能开始写插件。",
+      }),
+    );
+
+    const conf = JSON.stringify({ mcpServers: { itools: { url: mcp.url } } }, null, 2);
+    const pre = h("pre", { class: "dev-log-pre", text: conf });
+    const copyBtn = h("button", { class: "btn btn-sm", text: "复制配置" });
+    copyBtn.addEventListener("click", () => {
+      void navigator.clipboard
+        .writeText(conf)
+        .then(() => ctx.toast("已复制 MCP 配置"))
+        .catch(() => ctx.toast("复制失败，请手动选中复制"));
+    });
+    const copyUrlBtn = h("button", { class: "btn btn-sm", text: "只复制地址" });
+    copyUrlBtn.addEventListener("click", () => {
+      void navigator.clipboard
+        .writeText(mcp!.url)
+        .then(() => ctx.toast("已复制地址"))
+        .catch(() => ctx.toast("复制失败，请手动选中复制"));
+    });
+
+    box.append(
+      h("div", { class: "dev-path-row" }, h("span", { class: "dev-path-label", text: "地址" }), h("code", { class: "dev-path", text: mcp.url })),
+      pre,
+      h("div", { class: "dev-run-actions" }, copyBtn, copyUrlBtn),
+      h("div", {
+        class: "dev-hint",
+        text:
+          "⚠ 这个端点只监听本机（127.0.0.1），但**没有鉴权**：本机上任何程序都能调用它，" +
+          "其中包括「提交审核」这类会改变线上状态的操作。要关掉它，设环境变量 ITOOLS_MCP=off 后重启。",
+      }),
+    );
+    return box;
+  }
+
   function dirsCard(): HTMLElement {
     const list = h("div", { class: "dev-dir-list" });
     for (const d of config.dirs) {
@@ -864,7 +935,7 @@ export async function renderDev(root: HTMLElement, ctx: AdminCtx): Promise<void>
     const main = plugins.length
       ? h("div", { class: "dev-main" }, listPane(), detailPane())
       : h("div", { class: "dev-main dev-main-empty" }, emptyGuide());
-    scroll.append(intro(), dirsCard(), main);
+    scroll.append(intro(), mcpCard(), dirsCard(), main);
   }
 
   /** 列表指纹：只覆盖会影响界面的字段。用来判断「后台刷新到底有没有变化」，
@@ -913,6 +984,22 @@ export async function renderDev(root: HTMLElement, ctx: AdminCtx): Promise<void>
   }
 
   paint();
+
+  // MCP 状态要问后端（它是实际监听结果），拿到后只重绘这一块。
+  // 读失败也如实呈现——把「查不到」显示成「没运行」会让人白折腾端口。
+  void api
+    .mcpStatus()
+    .then((st) => {
+      if (active !== instance) return;
+      mcp = st;
+      paint();
+    })
+    .catch((err) => {
+      if (active !== instance) return;
+      console.error("mcp_status failed", err);
+      mcp = { running: false, port: 0, url: "", error: `读取状态失败：${errText(err, "未知错误")}` };
+      paint();
+    });
 
   // ---------- 窗口重新可见时对账一次 ----------
   // 关闭管理中心走的是 close_admin_window → win.hide()（窗口只隐藏不销毁、也不触发 switchView），

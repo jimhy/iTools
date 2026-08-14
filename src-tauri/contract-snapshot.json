@@ -205,6 +205,12 @@
     "source",
     "stale"
   ],
+  "McpStatus": [
+    "error",
+    "port",
+    "running",
+    "url"
+  ],
   "MirrorConfigView": [
     "fetchedAt",
     "lastError",

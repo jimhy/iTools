@@ -12,6 +12,8 @@ mod hotkey;
 mod http;
 mod launch;
 mod logging;
+/// 插件开发 MCP 服务器：把开发者中心的能力（读规范/跑测试/看日志/提审）开放给 AI 编程助手。
+mod mcp;
 mod plugin;
 mod profile;
 mod search;
@@ -220,6 +222,10 @@ pub fn run() {
             app.manage(dev_runtime);
             // 插件热更新：监听 plugins/ 目录，改动后自动重扫 + 刷新已打开插件窗（免重启 / 免手动重载）
             plugin::watch::start(app.handle(), plugins_root_watch);
+            // 插件开发 MCP 服务器（默认开启，只绑 127.0.0.1）：让 AI 编程助手直接驱动开发者中心。
+            // 必须在 dev_runtime / AccountStore 等 state 都 manage 之后启动——它的工具会取这些 state。
+            // 起不来（端口被占）只记日志，绝不影响 iTools 本体。
+            mcp::start(app.handle().clone());
             // 从 Git 安装插件的暂存区（预览 → 确认之间的中转）
             app.manage(plugin::install::InstallStaging::default());
             // 区域截图流程状态（冻结图 + 选区结果通道）
@@ -442,6 +448,7 @@ pub fn run() {
             dev::commands::dev_preflight,
             dev::commands::dev_submit_plugin,
             dev::commands::dev_submission_detail,
+            mcp::mcp_status,
             dev::storage::dev_storage_list,
             dev::storage::dev_storage_set,
             dev::storage::dev_storage_remove,

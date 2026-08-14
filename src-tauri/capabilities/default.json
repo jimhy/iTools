@@ -102,6 +102,7 @@
     "allow-dev-publish-status",
     "allow-dev-preflight",
     "allow-dev-submit-plugin",
-    "allow-dev-submission-detail"
+    "allow-dev-submission-detail",
+    "allow-mcp-status"
   ]
 }

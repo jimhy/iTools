@@ -24,6 +24,7 @@ import type {
   DevKv,
   DevLogEntry,
   DevMockConfig,
+  McpStatus,
   PublishStatus,
   Preflight,
   Submission,
@@ -219,6 +220,10 @@ export const devLogClear = () => invoke<void>("dev_log_clear");
 export const devGetMock = () => invoke<DevMockConfig>("dev_get_mock");
 /** 保存云同步 Mock 配置（整包写入）。 */
 export const devSetMock = (cfg: DevMockConfig) => invoke<void>("dev_set_mock", { cfg });
+
+// ---------- 插件开发 MCP 服务器 ----------
+/** MCP 服务器的运行状态与连接地址。**来自实际监听结果**：起不来时 running=false 且带真实原因。 */
+export const mcpStatus = () => invoke<McpStatus>("mcp_status");
 
 // ---------- 插件提审 ----------
 /** 查一个调试插件的发布状态（线上版本 + 提审历史）。**要联网**，会拉市场索引与提审接口。
