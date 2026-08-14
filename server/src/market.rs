@@ -1,0 +1,555 @@
+//! 插件提审与市场：收包 → 机械校验 → 大模型审核 → 发布索引。
+//!
+//! # 这条链路取代了什么
+//!
+//! 此前插件市场的真相源是 GitHub 仓库里的 `registry/index.json`，收录靠人工提 Issue/PR，
+//! 客户端从 raw.githubusercontent.com 拉索引、从 GitHub 归档下载插件包。现在**索引与包都在这里**：
+//! 作者在开发者中心点「提交审核」直接把打包好的插件上传上来，服务端审完就直接发布。
+//!
+//! # 审核是两段，不是一段
+//!
+//! 1. **机械校验**（[`crate::pkg`]，同步、必过）：格式、清单、可执行文件、路径穿越、体积。
+//!    这一段失败就当场拒绝，连模型都不用调。
+//! 2. **大模型审核**（[`crate::llm`]，异步）：读代码判断恶意行为、权限名副其实、描述相符。
+//!    这一段耗时几十秒到几分钟，所以提交接口**立即返回**一个 `reviewing` 的提审单 id，
+//!    作者在开发者中心轮询状态。
+//!
+//! # 诚信约束（doc/开发准则.md）
+//!
+//! - **模型没配 / 调用失败 / 裁决不可解析 → 落 `manual`（待人工处理），绝不自动上线。**
+//!   这是全模块最重要的一条：把「没审成」当成「审过了」，等于市场上所有「已审核」的字样都是假的。
+//! - 进程重启会中断审核，启动时把卡住的 `reviewing` 单子如实改判为 `manual` 并写明原因，
+//!   不留一个永远转圈的状态。
+//! - 索引里的 `reviewedBy` 如实写明是哪个模型审的，客户端据此告诉用户「这是自动审核，不是人工审计」。
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use serde::Serialize;
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use tokio::sync::RwLock;
+
+use crate::config::Config;
+use crate::llm;
+use crate::pkg::{self, StagedPackage};
+use crate::store::{MarketRow, MariaDbStore, Submission};
+use crate::Clock;
+
+/// 提审单状态。
+pub mod status {
+    /// 已收下，正在审核。
+    pub const REVIEWING: &str = "reviewing";
+    /// 审核通过，已上线。
+    pub const APPROVED: &str = "approved";
+    /// 审核未通过。
+    pub const REJECTED: &str = "rejected";
+    /// 审核没能完成（模型未配置 / 调用失败 / 服务重启），需要维护者人工处理。
+    pub const MANUAL: &str = "manual";
+}
+
+/// 进程重启后，`reviewing` 状态被视为「已中断」的年龄阈值。
+///
+/// 启动时一律改判——审核任务活在内存里，进程一没它就永远不会有结论。
+/// 不设「等一等说不定还在跑」的宽限：那只会让作者盯着一个永远转圈的状态。
+const STALE_REVIEW_MS: i64 = 0;
+
+/// 市场索引的响应体（带 ETag，客户端可 304）。
+#[derive(Clone)]
+pub struct IndexBody {
+    pub json: String,
+    pub etag: String,
+}
+
+pub struct MarketService {
+    store: Arc<MariaDbStore>,
+    config: Arc<Config>,
+    clock: Clock,
+    /// 索引缓存：只在发布 / 下架时重建，平时直接吐（并让 ETag 稳定命中 304）。
+    index: RwLock<IndexBody>,
+}
+
+impl MarketService {
+    pub fn new(store: Arc<MariaDbStore>, config: Arc<Config>, clock: Clock) -> Arc<Self> {
+        let empty = render_index(&[], &config);
+        Arc::new(Self {
+            store,
+            config,
+            clock,
+            index: RwLock::new(empty),
+        })
+    }
+
+    /// 启动时调用：装载索引缓存 + 把中断的审核如实改判。
+    pub async fn bootstrap(self: &Arc<Self>) {
+        if let Err(e) = self.rebuild_index().await {
+            tracing::error!("[market] 装载市场索引失败：{e}（索引暂为空，发布后会自动重建）");
+        }
+        match self.recover_stale_reviews().await {
+            Ok(0) => {}
+            Ok(n) => tracing::warn!("[market] {n} 个提审单在上次运行中被中断，已改判为「待人工处理」"),
+            Err(e) => tracing::error!("[market] 恢复中断的提审单失败：{e}"),
+        }
+    }
+
+    /// 把进程重启前卡在 `reviewing` 的提审单改判为 `manual`。
+    async fn recover_stale_reviews(&self) -> Result<usize, sqlx::Error> {
+        let now = (self.clock)();
+        let stale = self.store.stale_reviewing(now - STALE_REVIEW_MS).await?;
+        for id in &stale {
+            self.store
+                .finish_submission(
+                    id,
+                    status::MANUAL,
+                    "审核过程被服务重启中断，未得出结论。请重新提交审核。",
+                    "",
+                    now,
+                )
+                .await?;
+        }
+        Ok(stale.len())
+    }
+
+    pub async fn index(&self) -> IndexBody {
+        self.index.read().await.clone()
+    }
+
+    /// 从数据库重建索引缓存。
+    pub async fn rebuild_index(&self) -> Result<(), sqlx::Error> {
+        let rows = self.store.list_entries().await?;
+        let body = render_index(&rows, &self.config);
+        *self.index.write().await = body;
+        Ok(())
+    }
+
+    /// 已上线插件包的磁盘路径（供下载端点）。返回 `None` = 没这个插件或已下架。
+    pub async fn package_path(&self, name: &str) -> Result<Option<(PathBuf, MarketRow)>, sqlx::Error> {
+        let Some(row) = self.store.get_entry(name).await? else {
+            return Ok(None);
+        };
+        if row.revoked {
+            return Ok(None);
+        }
+        let p = self.config.market.packages_dir.join(&row.package_file);
+        Ok(Some((p, row)))
+    }
+
+    /// 收一个提审包。**同步**做完机械校验与落盘，然后把大模型审核丢到后台。
+    ///
+    /// 返回提审单 id。任何机械校验失败都直接 `Err`，此时不会留下任何提审单——
+    /// 那类问题作者当场就该看到原文，不需要事后去查记录。
+    pub async fn submit(
+        self: &Arc<Self>,
+        author: &str,
+        bytes: Vec<u8>,
+    ) -> Result<Submission, SubmitError> {
+        let now = (self.clock)();
+
+        // 冷却：审核要花模型的钱，挡住连点与脚本刷提交
+        let cooldown = self.config.market.submit_cooldown_sec * 1000;
+        if cooldown > 0 {
+            if let Ok(Some(last)) = self.store.last_submit_at(author).await {
+                let wait = last + cooldown - now;
+                if wait > 0 {
+                    return Err(SubmitError::TooSoon((wait + 999) / 1000));
+                }
+            }
+        }
+
+        // 解压 + 机械校验（CPU/IO 密集，挪出异步线程）
+        let tmp = tempfile::tempdir().map_err(|e| SubmitError::Server(format!("创建临时目录失败: {e}")))?;
+        let tmp_path = tmp.path().to_path_buf();
+        let bytes_for_stage = bytes.clone();
+        let staged = tokio::task::spawn_blocking(move || pkg::stage(&bytes_for_stage, &tmp_path))
+            .await
+            .map_err(|e| SubmitError::Server(format!("校验任务异常终止: {e}")))?
+            .map_err(SubmitError::Rejected)?;
+
+        let name = staged.manifest.name.clone();
+        let version = staged.manifest.version.trim().to_string();
+        if !is_safe_version(&version) {
+            return Err(SubmitError::Rejected(format!(
+                "version「{version}」含非法字符：只允许字母、数字与 . - _"
+            )));
+        }
+
+        // 归属校验：同名插件只能由首次上线它的账号更新。
+        // 客户端按插件名归属授权与数据，顶包等于直接继承受害插件的用户授权——这条必须挡死。
+        match self.store.get_entry(&name).await {
+            Ok(Some(existing)) if existing.owner != author => {
+                return Err(SubmitError::Forbidden(format!(
+                    "插件名「{name}」已被账号 {} 占用。请换一个 name —— 它同时是安装目录名与数据命名空间，不能重名。",
+                    mask(&existing.owner)
+                )));
+            }
+            Ok(Some(existing)) if !pkg::version_gt(&version, &existing.version) => {
+                return Err(SubmitError::Rejected(format!(
+                    "版本号 {version} 不高于线上的 {}。改了代码就升 version（客户端的更新检查只比这个值）。",
+                    existing.version
+                )));
+            }
+            Err(e) => return Err(SubmitError::Server(format!("查询市场条目失败: {e}"))),
+            _ => {}
+        }
+
+        // 包先落盘（审核通过后直接发布，不用作者再传一次）
+        let package_file = format!("{name}/{version}.zip");
+        let dest = self.config.market.packages_dir.join(&package_file);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| SubmitError::Server(format!("创建包目录失败: {e}")))?;
+        }
+        std::fs::write(&dest, &bytes).map_err(|e| SubmitError::Server(format!("保存插件包失败: {e}")))?;
+
+        let sub = Submission {
+            id: new_id(),
+            name: name.clone(),
+            version: version.clone(),
+            author: author.to_string(),
+            status: status::REVIEWING.to_string(),
+            content_hash: staged.content_hash.clone(),
+            file_count: staged.file_count as i64,
+            size_bytes: staged.total_bytes as i64,
+            manifest: serde_json::to_string(&staged.manifest).unwrap_or_default(),
+            review: String::new(),
+            message: if self.config.llm.enabled() {
+                format!("机械校验已通过，正在由 {} 审阅代码…", self.config.llm.model)
+            } else {
+                "机械校验已通过。服务端未配置审核模型，本次提审需要维护者人工处理。".to_string()
+            },
+            created_at: now,
+            updated_at: now,
+        };
+        if let Err(e) = self.store.create_submission(&sub).await {
+            return Err(SubmitError::Server(format!("写入提审单失败: {e}")));
+        }
+
+        // 后台审核：不阻塞提交响应
+        let me = Arc::clone(self);
+        let id = sub.id.clone();
+        tokio::spawn(async move {
+            me.run_review(id, staged, package_file).await;
+        });
+
+        Ok(sub)
+    }
+
+    /// 后台审核任务：调模型 → 通过则发布。
+    ///
+    /// 这个函数**不返回错误**——它是 detached 任务，任何失败都必须落到提审单的状态上，
+    /// 否则作者那边就是一个永远「审核中」的黑洞。
+    async fn run_review(&self, id: String, staged: StagedPackage, package_file: String) {
+        let outcome = llm::review(&self.config.llm, &staged).await;
+        let now = (self.clock)();
+
+        let (status_, message, review_raw) = match outcome {
+            Err(e) => {
+                // 审核没能完成 —— 如实落「待人工处理」，绝不放行
+                tracing::warn!("[market] 提审单 {id} 审核未完成：{e}");
+                (
+                    status::MANUAL.to_string(),
+                    format!("自动审核未能完成：{e}\n本次提审已转由维护者人工处理，插件尚未上线。"),
+                    String::new(),
+                )
+            }
+            Ok(o) if o.verdict.approved() => {
+                (status::APPROVED.to_string(), llm::brief(&o.verdict), o.raw)
+            }
+            Ok(o) => (status::REJECTED.to_string(), o.verdict.reject_reason(), o.raw),
+        };
+
+        if status_ == status::APPROVED {
+            if let Err(e) = self.publish(&staged, &package_file, &id, now).await {
+                tracing::error!("[market] 提审单 {id} 审核通过但发布失败：{e}");
+                let _ = self
+                    .store
+                    .finish_submission(
+                        &id,
+                        status::MANUAL,
+                        &format!("审核通过，但发布到市场时失败：{e}。请联系维护者。"),
+                        &review_raw,
+                        now,
+                    )
+                    .await;
+                return;
+            }
+        }
+
+        if let Err(e) = self
+            .store
+            .finish_submission(&id, &status_, &message, &review_raw, now)
+            .await
+        {
+            tracing::error!("[market] 回填提审单 {id} 结论失败：{e}");
+        }
+    }
+
+    /// 把审核通过的包写进市场条目并重建索引。
+    async fn publish(
+        &self,
+        staged: &StagedPackage,
+        package_file: &str,
+        submission_id: &str,
+        now: i64,
+    ) -> Result<(), String> {
+        let m = &staged.manifest;
+        let author = self
+            .store
+            .get_submission(submission_id)
+            .await
+            .map_err(|e| format!("查询提审单失败: {e}"))?
+            .map(|s| s.author)
+            .unwrap_or_default();
+
+        let published_at = match self.store.get_entry(&m.name).await {
+            Ok(Some(prev)) => prev.published_at, // 更新不改首发时间
+            _ => now,
+        };
+
+        let entry = json!({
+            "name": m.name,
+            "displayName": m.display_name,
+            "description": m.description,
+            "author": if m.author.is_empty() { author.clone() } else { m.author.clone() },
+            "version": m.version,
+            "contentHash": staged.content_hash,
+            "fileCount": staged.file_count,
+            "sizeBytes": staged.total_bytes,
+            "permissions": m.permissions,
+            "keywords": m.keywords(),
+            "featureCount": m.features.len(),
+            "homepage": m.homepage,
+            "license": m.license,
+            "readme": staged.readme,
+            // 如实标注审核方式：客户端市场页据此告诉用户「自动审核，不是人工审计」
+            "reviewedBy": self.config.llm.model,
+            "reviewedAt": now,
+            "publishedAt": published_at,
+            "updatedAt": now,
+            "revoked": false,
+            "revokedReason": "",
+        });
+
+        let row = MarketRow {
+            name: m.name.clone(),
+            owner: author,
+            version: m.version.clone(),
+            content_hash: staged.content_hash.clone(),
+            package_file: package_file.to_string(),
+            entry: serde_json::to_string(&entry).map_err(|e| format!("序列化条目失败: {e}"))?,
+            revoked: false,
+            revoked_reason: String::new(),
+            published_at,
+            updated_at: now,
+        };
+        self.store.publish_entry(&row).await.map_err(|e| format!("写入市场条目失败: {e}"))?;
+        self.rebuild_index().await.map_err(|e| format!("重建索引失败: {e}"))?;
+        tracing::info!("[market] 已上线 {} v{}", m.name, m.version);
+        Ok(())
+    }
+
+    /// 下架 / 恢复一个插件（维护者操作）。
+    pub async fn set_revoked(&self, name: &str, revoked: bool, reason: &str) -> Result<bool, String> {
+        let now = (self.clock)();
+        let ok = self
+            .store
+            .set_revoked(name, revoked, reason, now)
+            .await
+            .map_err(|e| format!("更新市场条目失败: {e}"))?;
+        if ok {
+            self.rebuild_index().await.map_err(|e| format!("重建索引失败: {e}"))?;
+        }
+        Ok(ok)
+    }
+
+    pub fn is_admin(&self, user: &str) -> bool {
+        self.config.market.admins.iter().any(|a| a == user)
+    }
+
+    pub fn store(&self) -> &MariaDbStore {
+        &self.store
+    }
+}
+
+/// 提交失败的分类（决定 HTTP 状态码与文案）。
+pub enum SubmitError {
+    /// 包本身不合格（400）——原因是给作者看的中文原文。
+    Rejected(String),
+    /// 归属冲突等（403）。
+    Forbidden(String),
+    /// 提交过于频繁（429），带需要等待的秒数。
+    TooSoon(i64),
+    /// 服务端自身问题（500）——细节只进日志。
+    Server(String),
+}
+
+/// 渲染市场索引 JSON + ETag。
+///
+/// 形状与客户端 `src-tauri/src/plugin/market.rs::MarketIndex` 对齐。
+/// **已下架的条目照样在索引里**（带 `revoked` 与原因）——客户端要靠它提醒已安装的用户。
+fn render_index(rows: &[MarketRow], config: &Config) -> IndexBody {
+    let plugins: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            let mut v: Value = serde_json::from_str(&r.entry).unwrap_or_else(|_| json!({}));
+            if let Some(o) = v.as_object_mut() {
+                // 以行上的权威字段为准（下架状态可能在条目写好之后才改）
+                o.insert("name".into(), json!(r.name));
+                o.insert("version".into(), json!(r.version));
+                o.insert("contentHash".into(), json!(r.content_hash));
+                o.insert("revoked".into(), json!(r.revoked));
+                o.insert("revokedReason".into(), json!(r.revoked_reason));
+                // 下载地址是**相对路径**：客户端拼上自己配置的服务器地址即可，
+                // 服务端不需要知道自己被从哪个域名访问（反代 / 内网 / 端口转发都不影响）。
+                o.insert("package".into(), json!(format!("/api/market/package/{}", r.name)));
+            }
+            v
+        })
+        .collect();
+
+    let doc = MarketIndexDoc {
+        version: 1,
+        review_mode: if config.llm.enabled() { "llm" } else { "manual" },
+        review_model: if config.llm.enabled() { config.llm.model.clone() } else { String::new() },
+        plugins,
+    };
+    let json = serde_json::to_string(&doc).unwrap_or_else(|_| r#"{"version":1,"plugins":[]}"#.to_string());
+    let etag = format!("\"{}\"", hex::encode(&Sha256::digest(json.as_bytes())[..8]));
+    IndexBody { json, etag }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MarketIndexDoc {
+    version: u32,
+    /// `llm` = 由大模型自动审核；`manual` = 审核模型未接入，条目由维护者人工放行。
+    /// 客户端市场页据此如实措辞，不把「自动审核」说成「人工审计」。
+    review_mode: &'static str,
+    review_model: String,
+    plugins: Vec<Value>,
+}
+
+/// 版本号只允许出现在路径里安全的字符（它会成为包文件名的一部分）。
+fn is_safe_version(v: &str) -> bool {
+    !v.is_empty()
+        && v.len() <= 64
+        && v.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
+        && !v.contains("..")
+}
+
+/// 提审单 id：32 位十六进制随机串。
+fn new_id() -> String {
+    use rand::RngCore;
+    let mut b = [0u8; 16];
+    rand::rng().fill_bytes(&mut b);
+    hex::encode(b)
+}
+
+/// 别人的账号名对外只露头尾（提示归属冲突时用，不泄露完整账号）。
+fn mask(u: &str) -> String {
+    let chars: Vec<char> = u.chars().collect();
+    match chars.len() {
+        0 => "（未知）".to_string(),
+        1..=2 => format!("{}*", chars[0]),
+        n => format!("{}***{}", chars[0], chars[n - 1]),
+    }
+}
+
+/// 判断 If-None-Match 是否命中（与 `mirrors::matches_etag` 同口径）。
+pub fn matches_etag(if_none_match: Option<&str>, etag: &str) -> bool {
+    let Some(raw) = if_none_match else {
+        return false;
+    };
+    raw.split(',').map(str::trim).any(|t| t == etag || t == "*")
+}
+
+/// 供路由层：包文件的磁盘读取（带存在性检查）。
+pub fn read_package(path: &Path) -> Result<Vec<u8>, String> {
+    std::fs::read(path).map_err(|e| format!("读取插件包失败: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg(model_key: &str) -> Arc<Config> {
+        let mut env = std::collections::HashMap::new();
+        if !model_key.is_empty() {
+            env.insert("ITOOLS_LLM_API_KEY".to_string(), model_key.to_string());
+        }
+        Arc::new(Config::from_map(&env).unwrap())
+    }
+
+    fn row(name: &str, revoked: bool) -> MarketRow {
+        MarketRow {
+            name: name.into(),
+            owner: "u".into(),
+            version: "1.0.0".into(),
+            content_hash: "sha256:aa".into(),
+            package_file: format!("{name}/1.0.0.zip"),
+            entry: json!({"name": name, "description": "d"}).to_string(),
+            revoked,
+            revoked_reason: if revoked { "有问题".into() } else { String::new() },
+            published_at: 1,
+            updated_at: 2,
+        }
+    }
+
+    #[test]
+    fn index_marks_review_mode_honestly() {
+        let no_llm = render_index(&[], &cfg(""));
+        assert!(no_llm.json.contains(r#""reviewMode":"manual""#), "{}", no_llm.json);
+        let with_llm = render_index(&[], &cfg("sk-x"));
+        assert!(with_llm.json.contains(r#""reviewMode":"llm""#));
+        assert!(with_llm.json.contains("gpt-5.5"));
+    }
+
+    #[test]
+    fn index_keeps_revoked_entries_with_reason() {
+        let body = render_index(&[row("bad", true)], &cfg("sk-x"));
+        let v: Value = serde_json::from_str(&body.json).unwrap();
+        let p = &v["plugins"][0];
+        assert_eq!(p["revoked"], json!(true));
+        assert_eq!(p["revokedReason"], json!("有问题"));
+    }
+
+    #[test]
+    fn index_injects_relative_package_url() {
+        let body = render_index(&[row("demo", false)], &cfg("sk-x"));
+        let v: Value = serde_json::from_str(&body.json).unwrap();
+        assert_eq!(v["plugins"][0]["package"], json!("/api/market/package/demo"));
+    }
+
+    #[test]
+    fn etag_stable_and_content_sensitive() {
+        let a = render_index(&[row("demo", false)], &cfg("sk-x"));
+        let b = render_index(&[row("demo", false)], &cfg("sk-x"));
+        assert_eq!(a.etag, b.etag, "同样内容必须给同样 ETag，否则 304 永不命中");
+        let c = render_index(&[row("demo", true)], &cfg("sk-x"));
+        assert_ne!(a.etag, c.etag);
+    }
+
+    #[test]
+    fn version_path_safety() {
+        assert!(is_safe_version("1.0.0"));
+        assert!(is_safe_version("2.1.0-rc1"));
+        assert!(!is_safe_version("../../etc"));
+        assert!(!is_safe_version("1.0/0"));
+        assert!(!is_safe_version(""));
+    }
+
+    #[test]
+    fn etag_match_rules() {
+        assert!(matches_etag(Some("\"abc\""), "\"abc\""));
+        assert!(matches_etag(Some("\"x\", \"abc\""), "\"abc\""));
+        assert!(matches_etag(Some("*"), "\"abc\""));
+        assert!(!matches_etag(None, "\"abc\""));
+        assert!(!matches_etag(Some("\"zzz\""), "\"abc\""));
+    }
+
+    #[test]
+    fn owner_masked() {
+        assert_eq!(mask("jimhy"), "j***y");
+        assert_eq!(mask("ab"), "a*");
+    }
+}

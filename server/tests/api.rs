@@ -60,11 +60,16 @@ async fn harness(user: &str) -> (Router, Arc<MariaDbStore>) {
         now: clock.clone(),
     });
     let limiter = SlidingWindowLimiter::new(RateLimiterOptions::new(0, 60_000, clock.clone()));
+    let market_limiter = SlidingWindowLimiter::new(RateLimiterOptions::new(0, 60_000, clock.clone()));
+    let config = Arc::new(config);
+    let market = itools_sync::market::MarketService::new(store.clone(), config.clone(), clock.clone());
     let app = build_router(Arc::new(AppState {
         store: store.clone(),
-        config: Arc::new(config),
+        config,
         mirrors,
         mirror_limiter: Arc::new(limiter),
+        market,
+        market_limiter: Arc::new(market_limiter),
         clock,
     }));
     (app, store)

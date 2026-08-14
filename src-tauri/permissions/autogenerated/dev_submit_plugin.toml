@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-dev-submit-plugin"
+description = "Enables the dev_submit_plugin command without any pre-configured scope."
+commands.allow = ["dev_submit_plugin"]
+
+[[permission]]
+identifier = "deny-dev-submit-plugin"
+description = "Denies the dev_submit_plugin command without any pre-configured scope."
+commands.deny = ["dev_submit_plugin"]

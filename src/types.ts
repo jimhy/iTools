@@ -477,8 +477,9 @@ export interface ProxyTestResult {
  *  - `user`：用户在「我的账号 → 数据同步」手填的 `AppSettings.sync_endpoint`；
  *  - `devDefault`：**debug 构建**下的默认本地服务端地址（`http://127.0.0.1:8787`），
  *    用户从没填过；release 构建不启用这条兜底；
- *  - `none`：以上都没有 → 云端未接入，只能本地。 */
-export type EndpointSource = "env" | "user" | "devDefault" | "none";
+ *  - `builtin`：内置的官方默认服务地址（用户没填时 release 下生效）；
+ *  - `none`：以上都没有 → 云端未接入，只能本地（仅测试构建会出现）。 */
+export type EndpointSource = "env" | "user" | "devDefault" | "builtin" | "none";
 
 /** 当前**实际生效**的云同步服务器地址快照，与 Rust 侧 `EndpointInfo`（camelCase）一致。
  *  只读展示用：编辑入口只有「我的账号 → 数据同步」一处，避免两处输入框不同步。 */
@@ -489,6 +490,9 @@ export interface EndpointInfo {
   /** 用户手填的那个值（`AppSettings.sync_endpoint`）。
    *  它与 `effective` 可能不同 —— 被 env 覆盖时就是如此，UI 需据此提示「你填的这个当前不生效」。 */
   userValue: string;
+  /** 内置的官方默认服务地址。UI 拿它写「留空即使用官方默认服务（xxx）」，
+   *  不在前端另写一遍字面量（两处各写一遍迟早分叉成假信息）。 */
+  builtinDefault: string;
 }
 
 /** 版本更新信息，与 Rust 侧 `UpdateInfo`（camelCase）一致 */
@@ -649,6 +653,64 @@ export interface DevConfig {
   filesRoot: string;
 }
 
+// ---------- 插件提审（开发者中心 → 发布） ----------
+//
+// ⚠ 与 src-tauri/src/dev/submit.rs 的结构体逐字段对应。
+//   状态**全部来自服务端**：客户端不推断「应该算是审核中吧」这类结论。
+
+/** 提审单的状态。与服务端 `server/src/market.rs::status` 一一对应。 */
+export type SubmissionStatus =
+  /** 已收下，服务端正在跑模型审核 */
+  | "reviewing"
+  /** 审核通过，已上线到市场 */
+  | "approved"
+  /** 审核未通过（message 里是原因） */
+  | "rejected"
+  /** 审核没能完成（模型未配置 / 调用失败 / 服务重启），需维护者人工处理 —— **不是通过** */
+  | "manual";
+
+/** 一条提审记录。 */
+export interface Submission {
+  id: string;
+  name: string;
+  version: string;
+  status: SubmissionStatus | string;
+  /** 给作者看的一句话结论 / 驳回原因（服务端原文，原样展示，不要改写） */
+  message: string;
+  contentHash: string;
+  fileCount: number;
+  sizeBytes: number;
+  createdAt: number;
+  updatedAt: number;
+  /** 模型裁决原文（只有查单条详情时才有；结构见服务端 llm.rs 的 Verdict） */
+  review?: unknown;
+}
+
+/** 一个调试插件的发布状态快照。 */
+export interface PublishStatus {
+  name: string;
+  localVersion: string;
+  /** 市场上已上线的版本；null = 还没上线过 */
+  onlineVersion: string | null;
+  revoked: boolean;
+  revokedReason: string;
+  /** 本地版本是否高于线上（可以提交新版本） */
+  canSubmitNewVersion: boolean;
+  latest: Submission | null;
+  history: Submission[];
+  /** 查询过程中的真实错误（未登录 / 服务器不可达等）。
+   *  **非空时上面的字段可能不完整**，UI 必须如实展示这条，不能渲染成「没有记录」。 */
+  error: string | null;
+}
+
+/** 提审前的本地自检结论。**通过它不代表会过审** —— 代码审核在服务端。 */
+export interface Preflight {
+  /** 阻断项：非空则不允许提交（服务端也一定会拒） */
+  blockers: string[];
+  /** 提醒项：不阻断提交 */
+  warnings: string[];
+}
+
 /** 主面板数据，与 Rust 侧 `HomeData` 保持一致 */
 export interface HomeData {
   user: string;
@@ -669,17 +731,22 @@ export interface MarketEntry {
   displayName: string;
   description: string;
   author: string;
-  /** 安装源仓库，形如 https://github.com/owner/repo */
-  repo: string;
-  /** 仓库内子目录，空串 = 仓库根 */
-  path: string;
   version: string;
-  /** 审核时的完整 40 位 commit sha —— 客户端只装这个确切 commit。
-   *  作者之后往分支上推代码不会自动到达用户，必须重新提审。 */
-  revision: string;
+  /** 插件包在服务端的**相对**下载路径（如 `/api/market/package/demo`）。
+   *  客户端拼上自己配置的服务器地址——反代 / 内网 / 端口转发都不影响。 */
+  package: string;
   /** 审核时算出的内容哈希（`sha256:…`）。
    *  空串表示索引没给，此时安装会**退化为不校验**并如实告知，绝不假装校验过。 */
   contentHash: string;
+  /** 审核该版本的模型名（如 `gpt-5.5`）。空串 = 没有自动审核记录。
+   *  UI 必须据此如实措辞：「由 X 自动审核」≠「人工审计过」。 */
+  reviewedBy: string;
+  /** 首次上线 / 最近更新时间（Unix 毫秒；0 = 索引未提供） */
+  publishedAt: number;
+  updatedAt: number;
+  sizeBytes: number;
+  /** README 原文（服务端已截断），供市场页展示 */
+  readme: string;
   category: string;
   tags: string[];
   keywords: string[];
@@ -713,6 +780,11 @@ export interface MarketView {
   error: string | null;
   /** 已安装的插件名 → 版本，供标注「已安装 / 版本不同」 */
   installed: Record<string, string>;
-  /** 索引来源，如 `jimhy/iTools@main:registry/index.json` */
+  /** 索引来源 —— 当前生效的服务器地址 */
   source: string;
+  /** 服务端的审核方式：`llm` = 大模型自动审核；`manual` = 未接入自动审核、由维护者人工放行。
+   *  空串 = 索引里没说。市场页文案必须据此分支，不能一律写成「已审核」。 */
+  reviewMode: string;
+  /** 审核模型名（reviewMode="llm" 时有值） */
+  reviewModel: string;
 }

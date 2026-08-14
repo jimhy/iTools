@@ -334,6 +334,157 @@ pub fn dev_set_mock(cfg: DevMockConfig, dev: State<'_, Arc<DevRuntime>>) {
     dev.set_mock(cfg);
 }
 
+// ==================== 提审 ====================
+
+/// 定位一个调试插件（拿它的目录、清单与校验结论）。
+fn find_plugin(dev: &DevRuntime, id: &str, settings: &SettingsStore) -> Result<DevPluginInfo, String> {
+    dev.list(&settings.get().dev_plugin_permissions)
+        .into_iter()
+        .find(|p| p.id == id)
+        .ok_or_else(|| format!("调试插件「{id}」不在当前列表里（可能已被移除，试试「重新扫描」）"))
+}
+
+/// 查一个调试插件的发布状态：本地版本 + 线上版本 + 提审历史。
+///
+/// **所有状态都来自服务端**：线上版本来自市场索引，提审记录来自提审接口。
+/// 任何一段查不到都如实写进 `error`，绝不用「没有记录」把失败盖过去——
+/// 「没提交过」和「查不到」对作者是完全不同的两件事。
+#[tauri::command(async)]
+pub async fn dev_publish_status(
+    id: String,
+    dev: State<'_, Arc<DevRuntime>>,
+    settings: State<'_, SettingsStore>,
+    account: State<'_, crate::account::AccountStore>,
+) -> Result<super::submit::PublishStatus, String> {
+    let info = find_plugin(&dev, &id, &settings)?;
+    let token = account.token().unwrap_or_default();
+
+    let name = info.name.clone();
+    let local_version = info.version.clone();
+    let status = tauri::async_runtime::spawn_blocking(move || {
+        let mut errors: Vec<String> = Vec::new();
+
+        // ① 线上版本：查市场索引
+        let (online_version, revoked, revoked_reason) =
+            match crate::plugin::market::fetch_index() {
+                Ok(index) => match index.plugins.into_iter().find(|p| p.name == name) {
+                    Some(e) => (Some(e.version), e.revoked, e.revoked_reason),
+                    None => (None, false, String::new()),
+                },
+                Err(e) => {
+                    errors.push(format!("读取市场索引失败：{e}"));
+                    (None, false, String::new())
+                }
+            };
+
+        // ② 提审历史：只取这个插件名下的
+        let history = match super::submit::list_submissions(&token) {
+            Ok(list) => list.into_iter().filter(|s| s.name == name).collect::<Vec<_>>(),
+            Err(e) => {
+                errors.push(e);
+                Vec::new()
+            }
+        };
+
+        let can_submit_new_version = match online_version.as_deref() {
+            Some(online) => crate::plugin::install::version_gt(&local_version, online),
+            // 没上线过 → 任何版本都能提交
+            None => true,
+        };
+
+        super::submit::PublishStatus {
+            name,
+            local_version,
+            online_version,
+            revoked,
+            revoked_reason,
+            can_submit_new_version,
+            latest: history.first().cloned(),
+            history,
+            error: (!errors.is_empty()).then(|| errors.join("\n")),
+        }
+    })
+    .await
+    .map_err(|e| format!("查询发布状态任务异常终止: {e}"))?;
+
+    Ok(status)
+}
+
+/// 提审前的本地自检（只拦服务端必然会拒的那几条，**不预测审核结果**）。
+#[tauri::command(async)]
+pub async fn dev_preflight(
+    id: String,
+    dev: State<'_, Arc<DevRuntime>>,
+    settings: State<'_, SettingsStore>,
+) -> Result<super::submit::Preflight, String> {
+    let info = find_plugin(&dev, &id, &settings)?;
+    let dir = std::path::PathBuf::from(&info.dir);
+    let name = info.name.clone();
+    let version = info.version.clone();
+    let issues = info.issues.clone();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        // 线上版本另有 `dev_publish_status` 查（那一步要联网）；这里只做纯本地判断，
+        // 版本号那一条由前端在拿到线上版本后单独提示——不在这里假装自己知道线上是多少。
+        super::submit::preflight(&dir, &name, &version, &issues, None)
+    })
+    .await
+    .map_err(|e| format!("自检任务异常终止: {e}"))
+}
+
+/// 打包并提交审核。返回服务端建立的提审单（状态一般是 `reviewing`）。
+#[tauri::command(async)]
+pub async fn dev_submit_plugin(
+    id: String,
+    dev: State<'_, Arc<DevRuntime>>,
+    settings: State<'_, SettingsStore>,
+    account: State<'_, crate::account::AccountStore>,
+) -> Result<super::submit::Submission, String> {
+    let info = find_plugin(&dev, &id, &settings)?;
+    // 跑不起来的插件不该被提交：服务端也会拒，早点在本地说清楚原因
+    if !info.runnable {
+        let why: Vec<String> = info
+            .issues
+            .iter()
+            .filter(|i| i.level == "error")
+            .map(|i| format!("{}：{}", i.field, i.message))
+            .collect();
+        return Err(format!("这个插件当前跑不起来，不能提交审核：\n{}", why.join("\n")));
+    }
+    let token = account
+        .token()
+        .ok_or_else(|| "提交审核需要先登录云账号。请到「我的账号」页登录后再试。".to_string())?;
+
+    let dir = std::path::PathBuf::from(&info.dir);
+    let name = info.name.clone();
+    let version = info.version.clone();
+    let issues = info.issues.clone();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        // 提交前再跑一遍本地自检：UI 上的自检结果可能是几分钟前的，期间文件可能已被改动
+        let pre = super::submit::preflight(&dir, &name, &version, &issues, None);
+        if !pre.ok() {
+            return Err(format!("提交前自检未通过：\n{}", pre.blockers.join("\n")));
+        }
+        let bytes = super::submit::pack_dir(&dir)?;
+        super::submit::submit(&token, bytes)
+    })
+    .await
+    .map_err(|e| format!("提交审核任务异常终止: {e}"))?
+}
+
+/// 查一条提审单的详情（含模型裁决原文，供作者看到「模型到底说了什么」）。
+#[tauri::command(async)]
+pub async fn dev_submission_detail(
+    id: String,
+    account: State<'_, crate::account::AccountStore>,
+) -> Result<super::submit::Submission, String> {
+    let token = account.token().unwrap_or_default();
+    tauri::async_runtime::spawn_blocking(move || super::submit::get_submission(&token, &id))
+        .await
+        .map_err(|e| format!("查询提审详情任务异常终止: {e}"))?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

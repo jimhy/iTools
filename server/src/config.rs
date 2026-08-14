@@ -43,6 +43,51 @@ pub struct MirrorsConfig {
     pub rate_limit_window_sec: u64,
 }
 
+/// 插件审核用的大模型（OpenAI 兼容协议）。
+///
+/// **凭据只从环境变量读**（`ITOOLS_LLM_API_KEY`），源码与镜像零明文。
+/// 没配 key 就是「审核能力未接入」——此时提审单会停在「需人工处理」，
+/// 绝不自动放行（见 `llm.rs` 的诚信约束）。
+#[derive(Debug, Clone)]
+pub struct LlmConfig {
+    /// 服务基址（不含 `/v1/...`），如 `https://punkcodeai.myverse.site`。
+    pub base_url: String,
+    /// API key。空 = 审核未接入。
+    pub api_key: String,
+    /// 模型名。
+    pub model: String,
+    /// 单次审核超时（秒）。审代码的 prompt 很长，默认给足。
+    pub timeout_sec: u64,
+    /// 输出上限（含推理 token，给小了会让裁决被截断成不可解析的半截 JSON）。
+    pub max_tokens: u32,
+}
+
+impl LlmConfig {
+    /// 审核能力是否真的可用。**只看 key**：base_url / model 都有默认值，
+    /// 唯独 key 没法编一个。
+    pub fn enabled(&self) -> bool {
+        !self.api_key.trim().is_empty()
+    }
+}
+
+/// 插件市场与提审。
+#[derive(Debug, Clone)]
+pub struct MarketConfig {
+    /// 已上线插件包的存放目录（每个包一个 zip）。容器里应挂成持久卷，
+    /// 否则重启后市场里的插件全部下载失败。
+    pub packages_dir: PathBuf,
+    /// 允许提审的最大包体积（字节），与客户端安装侧上限对齐。
+    pub max_upload_bytes: u64,
+    /// 维护者账号（逗号分隔的用户名）。只有他们能下架 / 强制改判。
+    /// 空 = 没有任何人能做管理操作（比留一个默认管理员安全）。
+    pub admins: Vec<String>,
+    /// 公开端点 `/api/market/*` 的按 IP 限流：窗口内最大请求数。0 = 关闭。
+    pub rate_limit_max: u32,
+    pub rate_limit_window_sec: u64,
+    /// 同一账号两次提审之间的最小间隔（秒）。审核要花模型的钱，必须挡住连点。
+    pub submit_cooldown_sec: i64,
+}
+
 /// TLS 证书（可选）：配了则以 HTTPS 起服务，直接在本进程做 TLS 终止。
 ///
 /// 用于「frps 纯 TCP 透传 → 本机做 TLS」的部署（证书/私钥文件路径走环境变量，源码零明文）。
@@ -61,6 +106,10 @@ pub struct Config {
     pub db: DbConfig,
     /// 镜像源配置与探测
     pub mirrors: MirrorsConfig,
+    /// 插件审核用的大模型
+    pub llm: LlmConfig,
+    /// 插件市场与提审
+    pub market: MarketConfig,
     /// 是否允许「首次登录即自动注册」（自托管默认开）
     pub allow_register: bool,
     /// 会话令牌随机字节数
@@ -218,6 +267,53 @@ impl Config {
                 as u64,
         };
 
+        let llm = LlmConfig {
+            // 默认基址可覆盖：审核服务换供应商时不需要改代码重新出镜像。
+            base_url: get(env, "ITOOLS_LLM_BASE_URL")
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("https://punkcodeai.myverse.site")
+                .to_string(),
+            // 只从环境变量读，源码零明文（doc/开发准则.md 安全红线）
+            api_key: get(env, "ITOOLS_LLM_API_KEY").map(str::trim).unwrap_or("").to_string(),
+            model: get(env, "ITOOLS_LLM_MODEL")
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("gpt-5.5")
+                .to_string(),
+            timeout_sec: num_env(get(env, "ITOOLS_LLM_TIMEOUT_SEC"), 300.0, 30.0, 1_800.0) as u64,
+            // 推理型模型的 reasoning token 也算在这里，给小了裁决会被截断成半截 JSON
+            max_tokens: num_env(get(env, "ITOOLS_LLM_MAX_TOKENS"), 16_000.0, 1_000.0, 200_000.0) as u32,
+        };
+
+        let market = MarketConfig {
+            // 与 mirrors.file 同理：容器 WORKDIR=/app → /app/data/packages（应挂持久卷）
+            packages_dir: get(env, "SYNC_PACKAGES_DIR")
+                .filter(|s| !s.trim().is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("data").join("packages")),
+            max_upload_bytes: num_env(
+                get(env, "SYNC_MAX_UPLOAD_MB"),
+                32.0,
+                1.0,
+                256.0,
+            ) as u64
+                * 1024
+                * 1024,
+            // 没配就是空表：宁可「谁都不能下架」，也不要留一个默认管理员账号
+            admins: get(env, "SYNC_ADMIN_USERS")
+                .unwrap_or("")
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .collect(),
+            rate_limit_max: num_env(get(env, "SYNC_MARKET_RATE_MAX"), 120.0, 0.0, 1_000_000.0) as u32,
+            rate_limit_window_sec: num_env(get(env, "SYNC_MARKET_RATE_WINDOW_SEC"), 60.0, 1.0, 3_600.0)
+                as u64,
+            submit_cooldown_sec: num_env(get(env, "SYNC_SUBMIT_COOLDOWN_SEC"), 60.0, 0.0, 86_400.0) as i64,
+        };
+
         let tls = match (get(env, "SYNC_TLS_CERT_FILE"), get(env, "SYNC_TLS_KEY_FILE")) {
             (Some(c), Some(k)) if !c.trim().is_empty() && !k.trim().is_empty() => Some(TlsConfig {
                 cert_file: PathBuf::from(c),
@@ -231,6 +327,8 @@ impl Config {
             port: plain_num(get(env, "SYNC_PORT").or_else(|| get(env, "PORT")), 8787),
             db,
             mirrors,
+            llm,
+            market,
             allow_register: bool_env(get(env, "SYNC_ALLOW_REGISTER"), true),
             token_bytes: plain_num(get(env, "SYNC_TOKEN_BYTES"), 32),
             logger: bool_env(get(env, "SYNC_LOG"), true),
@@ -269,6 +367,27 @@ mod tests {
         assert_eq!(c.mirrors.rate_limit_max, 120);
         assert_eq!(c.mirrors.rate_limit_window_sec, 60);
         assert!(c.tls.is_none());
+        // 没配 key 时审核能力必须是「未接入」，不能有任何隐式默认
+        assert!(!c.llm.enabled());
+        assert_eq!(c.llm.model, "gpt-5.5");
+        assert_eq!(c.market.max_upload_bytes, 32 * 1024 * 1024);
+        assert!(c.market.admins.is_empty(), "没配就该是空表，不留默认管理员");
+        assert_eq!(c.market.submit_cooldown_sec, 60);
+    }
+
+    #[test]
+    fn llm_enabled_only_with_key() {
+        let c = Config::from_map(&env(&[("ITOOLS_LLM_API_KEY", "  ")])).unwrap();
+        assert!(!c.llm.enabled(), "空白 key 不算配了");
+        let c = Config::from_map(&env(&[("ITOOLS_LLM_API_KEY", "sk-x")])).unwrap();
+        assert!(c.llm.enabled());
+        assert_eq!(c.llm.api_key, "sk-x");
+    }
+
+    #[test]
+    fn admins_parsed_from_csv() {
+        let c = Config::from_map(&env(&[("SYNC_ADMIN_USERS", " jimhy , alice ,, ")])).unwrap();
+        assert_eq!(c.market.admins, vec!["jimhy", "alice"]);
     }
 
     #[test]

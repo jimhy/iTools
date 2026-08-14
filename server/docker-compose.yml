@@ -1,0 +1,60 @@
+# iTools 服务端（云同步 + 插件市场/提审）—— 群晖 Container Manager 可直接用。
+#
+# 用法：
+#   1. 复制 .env.example 为 .env，至少填 SYNC_DB_PASSWORD 与 ITOOLS_LLM_API_KEY
+#      （key 只放在这份 .env 里；.env 已被 .gitignore 忽略，绝不要提交）
+#   2. docker compose up -d --build
+#
+# 群晖上的注意事项写在 README「群晖部署」一节，这里只给最小可用编排。
+
+services:
+  db:
+    image: mariadb:11
+    restart: unless-stopped
+    environment:
+      # 口令只从 .env 读；compose 文件里零明文
+      MARIADB_ROOT_PASSWORD: ${SYNC_DB_PASSWORD:?请在 .env 里设置 SYNC_DB_PASSWORD}
+      MARIADB_DATABASE: ${SYNC_DB_NAME:-itools}
+    volumes:
+      - ./data/mysql:/var/lib/mysql
+    healthcheck:
+      # 服务端连不上库会直接退出，所以必须等库真的能接受连接再起它
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  server:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      SYNC_HOST: 0.0.0.0
+      SYNC_PORT: ${SYNC_PORT:-8787}
+      SYNC_DB_HOST: db
+      SYNC_DB_PORT: 3306
+      SYNC_DB_USER: ${SYNC_DB_USER:-root}
+      SYNC_DB_PASSWORD: ${SYNC_DB_PASSWORD}
+      SYNC_DB_NAME: ${SYNC_DB_NAME:-itools}
+      SYNC_ALLOW_REGISTER: ${SYNC_ALLOW_REGISTER:-true}
+      # 置于群晖反代 / Nginx 之后时必须开，否则所有客户端共用一个限流桶而互相误伤
+      SYNC_TRUST_PROXY: ${SYNC_TRUST_PROXY:-false}
+      # ---- 插件市场与提审 ----
+      SYNC_PACKAGES_DIR: /app/data/packages
+      SYNC_ADMIN_USERS: ${SYNC_ADMIN_USERS:-}
+      SYNC_MAX_UPLOAD_MB: ${SYNC_MAX_UPLOAD_MB:-32}
+      SYNC_SUBMIT_COOLDOWN_SEC: ${SYNC_SUBMIT_COOLDOWN_SEC:-60}
+      # ⚠ key 只来自 .env；没配的话提审只做机械校验、不会自动上线（服务照常启动，日志里会警告）
+      ITOOLS_LLM_BASE_URL: ${ITOOLS_LLM_BASE_URL:-https://punkcodeai.myverse.site}
+      ITOOLS_LLM_API_KEY: ${ITOOLS_LLM_API_KEY:-}
+      ITOOLS_LLM_MODEL: ${ITOOLS_LLM_MODEL:-gpt-5.5}
+      ITOOLS_LLM_TIMEOUT_SEC: ${ITOOLS_LLM_TIMEOUT_SEC:-300}
+    ports:
+      - "${SYNC_PORT:-8787}:${SYNC_PORT:-8787}"
+    volumes:
+      # 插件包持久化：丢了等于市场里所有插件都下载失败
+      - ./data/packages:/app/data/packages
+      # 镜像源列表：改完存盘即生效（服务端按 mtime 热更新，不用重启）
+      - ./config/mirrors.json:/app/config/mirrors.json:ro

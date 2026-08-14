@@ -24,6 +24,7 @@ import * as api from "./api";
 import { errText, permLabel } from "./plugin-install";
 import { createDevLogView, type DevLogView } from "./dev-log";
 import { renderDevStorage } from "./dev-storage";
+import { renderDevPublish } from "./dev-publish";
 
 const IC_REFRESH =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>';
@@ -34,7 +35,7 @@ const IC_MINUS =
 const PLUGIN_GLYPH =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2v4M15 2v4"/><path d="M7 6h10v4a5 5 0 0 1-10 0z"/><path d="M12 15v5"/></svg>';
 
-type TabId = "run" | "log" | "storage" | "perm" | "mock";
+type TabId = "run" | "log" | "storage" | "perm" | "mock" | "publish";
 
 const TABS: Array<{ id: TabId; label: string }> = [
   { id: "run", label: "运行" },
@@ -42,6 +43,7 @@ const TABS: Array<{ id: TabId; label: string }> = [
   { id: "storage", label: "存储" },
   { id: "perm", label: "权限" },
   { id: "mock", label: "同步 Mock" },
+  { id: "publish", label: "发布" },
 ];
 
 /** 同步 Mock 的模式取值与说明（取值即后端 `DevMockConfig.mode`）。 */
@@ -825,6 +827,9 @@ export async function renderDev(root: HTMLElement, ctx: AdminCtx): Promise<void>
           break;
         case "mock":
           tabBody.appendChild(mockTab());
+          break;
+        case "publish":
+          renderDevPublish(tabBody, { plugin: p, toast: ctx.toast });
           break;
       }
     };

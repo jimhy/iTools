@@ -31,6 +31,10 @@ rustls-pemfile = "2"
 sqlx = { version = "0.8", default-features = false, features = ["mysql", "runtime-tokio", "tls-none", "macros"] }
 # 镜像探测的 HTTP 客户端（webpki 内置根证书 → 容器里不依赖系统 ca-certificates）
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "charset", "http2"] }
+# 插件提审包：解 zip（客户端也是 deflate zip，两侧只留 deflate 后端，不引 aes/bzip2/zstd）
+zip = { version = "2", default-features = false, features = ["deflate"] }
+# 算插件目录内容哈希时遍历文件（与客户端 market.rs 同一套算法）
+walkdir = "2"
 serde = { version = "1", features = ["derive"] }
 # preserve_order：同步数据里的任意 JSON 值往返时保持对象键顺序，不打乱客户端的数据
 serde_json = { version = "1", features = ["preserve_order"] }
@@ -49,9 +53,11 @@ async-trait = "0.1"
 percent-encoding = "2"
 url = "2"
 
+# 提审包解压到临时目录后算哈希；进程异常退出时临时目录随之回收
+tempfile = "3"
+
 [dev-dependencies]
 http-body-util = "0.1"
-tempfile = "3"
 
 # scrypt 是刻意设计成 CPU/内存密集的：未优化编译时它既极慢（一次派生数秒）
 # 又会吃掉大量栈空间（debug 下实测直接爆栈）。这些包与业务逻辑无关、不需要调试，

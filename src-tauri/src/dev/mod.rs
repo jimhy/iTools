@@ -22,6 +22,7 @@ pub mod commands;
 pub mod logs;
 pub mod mock;
 pub mod storage;
+pub mod submit;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

@@ -139,6 +139,11 @@ const COMMANDS: &[&str] = &[
         "dev_log_clear",
         "dev_get_mock",
         "dev_set_mock",
+        // 插件提审（打包上传 + 查审核状态；只在管理中心的开发者中心用）
+        "dev_publish_status",
+        "dev_preflight",
+        "dev_submit_plugin",
+        "dev_submission_detail",
         // 由插件调试窗口（plugin-dev）的 bridge 探针调用，**不授予**正式插件窗口
         "dev_log_push",
 ];

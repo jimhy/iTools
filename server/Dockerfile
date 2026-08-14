@@ -31,9 +31,14 @@ COPY --from=builder /build/target/release/itools-sync-server /usr/local/bin/itoo
 # 镜像源列表（可编辑配置）。运行时可用 -v 挂载覆盖，改完存盘即生效、无需重启（mtime 轮询）。
 # 默认路径是「工作目录下的 config/mirrors.json」，即这里的 /app/config/mirrors.json。
 COPY config ./config
+# 已上线插件包的存放目录。**必须挂持久卷**（compose 里已配），否则容器重建后
+# 市场索引还在库里、包却没了，所有插件都会下载失败。
+RUN mkdir -p /app/data/packages
+VOLUME ["/app/data"]
 
 # 默认监听所有网卡（容器内）；实际端口/DB 连接由运行时环境变量给定
 ENV SYNC_HOST=0.0.0.0
+ENV SYNC_PACKAGES_DIR=/app/data/packages
 EXPOSE 7010
 
 CMD ["itools-sync-server"]

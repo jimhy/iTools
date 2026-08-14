@@ -98,6 +98,8 @@ ITOOLS_SYNC_ENDPOINT=http://127.0.0.1:8787
 | `GET /api/mirrors` | **无需认证** | — | GitHub 镜像源配置（见下节） |
 | `GET /health` | — | — | `{ok:true,...}` |
 
+插件市场与提审的端点见「插件市场与提审」一节。
+
 - **鉴权**：会话令牌走 `Authorization: Bearer <token>`。
 - **数据模型**：按 `(用户, 命名空间)` 隔离。命名空间：核心 App 用 `app`，第三方插件用 `plugin:<id>`。
 - **合并策略**：`last-write-wins`，按客户端提供的 `updatedAt`（大者胜）。`/data/:ns` 上行 dirty 记录后，
@@ -300,20 +302,117 @@ GET /api/mirrors            无需认证（但按 IP 限流，见「限流」）
 ```
 server/
 ├─ src/
-│  ├─ config.rs    环境变量配置（含 MariaDB 连接、镜像探测参数）
+│  ├─ config.rs    环境变量配置（MariaDB 连接、镜像探测、审核模型、市场）
 │  ├─ auth.rs      口令哈希（scrypt）/ 令牌
 │  ├─ store.rs     MariaDB 存储（sqlx 连接池）
 │  ├─ mirrors.rs   镜像源配置装载（热更新）+ 健康探测 + 快照/ETag
-│  ├─ ratelimit.rs 滑动窗口按 IP 限流（供免认证的 /api/mirrors）
+│  ├─ ratelimit.rs 滑动窗口按 IP 限流（供免认证的 /api/mirrors 与 /api/market/*）
 │  ├─ proxy.rs     X-Forwarded-For 取真实客户端 IP
+│  ├─ pkg.rs       提审插件包：解 zip / 安全校验 / 清单解析 / 内容哈希
+│  ├─ llm.rs       插件代码的大模型审核（OpenAI 兼容协议）
+│  ├─ market.rs    提审编排 + 市场索引（取代原先的 GitHub registry）
 │  ├─ routes.rs    axum 路由（全部契约）
 │  ├─ lib.rs       库入口（供集成测试构造 Router）
 │  └─ main.rs      可执行入口（HTTP / HTTPS、优雅关停）
 ├─ config/mirrors.json  可编辑的镜像源列表（随部署提供，可挂载覆盖）
+├─ data/packages/       已上线插件包（运行期生成，**必须挂持久卷**）
 ├─ tests/
 │  ├─ api.rs      账号/同步集成测试（连真实 MariaDB）
 │  └─ mirrors.rs  镜像源/探测测试（不连库、不打外网，网络层注入 mock）
 ├─ .env.example
+├─ docker-compose.yml   群晖 / 单机一键编排（server + MariaDB）
 ├─ Dockerfile
 └─ Cargo.toml
 ```
+
+## 插件市场与提审
+
+**插件市场的真相源就是这台服务器**，不再是 GitHub 上的 `registry/index.json`。作者在 iTools 的
+「开发者中心 → 发布」里点「提交审核」，客户端把插件目录打成 zip 传上来，服务端审完直接发布。
+
+### 端点
+
+| 方法 & 路径 | 鉴权 | 说明 |
+|---|---|---|
+| `POST /api/plugins/submit` | Bearer | body = 插件包 zip 的**原始字节**。立即返回 `202` + 提审单（`status=reviewing`） |
+| `GET /api/plugins/submissions` | Bearer | 我的提审记录（新→旧，最多 50 条） |
+| `GET /api/plugins/submissions/{id}` | Bearer | 单条详情，含**模型裁决原文** |
+| `GET /api/market/index` | **无需认证** | 市场索引（带 ETag、按 IP 限流） |
+| `GET /api/market/package/{name}` | **无需认证** | 已上线插件包 zip |
+| `POST /api/market/revoke` | Bearer（限 `SYNC_ADMIN_USERS`） | 下架 / 恢复，`{name, revoked?, reason}` |
+
+### 审核是两段
+
+1. **机械校验**（`pkg.rs`，同步、必过）：zip 路径安全（Zip Slip / 盘符 / `..` / 结尾点空格）、
+   23 种可执行扩展名整包拒收、体积与条目数上限、`plugin.json` 结构、`name` 白名单、
+   `features`/`code` 非空不重复、`permissions` 必须是已知能力名、必须有 `index.html`、
+   版本号必须高于线上。**这些规则与客户端 `install.rs` 逐条对齐**——否则会出现
+   「服务端收下并发布了一个客户端装不上的包」。
+2. **大模型审核**（`llm.rs`，异步）：把包里的文本源码交给模型，判断有无恶意行为、
+   申请的权限是否名副其实、描述是否与实际功能相符、有无 `eval` / 动态 `import()` 这类
+   「审核时无害、运行时拉远程代码」的手法。
+
+因为第 2 段要几十秒到几分钟，提交接口**立即返回**，作者在客户端轮询状态。
+
+### ⚠ 没配模型 = 不放行，绝不自动通过
+
+`ITOOLS_LLM_API_KEY` 没配、模型调用失败、裁决无法解析、进程重启中断审核——**这四种情况一律落
+`manual`（待人工处理），插件不会上线**。启动时日志会明确警告，索引里的 `reviewMode` 会是
+`manual`，客户端市场页据此把文案改成「本服务端没有接入自动代码审核」。
+
+把「没审成」当成「审过了」，等于市场上所有「已审核」的字样都是假的——这是本模块的第一条红线。
+
+### 提审单状态
+
+| status | 含义 |
+|---|---|
+| `reviewing` | 已收下，模型正在读代码 |
+| `approved` | 通过，已发布到市场 |
+| `rejected` | 未通过，`message` 是原因原文 |
+| `manual` | **审核没能完成**，需维护者人工处理。**不是通过**，插件未上线 |
+
+### 归属：同名插件只能由首次上线它的账号更新
+
+`market_entries.owner` 记着首发账号。别人提交同名包直接 `403`。这不是洁癖：客户端是按**插件名**
+归属用户授权与数据的，顶包等于直接继承受害插件的用户授权。
+
+### 存储
+
+- 提审单与市场条目在 MariaDB（`plugin_submissions` / `market_entries`，启动时幂等建表）；
+- 插件包在 `SYNC_PACKAGES_DIR`（默认 `/app/data/packages`），按 `<name>/<version>.zip` 存。
+  **容器里必须挂持久卷**，否则重启后索引还在、包没了，所有插件下载失败。
+
+### 内容哈希
+
+发布时算一次，写进索引；客户端下载解压后重算比对，对不上拒绝安装。算法在
+`server/src/pkg.rs`、`src-tauri/src/plugin/market.rs`、`scripts/registry/hash.mjs` 三处实现，
+**必须逐字一致**（排序用 UTF-8 字节序，不是语言默认排序）。三处都有基准用例钉死。
+
+## 群晖部署
+
+群晖的 Container Manager 支持直接跑 docker compose。
+
+```bash
+# 1. 把 server/ 目录传到群晖（如 /volume1/docker/itools-server）
+# 2. 复制 .env.example 为 .env，至少填这两项：
+#      SYNC_DB_PASSWORD=<自己设一个强口令>
+#      ITOOLS_LLM_API_KEY=<审核模型的 key>
+#    再按需填 SYNC_ADMIN_USERS=<你的账号名>（不填就没人能下架插件）
+# 3. 起服务
+docker compose up -d --build
+```
+
+几点群晖特有的注意事项：
+
+- **构建内存**：`Dockerfile` 默认 `CARGO_BUILD_JOBS=2`。低配 NAS（2GB 内存）编译 axum/sqlx
+  容易被 OOM killer 干掉，可以 `docker compose build --build-arg CARGO_BUILD_JOBS=1`。
+  实在编不动就在别的机器上 `docker build` 完导出镜像再 `docker load` 进群晖。
+- **持久化**：compose 已把 `./data/mysql` 与 `./data/packages` 挂出来。**这两个目录不能删**——
+  前者是账号与数据，后者是市场里所有插件的包。
+- **反向代理**：用群晖的「反向代理」把 `api.jimhy.cn` 指到容器端口时，
+  **必须设 `SYNC_TRUST_PROXY=true`**，否则所有客户端在服务端看来都是同一个 IP，
+  会共用一个限流桶、互相误伤。
+- **上传体积**：提审包最大 32MB（`SYNC_MAX_UPLOAD_MB`）。群晖反代 / Nginx 侧
+  也要把 `client_max_body_size` 放到同等或更大，否则大包会在代理层就被 413 掉。
+- **凭据**：`.env` 已在 `.gitignore` 与 `.dockerignore` 里，不会进仓库也不会进镜像。
+  LLM 的 key 只存在这份 `.env` 里。

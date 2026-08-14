@@ -3307,6 +3307,152 @@ select {
   margin-top: 14px;
 }
 
+/* ---------- 开发者中心「发布」tab（提审与审核状态） ---------- */
+
+.dev-pub-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  margin-bottom: 12px;
+  background: var(--bg-elev);
+}
+
+.dev-pub-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+.dev-pub-head-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.dev-pub-head-text .dev-sec-desc {
+  margin: 2px 0 0;
+}
+
+/* 状态徽标：每种状态一个颜色。「待人工处理」刻意用告警色而不是成功色 ——
+   它不是通过，配色上也绝不能像通过。 */
+.dev-pub-badge {
+  display: inline-block;
+  flex: 0 0 auto;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+.dev-pub-badge-ok {
+  background: rgba(34, 168, 108, 0.12);
+  color: #1f9d68;
+}
+.dev-pub-badge-wait {
+  background: var(--accent-weak);
+  color: var(--accent);
+}
+.dev-pub-badge-warn {
+  background: rgba(230, 162, 60, 0.16);
+  color: #b8781a;
+}
+.dev-pub-badge-bad {
+  background: var(--danger-weak);
+  color: var(--danger);
+}
+.dev-pub-badge-idle {
+  background: var(--bg-hover);
+  color: var(--text-sub);
+}
+:root[data-theme="dark"] .dev-pub-badge-ok {
+  color: #4dd39a;
+}
+
+.dev-pub-rows {
+  margin-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.dev-pub-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--border);
+}
+.dev-pub-row:last-child {
+  border-bottom: none;
+}
+.dev-pub-row-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.dev-pub-row-label {
+  font-size: 13px;
+  color: var(--text);
+}
+.dev-pub-row-desc {
+  font-size: 12px;
+  color: var(--text-faint);
+}
+.dev-pub-row-value {
+  flex: 0 0 auto;
+  font-size: 12.5px;
+  color: var(--text-sub);
+  background: var(--bg-sunken);
+  border-radius: 6px;
+  padding: 3px 8px;
+  max-width: 55%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 提审历史 */
+.dev-pub-hist {
+  border-top: 1px solid var(--border);
+  padding: 10px 0;
+}
+.dev-pub-hist:last-child {
+  padding-bottom: 0;
+}
+.dev-pub-hist-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.dev-pub-hist-ver {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.dev-pub-hist-time,
+.dev-pub-hist-size {
+  font-size: 12px;
+  color: var(--text-faint);
+}
+.dev-pub-hist-acts {
+  margin-left: auto;
+}
+/* 服务端原文可能有换行，原样保留 —— 驳回原因是逐条列出来的 */
+.dev-pub-hist-msg {
+  margin-top: 6px;
+  font-size: 12.5px;
+  color: var(--text-sub);
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+.dev-pub-detail {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--bg-sunken);
+}
+.dev-pub-detail .dev-sec-title {
+  margin-top: 10px;
+}
+
 /* 窄窗口下让主体退回单列，避免左右都被挤扁 */
 @media (max-width: 980px) {
   .dev-main {

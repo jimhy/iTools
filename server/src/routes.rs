@@ -9,6 +9,14 @@
 //! - `GET  /api/mirrors`     **公开、无需认证**（按 IP 限流）                     → GitHub 镜像源配置（见 mirrors.rs）
 //! - `GET  /health`          → 健康检查
 //!
+//! 插件市场与提审（见 market.rs）：
+//! - `POST /api/plugins/submit`         Bearer + body = 插件包 zip 字节           → 提审单
+//! - `GET  /api/plugins/submissions`    Bearer                                    → 我的提审记录
+//! - `GET  /api/plugins/submissions/{id}` Bearer                                  → 单条详情（含裁决原文）
+//! - `GET  /api/market/index`           **公开**（限流 + ETag）                    → 市场索引
+//! - `GET  /api/market/package/{name}`  **公开**                                  → 已上线插件包 zip
+//! - `POST /api/market/revoke`          Bearer（限维护者）                         → 下架 / 恢复
+//!
 //! 鉴权：会话令牌走 `Authorization: Bearer <token>`。数据按 (用户, 命名空间) 隔离，last-write-wins。
 
 use std::collections::HashSet;
@@ -25,6 +33,7 @@ use axum::{Json, Router};
 use serde_json::{json, Value};
 
 use crate::config::Config;
+use crate::market::MarketService;
 use crate::mirrors::{matches_etag, MirrorRegistry};
 use crate::proxy::client_ip;
 use crate::ratelimit::SlidingWindowLimiter;
@@ -36,6 +45,9 @@ pub struct AppState {
     pub config: Arc<Config>,
     pub mirrors: Arc<MirrorRegistry>,
     pub mirror_limiter: Arc<SlidingWindowLimiter>,
+    /// 插件市场与提审。与镜像端点一样是公开可读的，所以另配一个限流桶。
+    pub market: Arc<MarketService>,
+    pub market_limiter: Arc<SlidingWindowLimiter>,
     pub clock: Clock,
 }
 
@@ -44,6 +56,7 @@ pub struct AppState {
 /// 定时探测**不在这里启动**：由 `main.rs` 显式 `MirrorRegistry::start()`，
 /// 这样测试里构造 Router 不会偷偷起定时器打外网。
 pub fn build_router(state: Arc<AppState>) -> Router {
+    let upload_limit = state.config.market.max_upload_bytes as usize;
     Router::new()
         .route("/health", get(health))
         .route("/api/mirrors", get(get_mirrors))
@@ -53,6 +66,18 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // GET /data/_usage 与 POST /data/{ns} 分属不同方法与路径，静态段优先匹配，不冲突。
         .route("/data/_usage", get(usage))
         .route("/data/{ns}", post(sync_data))
+        // 插件市场与提审
+        .route("/api/market/index", get(market_index))
+        .route("/api/market/package/{name}", get(market_package))
+        .route("/api/market/revoke", post(market_revoke))
+        // 上传插件包会超过 axum 默认 2MB 的 body 上限，按配置放开。
+        // **只给这一条路由放开**：其它端点收的都是小 JSON，给它们同样的上限等于凭空多一个内存放大面。
+        .route(
+            "/api/plugins/submit",
+            post(plugin_submit).layer(axum::extract::DefaultBodyLimit::max(upload_limit)),
+        )
+        .route("/api/plugins/submissions", get(my_submissions))
+        .route("/api/plugins/submissions/{id}", get(one_submission))
         .with_state(state)
 }
 
@@ -372,6 +397,258 @@ async fn sync_data(
         .map(|(key, rec)| json!({ "key": key, "value": rec.value, "updatedAt": rec.updated_at }))
         .collect();
     Json(json!({ "records": records })).into_response()
+}
+
+// ---------------------------------------------------------------- 插件市场 / 提审
+
+/// 公开端点的按 IP 限流（与 `/api/mirrors` 同一套逻辑，另一个桶）。
+///
+/// 返回 `Some(响应)` 表示已越限，调用方应直接返回它。
+fn market_rate_guard(
+    st: &AppState,
+    peer: Option<SocketAddr>,
+    headers: &HeaderMap,
+    extra: &mut Vec<(&'static str, String)>,
+) -> Option<Response> {
+    if !st.market_limiter.enabled() {
+        return None;
+    }
+    let ip = client_ip(
+        &st.config.trust_proxy,
+        peer.map(|a| a.ip()),
+        headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()),
+    );
+    let verdict = st.market_limiter.hit(&ip);
+    extra.push(("x-ratelimit-limit", verdict.limit.to_string()));
+    extra.push(("x-ratelimit-remaining", verdict.remaining.to_string()));
+    if verdict.allowed {
+        return None;
+    }
+    if verdict.first_reject {
+        let hint = if st.config.trust_proxy == crate::proxy::TrustProxy::No {
+            "（若本服务置于反向代理之后，请设 SYNC_TRUST_PROXY，否则所有客户端共用一个限流桶）"
+        } else {
+            ""
+        };
+        tracing::warn!(
+            "[market] 限流生效：{ip} 在 {}s 内超过 {} 次请求{hint}",
+            st.config.market.rate_limit_window_sec,
+            verdict.limit
+        );
+    }
+    let mut res = error_response(StatusCode::TOO_MANY_REQUESTS, "请求过于频繁，请稍后再试");
+    put_headers(&mut res, extra);
+    insert_header(&mut res, "retry-after", &verdict.retry_after_sec.to_string());
+    Some(res)
+}
+
+/// 市场索引（公开端点，无需认证）。
+///
+/// 与 `/api/mirrors` 同理：没登录的用户也要能浏览与安装插件，加鉴权会直接堵死这条路。
+/// 支持 ETag / If-None-Match；索引只在发布 / 下架时变，所以 304 能稳定命中。
+async fn market_index(
+    State(st): State<Arc<AppState>>,
+    ClientAddr(peer): ClientAddr,
+    headers: HeaderMap,
+) -> Response {
+    let mut extra: Vec<(&'static str, String)> = Vec::new();
+    if let Some(res) = market_rate_guard(&st, peer, &headers, &mut extra) {
+        return res;
+    }
+
+    let body = st.market.index().await;
+    extra.push(("etag", body.etag.clone()));
+    extra.push((
+        "cache-control",
+        format!("public, max-age={}, must-revalidate", st.config.mirrors.cache_max_age_sec),
+    ));
+
+    let inm = headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok());
+    let mut res = if crate::market::matches_etag(inm, &body.etag) {
+        StatusCode::NOT_MODIFIED.into_response()
+    } else {
+        let mut r = body.json.into_response();
+        r.headers_mut().insert(
+            header::CONTENT_TYPE,
+            header::HeaderValue::from_static("application/json; charset=utf-8"),
+        );
+        r
+    };
+    put_headers(&mut res, &extra);
+    res
+}
+
+/// 下载已上线的插件包（公开端点）。
+///
+/// 客户端下载后会用索引里的 `contentHash` 逐字节校验，所以这里不需要另做签名——
+/// 但索引与包必须来自同一台服务器，否则哈希这条信任链就断了。
+async fn market_package(
+    State(st): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    ClientAddr(peer): ClientAddr,
+    headers: HeaderMap,
+) -> Response {
+    let mut extra: Vec<(&'static str, String)> = Vec::new();
+    if let Some(res) = market_rate_guard(&st, peer, &headers, &mut extra) {
+        return res;
+    }
+    // 名字直接参与路径拼接，必须先过白名单（防目录穿越）
+    if !crate::pkg::is_valid_plugin_name(&name) {
+        return error_response(StatusCode::BAD_REQUEST, "插件名不合法");
+    }
+
+    let found = match st.market.package_path(&name).await {
+        Ok(f) => f,
+        Err(e) => return store_error("查询市场条目", e),
+    };
+    let Some((path, row)) = found else {
+        return error_response(StatusCode::NOT_FOUND, "市场里没有这个插件，或它已被下架");
+    };
+    let bytes = match tokio::task::spawn_blocking(move || crate::market::read_package(&path)).await {
+        Ok(Ok(b)) => b,
+        Ok(Err(e)) => {
+            // 条目在库里、包却读不到 —— 这是服务端的数据不一致，如实报 500 并记日志，
+            // 不要伪装成 404「没有这个插件」，那会让运维完全查不到问题。
+            tracing::error!("[market] {name} 的包文件读取失败：{e}");
+            return error_response(StatusCode::INTERNAL_SERVER_ERROR, "插件包暂时不可用，请稍后重试");
+        }
+        Err(e) => {
+            tracing::error!("[market] 读取包任务异常终止：{e}");
+            return error_response(StatusCode::INTERNAL_SERVER_ERROR, "服务端内部错误");
+        }
+    };
+
+    let mut res = bytes.into_response();
+    res.headers_mut().insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("application/zip"),
+    );
+    put_headers(&mut res, &extra);
+    insert_header(
+        &mut res,
+        "content-disposition",
+        &format!("attachment; filename=\"{name}-{}.zip\"", row.version),
+    );
+    // 包是按版本不可变的，可以放心长缓存
+    insert_header(&mut res, "cache-control", "public, max-age=86400");
+    res
+}
+
+/// 提交插件包审核（body = zip 原始字节）。
+async fn plugin_submit(State(st): State<Arc<AppState>>, headers: HeaderMap, body: Bytes) -> Response {
+    let username = match authenticate(&st, &headers).await {
+        Ok(u) => u,
+        Err(res) => return res,
+    };
+    if body.is_empty() {
+        return error_response(StatusCode::BAD_REQUEST, "请求体为空：应上传插件包 zip 的原始字节");
+    }
+
+    match st.market.submit(&username, body.to_vec()).await {
+        Ok(sub) => (StatusCode::ACCEPTED, Json(submission_json(&sub, false))).into_response(),
+        Err(crate::market::SubmitError::Rejected(msg)) => error_response(StatusCode::BAD_REQUEST, &msg),
+        Err(crate::market::SubmitError::Forbidden(msg)) => error_response(StatusCode::FORBIDDEN, &msg),
+        Err(crate::market::SubmitError::TooSoon(sec)) => {
+            let mut res = error_response(
+                StatusCode::TOO_MANY_REQUESTS,
+                &format!("提交过于频繁，请 {sec} 秒后再试"),
+            );
+            insert_header(&mut res, "retry-after", &sec.to_string());
+            res
+        }
+        Err(crate::market::SubmitError::Server(msg)) => {
+            tracing::error!("[market] 提审失败：{msg}");
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "服务端内部错误")
+        }
+    }
+}
+
+/// 我的提审记录（新→旧）。
+async fn my_submissions(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    let username = match authenticate(&st, &headers).await {
+        Ok(u) => u,
+        Err(res) => return res,
+    };
+    match st.market.store().list_submissions(&username, 50).await {
+        Ok(list) => {
+            let items: Vec<Value> = list.iter().map(|s| submission_json(s, false)).collect();
+            Json(json!({ "submissions": items })).into_response()
+        }
+        Err(e) => store_error("查询提审记录", e),
+    }
+}
+
+/// 单条提审单详情（含模型裁决原文）。只有本人（或维护者）能看。
+async fn one_submission(
+    State(st): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let username = match authenticate(&st, &headers).await {
+        Ok(u) => u,
+        Err(res) => return res,
+    };
+    match st.market.store().get_submission(&id).await {
+        Ok(Some(s)) if s.author == username || st.market.is_admin(&username) => {
+            Json(submission_json(&s, true)).into_response()
+        }
+        // 不区分「不存在」与「不是你的」：区分开就成了一个探测他人提审单是否存在的接口
+        Ok(_) => error_response(StatusCode::NOT_FOUND, "没有这条提审记录"),
+        Err(e) => store_error("查询提审单", e),
+    }
+}
+
+/// 下架 / 恢复一个插件（仅维护者）。
+async fn market_revoke(State(st): State<Arc<AppState>>, headers: HeaderMap, body: Bytes) -> Response {
+    let username = match authenticate(&st, &headers).await {
+        Ok(u) => u,
+        Err(res) => return res,
+    };
+    if !st.market.is_admin(&username) {
+        return error_response(StatusCode::FORBIDDEN, "只有维护者可以下架插件");
+    }
+    let body = json_body(&body);
+    let name = field_str(&body, "name").trim().to_string();
+    let revoked = body.get("revoked").and_then(Value::as_bool).unwrap_or(true);
+    let reason = field_str(&body, "reason").trim().to_string();
+    if name.is_empty() {
+        return error_response(StatusCode::BAD_REQUEST, "缺少 name");
+    }
+    // 下架原因会原样展示给已安装该插件的用户 —— 用户有权知道为什么他装的东西被下架了
+    if revoked && reason.is_empty() {
+        return error_response(StatusCode::BAD_REQUEST, "下架必须给出原因（会展示给已安装的用户）");
+    }
+    match st.market.set_revoked(&name, revoked, &reason).await {
+        Ok(true) => Json(json!({ "ok": true })).into_response(),
+        Ok(false) => error_response(StatusCode::NOT_FOUND, "市场里没有这个插件"),
+        Err(e) => {
+            tracing::error!("[market] 下架失败：{e}");
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "服务端内部错误")
+        }
+    }
+}
+
+/// 提审单 → JSON。`full = true` 时附带模型裁决原文。
+fn submission_json(s: &crate::store::Submission, full: bool) -> Value {
+    let mut v = json!({
+        "id": s.id,
+        "name": s.name,
+        "version": s.version,
+        "status": s.status,
+        "message": s.message,
+        "contentHash": s.content_hash,
+        "fileCount": s.file_count,
+        "sizeBytes": s.size_bytes,
+        "createdAt": s.created_at,
+        "updatedAt": s.updated_at,
+    });
+    if full {
+        // 裁决原样给出（含 findings），不做美化、不吞细节 —— 作者有权看到模型到底说了什么
+        let review = serde_json::from_str::<Value>(&s.review).unwrap_or(Value::Null);
+        v["review"] = review;
+        v["manifest"] = serde_json::from_str::<Value>(&s.manifest).unwrap_or(Value::Null);
+    }
+    v
 }
 
 /// JS 的 number 是浮点：`updatedAt` 允许带小数形态（如 `1000.0`），一律取整成毫秒。

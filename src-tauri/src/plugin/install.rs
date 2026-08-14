@@ -229,6 +229,9 @@ impl Default for LockFile {
 enum Forge {
     Gitee,
     GitHub,
+    /// 插件市场（自建服务端）。**不拼任何 Git 直链**——包从市场端点整包下载，
+    /// 更新检查也走市场索引，永远不进 [`download_capped`]。
+    Market,
 }
 
 impl Forge {
@@ -236,9 +239,21 @@ impl Forge {
         match self {
             Forge::Gitee => "gitee",
             Forge::GitHub => "github",
+            Forge::Market => MARKET_HOST,
         }
     }
 }
+
+/// 市场来源在锁文件里的 `host` 值。
+pub(crate) const MARKET_HOST: &str = "market";
+
+/// 市场来源的 URL 前缀。
+///
+/// 它**不是可访问的地址**，只是一个稳定的来源身份：锁文件按 `source.url` 判「同源覆盖」
+/// （决定升级时保不保留用户授权），更新检查按它路由到市场分支。
+/// 之所以用一个 scheme 而不是真实 URL：真实市场地址会随用户改服务器而变，
+/// 一变就成了「换了来源」，用户的授权会被无缘无故清空。
+pub(crate) const MARKET_SCHEME: &str = "itools-market://";
 
 /// 放行的托管站清单：**`github.com` 为主**（插件生态的默认与推荐），`gitee.com` 继续保留，
 /// 可用 `ITOOLS_PLUGIN_HOSTS` 追加自建镜像。
@@ -288,11 +303,38 @@ pub fn parse_git_url(input: &str) -> Result<GitSource, String> {
     parse_git_url_with(input, &allowed_hosts())
 }
 
+/// 构造一条「来自插件市场」的来源记录。
+///
+/// 字段语义与 Git 来源刻意错开，免得别处误当仓库用：`owner` 空、`repo` = 插件名、
+/// `revision` 空（市场插件跟随索引里的最新版本，不锁 commit）、`page_url` 空（没有仓库网页）。
+fn market_source(name: &str) -> Result<GitSource, String> {
+    let name = name.trim().trim_end_matches('/');
+    if !is_valid_plugin_name(name) {
+        return Err(format!("市场来源里的插件名「{name}」不合法"));
+    }
+    Ok(GitSource {
+        host: MARKET_HOST.to_string(),
+        domain: String::new(),
+        owner: String::new(),
+        repo: name.to_string(),
+        sub_path: String::new(),
+        revision: String::new(),
+        url: format!("{MARKET_SCHEME}{name}"),
+        page_url: String::new(),
+    })
+}
+
 /// [`parse_git_url`] 的可注入版本：把「放行清单」显式传入，便于单测不依赖环境变量。
 fn parse_git_url_with(input: &str, allowed: &[(String, Forge)]) -> Result<GitSource, String> {
     let raw = input.trim();
     if raw.is_empty() {
         return Err("请输入插件仓库地址".to_string());
+    }
+    // 市场来源：锁文件里记的是 `itools-market://<name>`。
+    // 必须在这里认出来，否则 read_lock 的「重新解析 url，解析不过就丢弃」会把
+    // 所有从市场装的插件的安装记录整批丢掉——表现为它们突然全部「无来源、不检查更新」。
+    if let Some(name) = raw.strip_prefix(MARKET_SCHEME) {
+        return market_source(name);
     }
     let lower = raw.to_ascii_lowercase();
     if lower.starts_with("git@") || lower.starts_with("ssh://") {
@@ -467,11 +509,19 @@ fn is_pinned(revision: &str) -> bool {
 
 impl GitSource {
     fn forge(&self) -> Forge {
-        if self.host == "github" {
-            Forge::GitHub
-        } else {
-            Forge::Gitee
+        match self.host.as_str() {
+            "github" => Forge::GitHub,
+            MARKET_HOST => Forge::Market,
+            _ => Forge::Gitee,
         }
+    }
+
+    /// 这条记录是不是「从插件市场装的」。
+    ///
+    /// 市场来源没有归档 / raw 直链，更新检查与下载都必须走市场分支；
+    /// 误让它进 [`download_capped`] 会拼出一个 `https:///` 之类的废 URL 并报一个无从理解的错。
+    pub(crate) fn is_market(&self) -> bool {
+        self.forge() == Forge::Market
     }
 
     /// 真实域名——自建镜像时与 [`GitSource::host`]（风格名）不同。
@@ -497,6 +547,10 @@ impl GitSource {
     /// 「查看仓库」若原样交给 `opener::open`，就等于给了任意 URI/可执行文件一个启动入口。
     /// 这里只用经校验的 host/owner/repo 拼回 https URL，存盘字符串一概不信。
     fn verified_page_url(&self) -> Result<String, String> {
+        if self.is_market() {
+            // 市场插件没有仓库网页可开。诚实报出来，不要拼一个能打开但指向别处的地址。
+            return Err("这个插件来自插件市场，没有对应的代码仓库页面".to_string());
+        }
         let host = self.real_host();
         let allowed = allowed_hosts();
         if !allowed.iter().any(|(h, _)| h == &host) {
@@ -527,6 +581,7 @@ impl GitSource {
         if self.forge() != Forge::GitHub || self.real_host() != "github.com" {
             return None;
         }
+        debug_assert!(!self.is_market(), "市场来源不该走 GitHub 镜像坐标");
         Some(mirror::GhCoord {
             owner: self.owner.clone(),
             repo: self.repo.clone(),
@@ -576,6 +631,8 @@ impl GitSource {
             ),
             // 自建 GitHub 风格镜像（Gitea 等）：用网页同款归档路径
             Forge::GitHub => format!("https://{host}/{owner}/{repo}/archive/{r}.zip"),
+            // 市场来源没有归档直链；[`download_capped`] 会先一步拦下，走不到这里。
+            Forge::Market => String::new(),
         }
     }
 
@@ -595,6 +652,7 @@ impl GitSource {
                 },
             ),
             Forge::GitHub => format!("https://{host}/{owner}/{repo}/raw/{r}/{rel}"),
+            Forge::Market => String::new(),
         }
     }
 
@@ -685,6 +743,14 @@ fn download_capped(
     what: &str,
     expect_sha256: Option<String>,
 ) -> Result<mirror::Fetched, String> {
+    // 市场来源没有 Git 直链可拼。走到这里说明某条路由漏了分流——
+    // 与其拼出一个 `https:///…` 的废 URL 让用户看到莫名其妙的网络错误，不如直说。
+    if source.is_market() {
+        return Err(format!(
+            "{what}失败：「{}」来自插件市场，没有代码仓库地址。请在「插件市场」页更新它。",
+            source.repo
+        ));
+    }
     let auth = source.auth_header();
     let req = mirror::Request {
         kind,
@@ -948,7 +1014,7 @@ fn move_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
 ///
 /// 之所以严格：这个名字**同时**是落地目录名、`itplugin://` 的路径段、
 /// 以及 SQLite 命名空间 `plugin:<id>`，任何路径分隔符或点目录都可能被当成穿越。
-fn is_valid_plugin_name(name: &str) -> bool {
+pub(crate) fn is_valid_plugin_name(name: &str) -> bool {
     let b = name.as_bytes();
     if b.is_empty() || b.len() > 64 {
         return false;
@@ -962,7 +1028,7 @@ fn is_valid_plugin_name(name: &str) -> bool {
 
 /// 语义化版本比较：`a > b` 返回 true。缺失段按 0 补齐，非数字段按 0 兜底。
 /// （与 `updater::version_gt` 同思路，但**不跨模块引用私有函数**，各自独立可测。）
-fn version_gt(a: &str, b: &str) -> bool {
+pub(crate) fn version_gt(a: &str, b: &str) -> bool {
     let parse = |s: &str| -> Vec<u32> {
         s.trim()
             .trim_start_matches('v')
@@ -1395,6 +1461,80 @@ fn stage_from_source(
     result
 }
 
+/// 从**已下载好的 zip 字节**准备暂存包（插件市场用）。
+///
+/// 与 [`stage_from_source`] 的差别只有两点：包不是这里下载的，且没有 `?path=` 子目录
+/// （市场包的根就是插件目录）。**其余校验完全共用同一批函数**——
+/// [`extract_zip`]（路径穿越 / 可执行文件 / 体积 / 条目数）、[`super::load_one`]（清单）、
+/// [`is_valid_plugin_name`]、内容哈希。分成两套实现早晚会有一边漏掉某个检查。
+fn stage_from_bytes(
+    root: &Path,
+    bytes: Vec<u8>,
+    token: &str,
+    expect_content_hash: Option<&str>,
+    download_source: &str,
+) -> Result<StagedPackage, String> {
+    let staging_root = root.join(STAGING_DIR);
+    std::fs::create_dir_all(&staging_root).map_err(|e| format!("创建暂存目录失败: {e}"))?;
+    let dir = staging_root.join(token);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建暂存目录失败: {e}"))?;
+
+    let result = (|| -> Result<StagedPackage, String> {
+        let raw = dir.join("raw");
+        extract_zip(bytes, &raw)?;
+        // 市场包通常直接压的是插件目录内容（plugin.json 在 zip 根），
+        // 但作者用资源管理器压缩会多套一层——服务端两种都收，这里也两种都认。
+        let src = strip_single_root(&raw)?;
+        let canon_dir = dir.canonicalize().map_err(|e| format!("解析暂存目录失败: {e}"))?;
+        let src = src.canonicalize().map_err(|e| format!("解析插件目录失败: {e}"))?;
+        if !src.starts_with(&canon_dir) {
+            return Err("插件包内容越界（不安全），已拒绝".to_string());
+        }
+        let manifest_path = src.join("plugin.json");
+        if !manifest_path.exists() {
+            return Err("插件包里没有 plugin.json（包可能已损坏）".to_string());
+        }
+        let plugin = super::load_one(&src, &manifest_path)?;
+        if !is_valid_plugin_name(&plugin.manifest.name) {
+            return Err(format!(
+                "plugin.json 的 name「{}」不合法：只允许小写字母数字与 . _ -，须以字母或数字开头，长度 ≤ 64",
+                plugin.manifest.name
+            ));
+        }
+        let pkg = dir.join("pkg");
+        move_dir(&src, &pkg).map_err(|e| format!("整理插件包失败: {e}"))?;
+
+        // 与 Git 安装同一条收口：有可信哈希就必须逐字节对上，没有就如实标注「未校验」。
+        let hash_verified = match expect_content_hash {
+            Some(expect) => {
+                super::market::verify_content_hash(&pkg, expect)?;
+                true
+            }
+            None => false,
+        };
+
+        let plugin = super::LoadedPlugin {
+            manifest: plugin.manifest,
+            dir: pkg.clone(),
+        };
+        Ok(StagedPackage {
+            dir: dir.clone(),
+            pkg,
+            plugin,
+            download_source: download_source.to_string(),
+            // 市场包直接从配置的服务器下载，中间没有第三方镜像
+            via_mirror: false,
+            hash_verified,
+        })
+    })();
+
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    result
+}
+
 /// 统计目录内文件数与总字节（给预览展示「这包有多大」）。
 fn dir_stats(dir: &Path) -> (usize, u64) {
     let mut files = 0usize;
@@ -1534,14 +1674,100 @@ pub async fn plugin_install_preview(
     preview_impl(&url, None, &registry, &staging).await
 }
 
-/// 供 `market` 模块复用预览链路（它需要额外传入索引给的可信内容哈希）。
-pub(super) async fn preview_from_market(
-    url: &str,
+/// 供 `market` 模块复用预览链路：包已经下载好，带着索引给的可信内容哈希。
+///
+/// `source_url` 是 `itools-market://<name>`（来源身份，见 [`MARKET_SCHEME`]），
+/// `server_label` 是实际下载它的服务器地址，只用于在预览里如实展示「这包从哪来的」。
+pub(super) async fn preview_from_market_package(
+    bytes: Vec<u8>,
+    source_url: &str,
+    version_hint: &str,
+    server_label: &str,
     expect_content: Option<String>,
     registry: &PluginRegistry,
     staging: &InstallStaging,
 ) -> Result<InstallPreview, String> {
-    preview_impl(url, expect_content, registry, staging).await
+    let source = parse_git_url(source_url)?;
+    let root = registry.root.clone();
+    staging.sweep();
+
+    let installed: Vec<(String, String)> = registry
+        .plugins
+        .read()
+        .map(|g| {
+            g.iter()
+                .map(|p| (p.manifest.name.clone(), p.manifest.version.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let token = new_token();
+    let tk = token.clone();
+    let label = if server_label.is_empty() {
+        "插件市场".to_string()
+    } else {
+        format!("插件市场（{server_label}）")
+    };
+    let staged = tauri::async_runtime::spawn_blocking(move || {
+        let staged = stage_from_bytes(&root, bytes, &tk, expect_content.as_deref(), &label)?;
+        let stats = dir_stats(&staged.pkg);
+        let logo = super::read_logo(&staged.pkg, &staged.plugin.manifest.icon);
+        let readme = read_readme(&staged.pkg);
+        let prior = read_lock(&root)
+            .plugins
+            .get(&staged.plugin.manifest.name)
+            .map(|e| e.source.url.clone());
+        Ok::<_, String>((staged, stats, logo, readme, prior))
+    })
+    .await
+    .map_err(|e| format!("插件预览任务异常终止: {e}"))?;
+    let (staged, (file_count, total_bytes), logo, readme, prior_url) = staged?;
+
+    let manifest = staged.plugin.manifest.clone();
+    let name = manifest.name.clone();
+    // 包里的版本才算数：索引里的 version 只是个提示，两者不一致说明服务端数据有问题
+    if !version_hint.is_empty() && version_hint != manifest.version {
+        ilog!(
+            "[iTools] 市场条目 {name} 声称 v{version_hint}，包里的 plugin.json 写的是 v{}",
+            manifest.version
+        );
+    }
+    let installed_version = installed.into_iter().find(|(n, _)| n == &name).map(|(_, v)| v);
+
+    let preview = InstallPreview {
+        token: token.clone(),
+        name: name.clone(),
+        version: manifest.version.clone(),
+        description: manifest.description.clone(),
+        author: manifest.author.clone(),
+        permissions: manifest.permissions.clone(),
+        feature_count: manifest.features.len(),
+        cmds: keyword_cmds(&manifest),
+        logo,
+        readme,
+        source: source.clone(),
+        already_installed: installed_version.is_some(),
+        installed_version,
+        same_source: prior_url.as_deref() == Some(source.url.as_str()),
+        is_builtin: is_builtin(&name),
+        file_count,
+        total_bytes,
+        download_source: staged.download_source.clone(),
+        via_mirror: staged.via_mirror,
+        hash_verified: staged.hash_verified,
+    };
+    staging.put(
+        token,
+        Pending {
+            dir: staged.dir,
+            pkg: staged.pkg,
+            name,
+            version: manifest.version.clone(),
+            source,
+            created: SystemTime::now(),
+        },
+    );
+    Ok(preview)
 }
 
 /// 预览的公共实现：手动粘 URL 与从市场安装共用同一条链路。
@@ -1768,10 +1994,30 @@ fn check_one(name: String, current: String, entry: Option<InstalledEntry>) -> Pl
         download_source: None,
         via_mirror: false,
     };
-    // 没有 Git 来源（手工放入 / 内置）：如实返回「未检查」，绝不伪装成「已是最新」
+    // 没有来源（手工放入 / 内置）：如实返回「未检查」，绝不伪装成「已是最新」
     let Some(entry) = entry else {
         return base;
     };
+    // 市场来源：比索引里的版本，不去请求任何 Git 托管站
+    if entry.source.is_market() {
+        return match super::market::latest_version(&entry.source.repo) {
+            Ok(Some(latest)) => PluginUpdate {
+                has_update: version_gt(&latest, &current),
+                latest_version: Some(latest),
+                checked: true,
+                ..base
+            },
+            // 条目从市场消失了（被下架 / 换名）——这不是「已是最新」，如实说清楚
+            Ok(None) => PluginUpdate {
+                error: Some("市场里已经没有这个插件了（可能已被下架）".to_string()),
+                ..base
+            },
+            Err(e) => PluginUpdate {
+                error: Some(e),
+                ..base
+            },
+        };
+    }
     if is_pinned(&entry.source.revision) {
         return PluginUpdate {
             pinned: true,
@@ -1954,14 +2200,32 @@ pub async fn plugin_update(
             .plugins
             .get(&n)
             .cloned()
-            .ok_or_else(|| format!("「{n}」不是从 Git 仓库安装的，没有可用的更新来源"))?;
+            .ok_or_else(|| format!("「{n}」不是从插件市场或 Git 仓库安装的，没有可用的更新来源"))?;
 
         let token = new_token();
-        // 这条路径**没有**可信哈希，两个都传 None，如实回传「未校验」：
-        // 锁文件里不记内容哈希（可信来源只有市场索引，而索引随时可能更新，存一份旧的等于自欺）；
-        // 市场装的插件本身固定 pin 在某个 commit（`pinned=true`），根本不走这条更新路径——
-        // 它们的新版本由市场收录后在市场页发起，那条路上才有索引给的可信哈希。
-        let staged = stage_from_source(&root, &entry.source, &token, None, None)?;
+        // 两条来源，两种下载方式，但**校验、落地、锁文件更新完全共用下面这一段**。
+        let staged = if entry.source.is_market() {
+            // 市场来源：拿索引里那条的内容哈希做校验（与从市场页安装同一条收口）
+            let mk = super::market::find_entry(&entry.source.repo)?;
+            let expect = (!mk.content_hash.is_empty()).then(|| mk.content_hash.clone());
+            let label = crate::account::cloud_endpoint().unwrap_or_default();
+            let bytes = super::market::fetch_package(&mk)?;
+            stage_from_bytes(
+                &root,
+                bytes,
+                &token,
+                expect.as_deref(),
+                &if label.is_empty() {
+                    "插件市场".to_string()
+                } else {
+                    format!("插件市场（{label}）")
+                },
+            )?
+        } else {
+            // Git 来源：这条路径**没有**可信哈希，两个都传 None 并如实回传「未校验」——
+            // 锁文件里不记内容哈希（可信来源只有市场索引，存一份旧的等于自欺）。
+            stage_from_source(&root, &entry.source, &token, None, None)?
+        };
         let new_name = staged.plugin.manifest.name.clone();
         let new_version = staged.plugin.manifest.version.clone();
         if new_name != n {
@@ -2052,6 +2316,185 @@ mod tests {
         }
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    // ---------- 市场来源（itools-market://<name>）----------
+
+    #[test]
+    fn market_source_parses_and_is_recognized() {
+        let s = parse_git_url("itools-market://deskbox").unwrap();
+        assert!(s.is_market());
+        assert_eq!(s.host, MARKET_HOST);
+        assert_eq!(s.repo, "deskbox");
+        assert_eq!(s.url, "itools-market://deskbox");
+        // 市场插件跟随索引里的最新版本，不锁 commit —— 别被当成「已锁定」而排除出更新检查
+        assert!(!is_pinned(&s.revision));
+    }
+
+    #[test]
+    fn market_source_survives_lock_roundtrip() {
+        // read_lock 会拿 source.url 重新解析、解析不过就**丢弃整条记录**。
+        // 这一条挂了的表现是：所有从市场装的插件突然集体变成「无来源、不检查更新」。
+        let root = temp_root("lock-market", &["deskbox"]);
+        let src = parse_git_url("itools-market://deskbox").unwrap();
+        update_lock(&root, |lock| {
+            lock.plugins.insert(
+                "deskbox".to_string(),
+                InstalledEntry {
+                    source: src,
+                    resolved_version: "1.0.0".into(),
+                    installed_at: now_rfc3339(),
+                },
+            );
+        })
+        .unwrap();
+        let back = read_lock(&root);
+        let e = back.plugins.get("deskbox").expect("市场来源的记录必须能读回来");
+        assert!(e.source.is_market());
+        assert_eq!(e.source.repo, "deskbox");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn market_source_rejected_by_git_download_path() {
+        // 市场来源没有 Git 直链可拼。万一某条路由漏了分流，必须给一句能懂的话，
+        // 而不是拼出 `https:///…` 让用户看到莫名其妙的网络错误。
+        let s = parse_git_url("itools-market://deskbox").unwrap();
+        let err = download_capped(
+            &s,
+            mirror::Kind::Archive,
+            "",
+            Duration::from_secs(1),
+            1024,
+            "下载插件归档",
+            None,
+        )
+        .err()
+        .expect("市场来源必须被 Git 下载路径拒绝");
+        assert!(err.contains("插件市场"), "{err}");
+        assert!(err.contains("deskbox"), "{err}");
+    }
+
+    #[test]
+    fn market_source_has_no_repo_page() {
+        let s = parse_git_url("itools-market://deskbox").unwrap();
+        // 「查看仓库」对市场插件应诚实报错，不能拼一个能打开但指向别处的地址
+        assert!(s.verified_page_url().is_err());
+    }
+
+    #[test]
+    fn market_source_name_is_validated() {
+        assert!(parse_git_url("itools-market://Bad Name").is_err());
+        assert!(parse_git_url("itools-market://../etc").is_err());
+        assert!(parse_git_url("itools-market://").is_err());
+    }
+
+    // ---------- 从 zip 字节 stage（市场安装链路的客户端半段）----------
+
+    /// 造一个最小可用的插件 zip。
+    fn plugin_zip(name: &str, version: &str, extra: &[(&str, &[u8])]) -> Vec<u8> {
+        use std::io::Write as _;
+        let mut buf = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            w.start_file("plugin.json", opts).unwrap();
+            w.write_all(
+                format!(
+                    r#"{{"name":"{name}","version":"{version}","description":"d","features":[{{"code":"main","cmds":["{name}"]}}]}}"#
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+            w.start_file("index.html", opts).unwrap();
+            w.write_all(b"<html></html>").unwrap();
+            for (n, c) in extra {
+                w.start_file(*n, opts).unwrap();
+                w.write_all(c).unwrap();
+            }
+            w.finish().unwrap();
+        }
+        buf
+    }
+
+    #[test]
+    fn stage_from_bytes_extracts_and_parses() {
+        let root = temp_root("stage-bytes", &[]);
+        let zip = plugin_zip("demo", "1.2.3", &[("assets/app.js", b"console.log(1)")]);
+        let staged = stage_from_bytes(&root, zip, "tok1", None, "插件市场（测试）").unwrap();
+        assert_eq!(staged.plugin.manifest.name, "demo");
+        assert_eq!(staged.plugin.manifest.version, "1.2.3");
+        assert!(staged.pkg.join("index.html").is_file());
+        assert!(staged.pkg.join("assets/app.js").is_file());
+        // 没给可信哈希时必须如实标注「未校验」，绝不假装校验过
+        assert!(!staged.hash_verified);
+        // 市场包直接从配置的服务器下载，中间没有第三方镜像
+        assert!(!staged.via_mirror);
+        assert_eq!(staged.download_source, "插件市场（测试）");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn stage_from_bytes_verifies_content_hash() {
+        let root = temp_root("stage-hash", &[]);
+        let zip = plugin_zip("demo", "1.0.0", &[]);
+
+        // 先算出这份包的真实内容哈希
+        let probe = stage_from_bytes(&root, zip.clone(), "tokA", None, "市场").unwrap();
+        let real = super::super::market::content_hash(&probe.pkg).unwrap();
+        let _ = std::fs::remove_dir_all(&probe.dir);
+
+        // 哈希对得上 → 通过并标记已校验
+        let ok = stage_from_bytes(&root, zip.clone(), "tokB", Some(&real), "市场").unwrap();
+        assert!(ok.hash_verified);
+        let _ = std::fs::remove_dir_all(&ok.dir);
+
+        // 哈希对不上 → 必须拒绝（这是「传输途中被改过」的收口）
+        let bad = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+        let err = stage_from_bytes(&root, zip, "tokC", Some(bad), "市场")
+            .err()
+            .expect("内容哈希对不上必须拒绝");
+        assert!(err.contains("内容校验失败"), "{err}");
+        // 失败时暂存目录要被清掉，不留垃圾
+        assert!(!root.join(STAGING_DIR).join("tokC").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn stage_from_bytes_rejects_executables() {
+        // 与 Git 安装共用同一套 extract_zip，这里钉死「市场包也过同一道闸」
+        let root = temp_root("stage-exe", &[]);
+        let zip = plugin_zip("demo", "1.0.0", &[("payload.exe", b"MZ")]);
+        let err = stage_from_bytes(&root, zip, "tok2", None, "市场")
+            .err()
+            .expect("包内含可执行文件必须整包拒绝");
+        assert!(err.contains(".exe"), "{err}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn stage_from_bytes_accepts_wrapped_single_root() {
+        // 作者用资源管理器压缩会多套一层目录 —— 服务端两种都收，客户端也必须两种都认
+        use std::io::Write as _;
+        let root = temp_root("stage-wrap", &[]);
+        let mut buf = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            w.start_file("demo/plugin.json", opts).unwrap();
+            w.write_all(
+                br#"{"name":"demo","version":"1.0.0","features":[{"code":"m","cmds":["d"]}]}"#,
+            )
+            .unwrap();
+            w.start_file("demo/index.html", opts).unwrap();
+            w.write_all(b"<html></html>").unwrap();
+            w.finish().unwrap();
+        }
+        let staged = stage_from_bytes(&root, buf, "tok3", None, "市场").unwrap();
+        assert_eq!(staged.plugin.manifest.name, "demo");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

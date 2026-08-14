@@ -196,11 +196,14 @@ mod tests {
             display_name: "示例".into(),
             description: "d".into(),
             author: "a".into(),
-            repo: "https://github.com/o/r".into(),
-            path: String::new(),
             version: "1.0.0".into(),
-            revision: "0".repeat(40),
+            package: "/api/market/package/demo".into(),
             content_hash: "sha256:00".into(),
+            reviewed_by: "gpt-5.5".into(),
+            published_at: 0,
+            updated_at: 0,
+            size_bytes: 1024,
+            readme: String::new(),
             category: "效率".into(),
             tags: vec![],
             keywords: vec![],
@@ -222,13 +225,15 @@ mod tests {
             "MarketEntry",
             &entry,
             &[
-                "name", "displayName", "description", "author", "repo", "path", "version",
-                "revision", "contentHash", "category", "tags", "keywords", "permissions",
-                "permissionReasons", "minAppVersion", "license", "homepage", "sourceRepo",
-                "screenshots", "revoked", "revokedReason", "addedAt", "auditReport", "fileCount",
+                "name", "displayName", "description", "author", "version", "package",
+                "contentHash", "reviewedBy", "publishedAt", "updatedAt", "sizeBytes", "readme",
+                "category", "tags", "keywords", "permissions", "permissionReasons",
+                "minAppVersion", "license", "homepage", "sourceRepo", "screenshots", "revoked",
+                "revokedReason", "addedAt", "auditReport", "fileCount",
             ],
-            "字段与 registry/schema/entry.schema.json 对应；contentHash / fileCount 由 CI 回填。\
-             改这里要同时改 schema 与 scripts/registry/check.mjs，否则 CI 生成的 index.json 客户端读不全。",
+            "索引由**自建服务端**生成（server/src/market.rs 的 render_index），不再来自 GitHub registry。\
+             package 是相对下载路径，客户端拼上自己配置的服务器地址；reviewedBy 是审核模型名，\
+             UI 必须据此如实措辞（自动审核 ≠ 人工审计）。改这里要同时改服务端那一侧。",
         );
 
         let view = crate::plugin::market::MarketView {
@@ -236,14 +241,17 @@ mod tests {
             origin: "remote".into(),
             error: None,
             installed: Default::default(),
-            source: "o/r@main:registry/index.json".into(),
+            source: "https://api.example.com".into(),
+            review_mode: "llm".into(),
+            review_model: "gpt-5.5".into(),
         };
         freeze(
             &mut out,
             "MarketView",
             &view,
-            &["plugins", "origin", "error", "installed", "source"],
-            "origin 区分 remote/cache/none —— 拿缓存与刚更新过对用户是不同的信息，不能只给 plugins。",
+            &["plugins", "origin", "error", "installed", "source", "reviewMode", "reviewModel"],
+            "origin 区分 remote/cache/none —— 拿缓存与刚更新过对用户是不同的信息，不能只给 plugins。\
+             reviewMode 区分 llm（大模型自动审核）/ manual（未接入自动审核，人工放行），市场页文案据此分支。",
         );
 
         // ---------- 安装 / 更新（install.rs） ----------
@@ -544,11 +552,13 @@ mod tests {
                 effective: Some(crate::account::DEV_DEFAULT_ENDPOINT.into()),
                 source: "devDefault".into(),
                 user_value: String::new(),
+                builtin_default: crate::account::BUILTIN_DEFAULT_ENDPOINT.into(),
             },
-            &["effective", "source", "userValue"],
-            "source ∈ env | user | devDefault | none。userValue 为空而 effective 有值时，\
-             说明生效的是环境变量或 dev 默认地址——「网络」页签必须把这层区别显示出来，\
-             否则用户会像本轮一样，在没填过任何地址的情况下完全不知道客户端在连哪儿。",
+            &["effective", "source", "userValue", "builtinDefault"],
+            "source ∈ env | user | devDefault | builtin | none。userValue 为空而 effective 有值时，\
+             说明生效的是环境变量、dev 默认地址或内置官方默认服务——「网络」页签必须把这层区别显示出来，\
+             否则用户会像本轮一样，在没填过任何地址的情况下完全不知道客户端在连哪儿。\
+             builtinDefault 只有一个来源（account.rs 的常量），前端不许另写一遍字面量。",
         );
 
         // ---------- 更新 ----------
@@ -743,6 +753,67 @@ mod tests {
             &["key", "value", "bytes", "updatedAt"],
             "updatedAt 只有 kind=\"data\" 才有（plugin_kv 表本就不记时间），\
              为 null 时 UI 显示「—」，不许编造时间。",
+        );
+
+        // ---------- 插件提审（dev/submit.rs） ----------
+        freeze(
+            &mut out,
+            "Submission",
+            &crate::dev::submit::Submission {
+                id: "abc".into(),
+                name: "demo".into(),
+                version: "1.0.0".into(),
+                status: "reviewing".into(),
+                message: String::new(),
+                content_hash: "sha256:00".into(),
+                file_count: 3,
+                size_bytes: 1024,
+                created_at: 0,
+                updated_at: 0,
+                review: serde_json::Value::Null,
+            },
+            &[
+                "id", "name", "version", "status", "message", "contentHash", "fileCount",
+                "sizeBytes", "createdAt", "updatedAt", "review",
+            ],
+            "status ∈ reviewing | approved | rejected | manual，取值由**服务端**给定，客户端不推断。\
+             ⚠ manual 是「自动审核没能完成，需人工处理」——它不是通过，UI 必须与 approved 明确区分，\
+             否则作者会以为插件已经上线了。message 是服务端写给作者的原文，原样展示不得改写。",
+        );
+
+        freeze(
+            &mut out,
+            "PublishStatus",
+            &crate::dev::submit::PublishStatus {
+                name: "demo".into(),
+                local_version: "1.0.1".into(),
+                online_version: Some("1.0.0".into()),
+                revoked: false,
+                revoked_reason: String::new(),
+                can_submit_new_version: true,
+                latest: None,
+                history: vec![],
+                error: None,
+            },
+            &[
+                "name", "localVersion", "onlineVersion", "revoked", "revokedReason",
+                "canSubmitNewVersion", "latest", "history", "error",
+            ],
+            "onlineVersion 来自市场索引（服务端的真相源），不是本地记的。\
+             error 非空时其余字段可能不完整，UI 必须如实展示这条 —— \
+             把「查不到」渲染成「没有记录」是两件完全不同的事。",
+        );
+
+        freeze(
+            &mut out,
+            "Preflight",
+            &crate::dev::submit::Preflight {
+                blockers: vec![],
+                warnings: vec![],
+            },
+            &["blockers", "warnings"],
+            "只包含「服务端必然会拒」的那几条本地可判项。\
+             **通过自检不代表会过审**：代码审核在服务端的大模型那一侧，文案不得暗示相反的结论。",
         );
 
         freeze(

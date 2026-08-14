@@ -60,6 +60,84 @@ const CREATE_DATA: &str = "\
     PRIMARY KEY (username, ns, k)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
 
+/// 提审单。一次提审 = 一行，**永不覆盖**：作者能看到自己每一次提交的结论，
+/// 包括被驳回的那几次和驳回原因。
+const CREATE_SUBMISSIONS: &str = "\
+  CREATE TABLE IF NOT EXISTS plugin_submissions (
+    id VARCHAR(40) PRIMARY KEY,
+    name VARCHAR(190) NOT NULL,
+    version VARCHAR(64) NOT NULL,
+    author VARCHAR(190) NOT NULL,
+    status VARCHAR(24) NOT NULL,
+    content_hash VARCHAR(80) NOT NULL,
+    file_count INT NOT NULL,
+    size_bytes BIGINT NOT NULL,
+    manifest LONGTEXT NOT NULL,
+    review LONGTEXT NOT NULL,
+    message TEXT NOT NULL,
+    created_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL,
+    INDEX idx_sub_author (author),
+    INDEX idx_sub_name (name)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
+
+/// 已上线的市场条目（一个插件一行，新版本覆盖同一行）。
+///
+/// `owner` 是**安全字段**：同名插件只能由首次上线它的那个账号更新。没有这一列，
+/// 任何登录用户都能提交一个同名包把别人的插件顶掉——而客户端那边是按插件名归属
+/// 授权与数据的，顶包等于直接继承受害插件的用户授权。
+const CREATE_MARKET: &str = "\
+  CREATE TABLE IF NOT EXISTS market_entries (
+    name VARCHAR(190) PRIMARY KEY,
+    owner VARCHAR(190) NOT NULL,
+    version VARCHAR(64) NOT NULL,
+    content_hash VARCHAR(80) NOT NULL,
+    package_file VARCHAR(255) NOT NULL,
+    entry LONGTEXT NOT NULL,
+    revoked TINYINT NOT NULL DEFAULT 0,
+    revoked_reason TEXT NOT NULL,
+    published_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
+
+/// 一条提审单。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Submission {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub author: String,
+    /// `reviewing` 审核中 | `approved` 已上线 | `rejected` 已驳回 | `manual` 待人工处理 | `failed` 校验未通过
+    pub status: String,
+    pub content_hash: String,
+    pub file_count: i64,
+    pub size_bytes: i64,
+    /// `plugin.json` 原文
+    pub manifest: String,
+    /// 模型裁决原文（JSON），未审 / 审失败时为空串
+    pub review: String,
+    /// 给作者看的一句话结论 / 驳回原因
+    pub message: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// 一条已上线的市场条目。
+#[derive(Debug, Clone, PartialEq)]
+pub struct MarketRow {
+    pub name: String,
+    pub owner: String,
+    pub version: String,
+    pub content_hash: String,
+    pub package_file: String,
+    /// 客户端 `MarketEntry` 形状的 JSON 文本
+    pub entry: String,
+    pub revoked: bool,
+    pub revoked_reason: String,
+    pub published_at: i64,
+    pub updated_at: i64,
+}
+
 pub struct MariaDbStore {
     pool: MySqlPool,
 }
@@ -89,7 +167,7 @@ impl MariaDbStore {
             .connect_with(base_options(cfg).database(&cfg.database))
             .await?;
 
-        for ddl in [CREATE_USERS, CREATE_SESSIONS, CREATE_DATA] {
+        for ddl in [CREATE_USERS, CREATE_SESSIONS, CREATE_DATA, CREATE_SUBMISSIONS, CREATE_MARKET] {
             pool.execute(ddl).await?;
         }
         Ok(Self { pool })
@@ -282,5 +360,217 @@ impl MariaDbStore {
         }
         q.execute(&self.pool).await?;
         Ok(())
+    }
+
+    // ---------- 提审单 ----------
+
+    pub async fn create_submission(&self, s: &Submission) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "INSERT INTO plugin_submissions
+               (id, name, version, author, status, content_hash, file_count, size_bytes,
+                manifest, review, message, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&s.id)
+        .bind(&s.name)
+        .bind(&s.version)
+        .bind(&s.author)
+        .bind(&s.status)
+        .bind(&s.content_hash)
+        .bind(s.file_count)
+        .bind(s.size_bytes)
+        .bind(&s.manifest)
+        .bind(&s.review)
+        .bind(&s.message)
+        .bind(s.created_at)
+        .bind(s.updated_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// 审核结束后回填结论。**只改结论字段**，不动提交时记录的包信息。
+    pub async fn finish_submission(
+        &self,
+        id: &str,
+        status: &str,
+        message: &str,
+        review: &str,
+        now_ms: i64,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "UPDATE plugin_submissions SET status = ?, message = ?, review = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(status)
+        .bind(message)
+        .bind(review)
+        .bind(now_ms)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_submission(&self, id: &str) -> Result<Option<Submission>, sqlx::Error> {
+        let row = sqlx::query(SUBMISSION_COLUMNS_SELECT.as_str())
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(row_to_submission))
+    }
+
+    /// 某作者的提审记录（新→旧）。
+    pub async fn list_submissions(
+        &self,
+        author: &str,
+        limit: u32,
+    ) -> Result<Vec<Submission>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT id, name, version, author, status, content_hash, file_count, size_bytes,
+                    manifest, review, message, created_at, updated_at
+             FROM plugin_submissions WHERE author = ? ORDER BY created_at DESC LIMIT ?",
+        )
+        .bind(author)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(row_to_submission).collect())
+    }
+
+    /// 仍停在「审核中」且创建于 `before_ms` 之前的提审单 id。
+    ///
+    /// 审核任务活在进程内存里，进程一没它就永远不会有结论——启动时必须把这些单子如实改判，
+    /// 不能留一个永远转圈的状态给作者。
+    pub async fn stale_reviewing(&self, before_ms: i64) -> Result<Vec<String>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT id FROM plugin_submissions WHERE status = 'reviewing' AND created_at <= ?",
+        )
+        .bind(before_ms)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|r| r.get::<String, _>("id")).collect())
+    }
+
+    /// 该作者最近一次提审的时间（做冷却判定用）。
+    pub async fn last_submit_at(&self, author: &str) -> Result<Option<i64>, sqlx::Error> {
+        let row = sqlx::query("SELECT MAX(created_at) AS t FROM plugin_submissions WHERE author = ?")
+            .bind(author)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.and_then(|r| r.get::<Option<i64>, _>("t")))
+    }
+
+    // ---------- 市场条目 ----------
+
+    /// 发布 / 更新一个条目（同名覆盖，`owner` 与 `published_at` 保持首次值）。
+    pub async fn publish_entry(&self, e: &MarketRow) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "INSERT INTO market_entries
+               (name, owner, version, content_hash, package_file, entry, revoked, revoked_reason,
+                published_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, 0, '', ?, ?)
+             ON DUPLICATE KEY UPDATE
+               version = VALUES(version),
+               content_hash = VALUES(content_hash),
+               package_file = VALUES(package_file),
+               entry = VALUES(entry),
+               revoked = 0,
+               revoked_reason = '',
+               updated_at = VALUES(updated_at)",
+        )
+        .bind(&e.name)
+        .bind(&e.owner)
+        .bind(&e.version)
+        .bind(&e.content_hash)
+        .bind(&e.package_file)
+        .bind(&e.entry)
+        .bind(e.published_at)
+        .bind(e.updated_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_entry(&self, name: &str) -> Result<Option<MarketRow>, sqlx::Error> {
+        let row = sqlx::query(
+            "SELECT name, owner, version, content_hash, package_file, entry, revoked, revoked_reason,
+                    published_at, updated_at FROM market_entries WHERE name = ?",
+        )
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(row_to_entry))
+    }
+
+    /// 全部条目（含已下架的——客户端要靠 `revoked` 提示已安装该插件的用户）。
+    pub async fn list_entries(&self) -> Result<Vec<MarketRow>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT name, owner, version, content_hash, package_file, entry, revoked, revoked_reason,
+                    published_at, updated_at FROM market_entries ORDER BY updated_at DESC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(row_to_entry).collect())
+    }
+
+    /// 下架 / 恢复。下架原因会原样展示给已安装该插件的用户，所以调用方必须给出真实原因。
+    pub async fn set_revoked(
+        &self,
+        name: &str,
+        revoked: bool,
+        reason: &str,
+        now_ms: i64,
+    ) -> Result<bool, sqlx::Error> {
+        let res = sqlx::query(
+            "UPDATE market_entries SET revoked = ?, revoked_reason = ?, updated_at = ? WHERE name = ?",
+        )
+        .bind(if revoked { 1 } else { 0 })
+        .bind(reason)
+        .bind(now_ms)
+        .bind(name)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected() > 0)
+    }
+}
+
+/// 单条提审单的查询语句（按 id）。抽成常量避免与 [`row_to_submission`] 的列顺序分叉。
+static SUBMISSION_COLUMNS_SELECT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    "SELECT id, name, version, author, status, content_hash, file_count, size_bytes,
+            manifest, review, message, created_at, updated_at
+     FROM plugin_submissions WHERE id = ?"
+        .to_string()
+});
+
+fn row_to_submission(r: sqlx::mysql::MySqlRow) -> Submission {
+    Submission {
+        id: r.get("id"),
+        name: r.get("name"),
+        version: r.get("version"),
+        author: r.get("author"),
+        status: r.get("status"),
+        content_hash: r.get("content_hash"),
+        file_count: r.get::<i32, _>("file_count") as i64,
+        size_bytes: r.get("size_bytes"),
+        manifest: r.get("manifest"),
+        review: r.get("review"),
+        message: r.get("message"),
+        created_at: r.get("created_at"),
+        updated_at: r.get("updated_at"),
+    }
+}
+
+fn row_to_entry(r: sqlx::mysql::MySqlRow) -> MarketRow {
+    MarketRow {
+        name: r.get("name"),
+        owner: r.get("owner"),
+        version: r.get("version"),
+        content_hash: r.get("content_hash"),
+        package_file: r.get("package_file"),
+        entry: r.get("entry"),
+        revoked: r.get::<i8, _>("revoked") != 0,
+        revoked_reason: r.get("revoked_reason"),
+        published_at: r.get("published_at"),
+        updated_at: r.get("updated_at"),
     }
 }

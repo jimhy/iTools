@@ -7,6 +7,9 @@
 //! - [`mirrors`]   镜像源配置装载（热更新）+ 健康探测 + 快照/ETag
 //! - [`ratelimit`] 滑动窗口按 IP 限流（供免认证的 `/api/mirrors`）
 //! - [`proxy`]     `X-Forwarded-For` 取真实客户端 IP（限流按谁计数）
+//! - [`pkg`]       提审插件包的解压 / 安全校验 / 内容哈希
+//! - [`llm`]       插件代码的大模型审核（OpenAI 兼容协议）
+//! - [`market`]    提审编排与插件市场索引（取代原先的 GitHub registry）
 //! - [`routes`]    axum 路由（全部 REST 契约）
 //!
 //! 库形态导出是为了让 `tests/` 下的集成测试能直接构造 Router 打端点
@@ -14,7 +17,10 @@
 
 pub mod auth;
 pub mod config;
+pub mod llm;
+pub mod market;
 pub mod mirrors;
+pub mod pkg;
 pub mod proxy;
 pub mod ratelimit;
 pub mod routes;

@@ -112,6 +112,7 @@
     "version"
   ],
   "EndpointInfo": [
+    "builtinDefault",
     "effective",
     "source",
     "userValue"
@@ -177,16 +178,19 @@
     "license",
     "minAppVersion",
     "name",
-    "path",
+    "package",
     "permissionReasons",
     "permissions",
-    "repo",
-    "revision",
+    "publishedAt",
+    "readme",
+    "reviewedBy",
     "revoked",
     "revokedReason",
     "screenshots",
+    "sizeBytes",
     "sourceRepo",
     "tags",
+    "updatedAt",
     "version"
   ],
   "MarketView": [
@@ -194,6 +198,8 @@
     "installed",
     "origin",
     "plugins",
+    "reviewMode",
+    "reviewModel",
     "source"
   ],
   "MirrorConfigView": [
@@ -263,6 +269,10 @@
     "pinned",
     "viaMirror"
   ],
+  "Preflight": [
+    "blockers",
+    "warnings"
+  ],
   "ProfileView": [
     "avatar_path",
     "companion_days",
@@ -276,6 +286,17 @@
     "ok",
     "target",
     "viaProxy"
+  ],
+  "PublishStatus": [
+    "canSubmitNewVersion",
+    "error",
+    "history",
+    "latest",
+    "localVersion",
+    "name",
+    "onlineVersion",
+    "revoked",
+    "revokedReason"
   ],
   "SearchItem": [
     "action",
@@ -310,6 +331,19 @@
   ],
   "SettingsSchema": [
     "groups",
+    "version"
+  ],
+  "Submission": [
+    "contentHash",
+    "createdAt",
+    "fileCount",
+    "id",
+    "message",
+    "name",
+    "review",
+    "sizeBytes",
+    "status",
+    "updatedAt",
     "version"
   ],
   "SyncResult": [

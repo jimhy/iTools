@@ -14,6 +14,7 @@ use tower::ServiceExt;
 use tower_http::trace::TraceLayer;
 
 use itools_sync::config::{Config, TlsConfig};
+use itools_sync::market::MarketService;
 use itools_sync::mirrors::{MirrorRegistry, MirrorRegistryOptions};
 use itools_sync::ratelimit::{RateLimiterOptions, SlidingWindowLimiter};
 use itools_sync::routes::{build_router, AppState};
@@ -70,11 +71,40 @@ async fn main() -> ExitCode {
     let logger_on = config.logger;
     let tls = config.tls.clone();
     let addr = format!("{}:{}", config.host, config.port);
+
+    // 插件包目录必须可写：审核通过的包要落在这里，客户端从这里下载。
+    // 建不出来就直接退出——留到第一次有人提审时才炸，是把故障推给用户去发现。
+    if let Err(e) = std::fs::create_dir_all(&config.market.packages_dir) {
+        eprintln!(
+            "[itools-sync] 创建插件包目录 {} 失败：{e}",
+            config.market.packages_dir.display()
+        );
+        eprintln!("请检查 SYNC_PACKAGES_DIR 指向的路径是否存在且可写（容器里应挂持久卷）。");
+        return ExitCode::FAILURE;
+    }
+    if !config.llm.enabled() {
+        tracing::warn!(
+            "[market] 未配置 ITOOLS_LLM_API_KEY：插件提审只做机械校验，代码审核不会执行，\
+             提交上来的插件会停在「待人工处理」而不会自动上线"
+        );
+    }
+    let market_limiter = SlidingWindowLimiter::new(RateLimiterOptions::new(
+        config.market.rate_limit_max,
+        config.market.rate_limit_window_sec as i64 * 1000,
+        clock.clone(),
+    ));
+
+    let config = Arc::new(config);
+    let market = MarketService::new(store.clone(), config.clone(), clock.clone());
+    market.bootstrap().await;
+
     let state = Arc::new(AppState {
         store: store.clone(),
-        config: Arc::new(config),
+        config,
         mirrors: mirrors.clone(),
         mirror_limiter: Arc::new(limiter),
+        market,
+        market_limiter: Arc::new(market_limiter),
         clock,
     });
 

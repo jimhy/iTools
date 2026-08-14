@@ -98,6 +98,10 @@
     "allow-dev-log-list",
     "allow-dev-log-clear",
     "allow-dev-get-mock",
-    "allow-dev-set-mock"
+    "allow-dev-set-mock",
+    "allow-dev-publish-status",
+    "allow-dev-preflight",
+    "allow-dev-submit-plugin",
+    "allow-dev-submission-detail"
   ]
 }

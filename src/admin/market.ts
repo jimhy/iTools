@@ -2,14 +2,18 @@
 //!
 //! # 这一页的信任模型（文案必须与它一致）
 //!
-//! 市场收录的插件带着**审核时算出的内容哈希**，安装时逐字节校验——所以不管插件包经由
-//! GitHub 官方源还是第三方镜像下载，装到的必然是收录时那份。这也是「镜像可篡改传输内容」
-//! 这条风险的收口：镜像即使被控制，也只能让你装不上，不能让你装到被改过的代码。
+//! 索引与插件包都来自**你配置的那台服务器**（`GET /api/market/index` 与
+//! `/api/market/package/{name}`），不再经过 GitHub。条目带着发布时算出的内容哈希，
+//! 客户端下载后逐字节校验，对不上一律拒装——这挡的是「传输途中被改过」。
 //!
-//! 但「哈希校验过」**不等于**「代码被审计过」。当前收录只做机械校验
-//! （格式、清单一致性、无可执行文件），代码是否有恶意行为靠维护者人工看，
-//! 原计划的 AI 自动审核尚未启用。这一点必须在页面上写清楚，不能让「市场」两个字
-//! 自动被理解成「官方背书、可以放心」。
+//! 审核由服务端的**大模型**做：读代码判断有无恶意行为、权限是否名副其实、描述是否相符。
+//! 但这不等于人工审计，页面文案必须如实区分：
+//!
+//! - `reviewMode = "llm"` → 「由 <模型名> 自动审核」；
+//! - `reviewMode = "manual"` → 服务端**没有接入**自动审核，条目是维护者人工放行的；
+//! - 空 → 索引没说（老服务端），一律按「审核方式未知」措辞。
+//!
+//! 不能让「市场」两个字自动被理解成「官方背书、可以放心」。
 
 import type { AdminCtx } from "./main";
 import type { MarketEntry, MarketView } from "../types";
@@ -33,8 +37,20 @@ const permLabel = (p: string): string => PERM_LABELS[p] ?? p;
 const errText = (err: unknown, fallback: string): string =>
   typeof err === "string" ? err : err instanceof Error ? err.message : fallback;
 
+const fmtSize = (n: number): string =>
+  n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`;
+
+/** Unix 毫秒 → 本地日期。0 / 非法值返回空串（宁可不显示，也不显示 1970-01-01）。 */
+const fmtDate = (ms: number): string => {
+  if (!ms || !Number.isFinite(ms)) return "";
+  const d = new Date(ms);
+  return Number.isNaN(d.getTime()) ? "" : d.toLocaleDateString();
+};
+
 export async function renderMarket(root: HTMLElement, ctx: AdminCtx): Promise<void> {
   const listWrap = h("div", { class: "plugin-list" });
+  // 信任说明的内容取决于服务端说了什么审核方式，所以要能随索引重绘
+  const trustWrap = h("div");
   let view: MarketView | null = null;
   let loading = false;
 
@@ -67,7 +83,19 @@ export async function renderMarket(root: HTMLElement, ctx: AdminCtx): Promise<vo
   }
 
   /** 页面顶部的信任说明——这段不能省，也不能写成「已审核，请放心安装」。 */
-  function trustBlock(): HTMLElement {
+  function trustBlock(v: MarketView | null): HTMLElement {
+    // 审核方式必须照服务端说的写。写死「已由 AI 审核」而服务端其实没接模型，就是假信息。
+    const reviewLine =
+      v?.reviewMode === "llm"
+        ? `② 每个版本上架前都由 ${v.reviewModel || "服务端配置的模型"} 通读代码审核（恶意行为、` +
+          "权限是否名副其实、描述是否相符）。但这是**自动**审核，不是人工审计，也不可能杜绝一切问题——" +
+          "装之前仍请自行判断来源是否可信。"
+        : v?.reviewMode === "manual"
+          ? "② 当前服务端**没有接入自动代码审核**，上架的条目只过了机械校验（格式、清单、不含可执行文件），" +
+            "代码是否有恶意行为由维护者人工判断。「在市场里」不等于「代码被审计过」。"
+          : "② 这个服务端没有说明它用的是哪种审核方式，因此无法确认上架的插件被审到什么程度。" +
+            "请把市场里的插件当作「来源未经核实」来对待。";
+
     return h(
       "div",
       { class: "info-box" },
@@ -75,16 +103,10 @@ export async function renderMarket(root: HTMLElement, ctx: AdminCtx): Promise<vo
       h("div", {
         class: "info-box-detail",
         text:
-          "① 每个插件都锁定在收录时审核的那个 commit，并带有内容哈希：安装时逐字节校验，" +
-          "经由任何下载源（含第三方镜像）拿到的包只要与收录时不一致，一律拒绝安装。",
+          "① 索引与插件包都来自你配置的那台服务器。条目带有发布时算出的内容哈希，" +
+          "客户端下载后逐字节校验，对不上一律拒绝安装。",
       }),
-      h("div", {
-        class: "info-box-detail",
-        text:
-          "② 但收录目前只做机械校验（格式、清单一致性、不含可执行文件），" +
-          "代码是否有恶意行为由维护者人工判断，自动化的代码审核尚未启用。" +
-          "「在市场里」不等于「代码被审计过」，装之前仍请自行判断来源是否可信。",
-      }),
+      h("div", { class: "info-box-detail", text: reviewLine }),
       h("div", {
         class: "info-box-detail",
         text: "③ 插件申请的高危能力在安装后一律是未授权状态，需要你到插件详情里逐项开启。",
@@ -135,8 +157,10 @@ export async function renderMarket(root: HTMLElement, ctx: AdminCtx): Promise<vo
     if (e.author) bits.push(`作者 ${e.author}`);
     if (e.category) bits.push(e.category);
     if (e.fileCount) bits.push(`${e.fileCount} 个文件`);
-    // 明确告诉用户这是锁定版本安装，与「跟随分支」不同
-    bits.push(`锁定 ${e.revision.slice(0, 7)}`);
+    if (e.sizeBytes) bits.push(fmtSize(e.sizeBytes));
+    if (e.updatedAt) bits.push(`更新于 ${fmtDate(e.updatedAt)}`);
+    // 审核方式逐条目标注：同一个市场里可能混着「模型审过的」和「早期人工放行的」
+    if (e.reviewedBy) bits.push(`${e.reviewedBy} 审核`);
     meta.appendChild(h("div", { class: "plugin-cmds", text: bits.join("  ·  ") }));
 
     if (e.keywords.length) {
@@ -180,6 +204,7 @@ export async function renderMarket(root: HTMLElement, ctx: AdminCtx): Promise<vo
 
   function rerender(): void {
     listWrap.innerHTML = "";
+    trustWrap.replaceChildren(trustBlock(view));
     if (!view) {
       listWrap.appendChild(h("div", { class: "plugin-empty" }, h("div", { class: "plugin-empty-title", text: "加载中…" })));
       return;
@@ -197,7 +222,8 @@ export async function renderMarket(root: HTMLElement, ctx: AdminCtx): Promise<vo
             class: "plugin-empty-desc",
             text:
               view.origin === "remote"
-                ? "索引拉取成功，但里面还没有收录任何插件。你可以在「插件管理 → 安装插件」里粘贴仓库地址手动安装。"
+                ? "服务器上还没有上架任何插件。你可以在「插件管理 → 安装插件」里粘贴 Git 仓库地址手动安装，" +
+                  "或在「开发者中心」把自己的插件提交审核。"
                 : "拉不到索引，见上方原因。",
           }),
         ),
@@ -217,7 +243,15 @@ export async function renderMarket(root: HTMLElement, ctx: AdminCtx): Promise<vo
       // market_list 正常情况下不会 reject（失败也带缓存返回），走到这里说明命令本身出了问题
       console.error("market_list failed", err);
       ctx.toast(errText(err, "市场加载失败"));
-      view = { plugins: [], origin: "none", error: errText(err, "命令调用失败"), installed: {}, source: "" };
+      view = {
+        plugins: [],
+        origin: "none",
+        error: errText(err, "命令调用失败"),
+        installed: {},
+        source: "",
+        reviewMode: "",
+        reviewModel: "",
+      };
     } finally {
       loading = false;
       refreshBtn.disabled = false;
@@ -235,11 +269,14 @@ export async function renderMarket(root: HTMLElement, ctx: AdminCtx): Promise<vo
   );
 
   rerender();
-  root.append(h("div", { class: "launch-scroll" }, trustBlock(), subhead, listWrap));
+  root.append(h("div", { class: "launch-scroll" }, trustWrap, subhead, listWrap));
   await load();
 
   // 索引来源展示在最后：多数用户不关心，但自建/联调时必须能一眼看出连的是哪个市场
   const srcLine = h("div", { class: "launch-intro", text: "" });
   root.querySelector(".launch-scroll")?.appendChild(srcLine);
-  if (view) srcLine.textContent = `索引来源：${(view as MarketView).source}（可用环境变量 ITOOLS_REGISTRY 覆盖）`;
+  if (view) {
+    srcLine.textContent =
+      `市场服务器：${(view as MarketView).source}（在「设置 → 网络 → 服务器地址」里更改）`;
+  }
 }

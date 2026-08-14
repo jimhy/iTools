@@ -24,6 +24,9 @@ import type {
   DevKv,
   DevLogEntry,
   DevMockConfig,
+  PublishStatus,
+  Preflight,
+  Submission,
 } from "../types";
 
 // ---------- 设置 ----------
@@ -216,6 +219,17 @@ export const devLogClear = () => invoke<void>("dev_log_clear");
 export const devGetMock = () => invoke<DevMockConfig>("dev_get_mock");
 /** 保存云同步 Mock 配置（整包写入）。 */
 export const devSetMock = (cfg: DevMockConfig) => invoke<void>("dev_set_mock", { cfg });
+
+// ---------- 插件提审 ----------
+/** 查一个调试插件的发布状态（线上版本 + 提审历史）。**要联网**，会拉市场索引与提审接口。
+ *  任何一段查不到都会写进返回值的 error，UI 必须如实展示，不能渲染成「没有记录」。 */
+export const devPublishStatus = (id: string) => invoke<PublishStatus>("dev_publish_status", { id });
+/** 提审前的本地自检。只拦服务端**必然**会拒的那几条 —— 通过它不代表会过审。 */
+export const devPreflight = (id: string) => invoke<Preflight>("dev_preflight", { id });
+/** 打包并提交审核。返回服务端建立的提审单（状态一般是 reviewing）。 */
+export const devSubmitPlugin = (id: string) => invoke<Submission>("dev_submit_plugin", { id });
+/** 查一条提审单的详情（含模型裁决原文）。 */
+export const devSubmissionDetail = (id: string) => invoke<Submission>("dev_submission_detail", { id });
 
 // ---------- 插件市场 ----------
 /** 拉取市场列表。失败**不 reject**：会带着 error + 本地缓存返回，由 UI 如实呈现。 */

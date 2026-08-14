@@ -30,6 +30,17 @@ const CLOUD_TIMEOUT_SECS: u64 = 15;
 /// 两处各写一遍字面量迟早会分叉——改了默认值而提示还在说 8787，就是又一条误导用户的信息。
 pub const DEV_DEFAULT_ENDPOINT: &str = "http://127.0.0.1:8787";
 
+/// **内置默认端点**：用户没填、也没设环境变量时生效的官方服务地址。
+///
+/// 这是一条**产品决定**，与「不写死服务端地址」的初衷并不冲突，但要说清楚区别：
+/// 那条红线防的是「把私人服务器地址硬编码进发行版、用户不知情也改不掉」。这里的地址是
+/// iTools 的**公开官方服务**，且三点都成立——用户随时可以在「设置 → 网络」里改掉或清空、
+/// 环境变量优先级更高、界面上如实标注「当前生效的地址来自内置默认」。
+///
+/// 输入框**不预填**它（保持空），因为「空」在这里的语义是「跟随默认」而不是「不连服务器」；
+/// 预填进去反而会让用户以为这是自己填过的值，清空时不知道会回落到哪。
+pub const BUILTIN_DEFAULT_ENDPOINT: &str = "https://api.jimhy.cn";
+
 /// 用户在「账号 → 数据同步」里**手动填写**的云端地址（运行期从 `AppSettings.sync_endpoint` 同步进来）。
 /// 源码/二进制不含任何写死的服务端地址；地址只在运行期从环境变量或用户设置获得，绝不随仓库上传。
 static USER_ENDPOINT: RwLock<Option<String>> = RwLock::new(None);
@@ -56,8 +67,9 @@ pub fn set_user_endpoint(raw: &str) {
 /// 优先级：
 /// 1) `env`：环境变量 `ITOOLS_SYNC_ENDPOINT`（本机 / CI 显式覆盖，也是 dev 联调本地服务端的开关）；
 /// 2) `user`：用户在「账号 → 数据同步」里**手填**的服务器地址（`AppSettings.sync_endpoint`）；
-/// 3) `devDefault`：**仅 debug 构建**兜底 [`DEV_DEFAULT_ENDPOINT`]；
-/// 4) `none`：云端未接入（诚实降级为纯本地）。
+/// 3) `devDefault`：**仅 debug 构建**兜底 [`DEV_DEFAULT_ENDPOINT`]（开发时连本地服务端）；
+/// 4) `builtin`：[`BUILTIN_DEFAULT_ENDPOINT`]，官方默认服务；
+/// 5) `none`：**仅测试构建**——云端未接入（诚实降级为纯本地）。
 ///
 /// [`cloud_endpoint`] 与 [`endpoint_info`] 都只能走它：这两处一旦各写一遍优先级，
 /// 「设置里显示的地址」与「实际请求的地址」就会分叉——那正是用户这次困惑的根源
@@ -69,11 +81,15 @@ fn resolve_endpoint() -> (Option<String>, &'static str) {
     if let Some(ep) = USER_ENDPOINT.read().ok().and_then(|g| g.clone()) {
         return (Some(ep), "user");
     }
-    // dev 便利：debug 默认连本地 server（仅 dev；release/test 不启用、不写死生产地址、不违红线）。
+    // dev 便利：debug 默认连本地 server（开发期联调用；要连官方服务请设环境变量或在设置里填）。
     if cfg!(debug_assertions) && !cfg!(test) {
         return (Some(DEV_DEFAULT_ENDPOINT.to_string()), "devDefault");
     }
-    (None, "none")
+    // 测试里不给任何默认：否则一次跑偏的用例就会真的打到线上服务。
+    if cfg!(test) {
+        return (None, "none");
+    }
+    (Some(BUILTIN_DEFAULT_ENDPOINT.to_string()), "builtin")
 }
 
 /// 解析云端 base URL（优先级与来源判定见 [`resolve_endpoint`]）。
@@ -100,11 +116,14 @@ pub struct EndpointInfo {
     pub effective: Option<String>,
     /// 生效值来自哪一层：`"env"`（环境变量 `ITOOLS_SYNC_ENDPOINT`）
     /// | `"user"`（用户手填）| `"devDefault"`（**开发构建**的本地默认值，release 不存在）
-    /// | `"none"`（未接入）。
+    /// | `"builtin"`（内置的官方默认服务）| `"none"`（未接入）。
     pub source: String,
     /// 用户在「账号 → 数据同步」里手填的**原始值**（原样返回，可能为空串）。
-    /// 与 `effective` 不同时，说明生效的是更高优先级的来源（env）或兜底（devDefault）。
+    /// 与 `effective` 不同时，说明生效的是更高优先级的来源（env）或兜底（devDefault / builtin）。
     pub user_value: String,
+    /// 内置默认服务地址。前端拿它写「留空即使用官方默认服务（xxx）」这句提示——
+    /// 地址只有一个来源，前端不再各写一遍字面量（写两遍迟早分叉成假信息）。
+    pub builtin_default: String,
 }
 
 /// 命令：查询当前实际生效的同步服务器地址（「设置 → 网络」页签展示用）。
@@ -123,6 +142,7 @@ fn endpoint_info(raw_user: &str) -> EndpointInfo {
         effective,
         source: source.to_string(),
         user_value: raw_user.to_string(),
+        builtin_default: BUILTIN_DEFAULT_ENDPOINT.to_string(),
     }
 }
 

@@ -1,13 +1,24 @@
-//! 插件市场：索引拉取与**内容哈希**校验。
+//! 插件市场：索引拉取、插件包下载与**内容哈希**校验。
+//!
+//! # 市场在自建服务端上，不在 GitHub
+//!
+//! 早期版本的市场索引是 GitHub 仓库里的 `registry/index.json`，插件包从 GitHub 归档下载，
+//! 收录靠人工提 Issue/PR。现在索引与包**都由自建服务端提供**：
+//!
+//! - 索引：`GET {服务器}/api/market/index`
+//! - 插件包：`GET {服务器}/api/market/package/{name}`（zip）
+//!
+//! 服务器地址就是「设置 → 网络」里那一个（与云同步共用），用户没填时用内置默认服务。
+//! 作者在开发者中心点「提交审核」把包传上去，服务端跑大模型审核，通过即发布——
+//! 客户端这边不需要知道 GitHub 的任何事。
+//!
+//! 手动粘 Git 仓库地址安装那条路**仍然保留**（见 `install.rs`），它是「不经市场、自己装」的能力，
+//! 与市场是两条独立链路。
 //!
 //! # 内容哈希是这条信任链的收口
 //!
-//! 前几轮做了「第三方镜像竞速」来解决 GitHub 国内可达性问题，但镜像由第三方运营，
-//! 技术上有能力篡改传输内容——这条风险此前只能靠**披露**，没法消除。
-//!
-//! 市场收录的插件带上了审核时记录的内容哈希之后才真正闭环：不管插件包经由官方源还是
-//! 任何镜像下载，解压后算一遍哈希，对不上一律拒绝安装。镜像即使被控制，也只能让你**装不上**，
-//! 不能让你**装到被改过的代码**。
+//! 市场条目带着审核时算出的内容哈希，客户端下载解压后重算一遍比对，对不上一律拒绝安装。
+//! 这挡的是「传输途中包被改过」——包与索引来自同一台服务器，服务器本身是信任起点。
 //!
 //! # 为什么校验的是「内容」而不是 zip 本身
 //!
@@ -33,31 +44,22 @@
 //! `hash.mjs` 那边显式用 `Buffer.compare` 对齐了本实现，两边有同一组基准用例钉死
 //! （见本文件测试 `content_hash_matches_node_golden`）。
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::logging::ilog;
 
-use super::mirror;
-
-/// 索引坐标的环境变量覆盖，形如 `owner/repo@ref:path`。
-///
-/// 按项目红线「服务端地址可配置、不写死」：默认值指向本仓库的 `registry/`，
-/// 但任何人都能把客户端指向自己的索引（自建市场 / 内部分发 / 联调）。
-const REGISTRY_ENV: &str = "ITOOLS_REGISTRY";
-const DEFAULT_OWNER: &str = "jimhy";
-const DEFAULT_REPO: &str = "iTools";
-const DEFAULT_REF: &str = "main";
-const DEFAULT_PATH: &str = "registry/index.json";
-
 /// 索引缓存文件名（放在 `%LOCALAPPDATA%\itools\` 下，与镜像配置缓存同级）。
 const CACHE_FILE: &str = "market-index.json";
-/// 索引拉取超时与体积上限。索引是纯文本 JSON，2MB 足够放几千个条目。
-const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
+/// 索引拉取超时（秒）与体积上限。索引是纯文本 JSON，2MB 足够放几千个条目。
+const FETCH_TIMEOUT_SECS: u64 = 10;
 const MAX_INDEX_BYTES: u64 = 2 * 1024 * 1024;
+/// 插件包下载超时（秒）与体积上限。与 `install.rs` 的归档上限一致（32MB）。
+const PACKAGE_TIMEOUT_SECS: u64 = 120;
+const MAX_PACKAGE_BYTES: u64 = 32 * 1024 * 1024;
 
 // ==================== 索引 ====================
 
@@ -76,19 +78,31 @@ pub struct MarketEntry {
     pub description: String,
     #[serde(default)]
     pub author: String,
-    /// 安装源仓库，形如 `https://github.com/owner/repo`。
-    pub repo: String,
-    /// 仓库内子目录，空串 = 仓库根。
-    #[serde(default)]
-    pub path: String,
     #[serde(default)]
     pub version: String,
-    /// 审核时的完整 40 位 commit sha —— 客户端**只装这个确切 commit**。
-    pub revision: String,
+    /// 插件包在服务端的**相对**下载路径（如 `/api/market/package/deskbox`）。
+    ///
+    /// 服务端给的是相对路径，客户端拼上自己配置的服务器地址——这样反代、内网、端口转发
+    /// 都不影响下载，服务端也不需要知道自己被从哪个域名访问。
+    #[serde(default)]
+    pub package: String,
     /// 审核时算出的内容哈希（`sha256:…`）。空串表示索引里没给，
     /// 此时安装会**退化为不校验**并如实告知用户，绝不假装校验过。
     #[serde(default)]
     pub content_hash: String,
+    /// 审核该版本的模型名（如 `gpt-5.5`）。空串 = 没有自动审核记录。
+    /// UI 必须据此如实措辞：「由 X 自动审核」≠「人工审计过」。
+    #[serde(default)]
+    pub reviewed_by: String,
+    /// 上线时间与最近更新时间（Unix 毫秒；0 = 索引未提供）。
+    #[serde(default)]
+    pub published_at: i64,
+    #[serde(default)]
+    pub updated_at: i64,
+    #[serde(default)]
+    pub size_bytes: u64,
+    #[serde(default)]
+    pub readme: String,
     #[serde(default)]
     pub category: String,
     #[serde(default)]
@@ -123,73 +137,52 @@ pub struct MarketEntry {
 }
 
 impl MarketEntry {
-    /// 拼出可直接交给现有安装流程的 URL（与手工粘贴的形态完全一致）。
+    /// 本条目在安装记录里的来源标识（`itools-market://<name>`）。
     ///
-    /// 固定带 `#<40 位 sha>`，因此客户端装到的**必然**是审核过的那个 commit；
-    /// 这也让它在插件列表里天然显示为「已锁定」，不会被误当成可自动跟随分支更新。
-    pub fn install_url(&self) -> String {
-        let mut u = self.repo.clone();
-        if !self.path.is_empty() {
-            u.push_str("?path=");
-            u.push_str(&self.path);
-        }
-        u.push('#');
-        u.push_str(&self.revision);
-        u
+    /// 它不是可访问的 URL，只是一个**稳定的来源身份**：锁文件按它判「同源覆盖」，
+    /// 更新检查按它路由到市场分支而不是去请求 Git 托管站。
+    pub fn source_url(&self) -> String {
+        format!("{}{}", super::install::MARKET_SCHEME, self.name)
+    }
+
+    /// 插件包的完整下载地址（拼上当前配置的服务器地址）。
+    ///
+    /// 索引里给的是相对路径；服务端没给时按约定路径兜底，免得整个条目因为一个字段缺失而装不了。
+    pub fn package_url(&self, endpoint: &str) -> String {
+        let base = endpoint.trim_end_matches('/');
+        let rel = if self.package.is_empty() {
+            format!("/api/market/package/{}", self.name)
+        } else {
+            self.package.clone()
+        };
+        format!("{base}{}", if rel.starts_with('/') { rel } else { format!("/{rel}") })
     }
 }
 
 /// 索引文件的顶层结构。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MarketIndex {
     #[serde(default)]
     pub version: u32,
+    /// `llm` = 服务端启用了大模型自动审核；`manual` = 审核模型未接入，条目由维护者人工放行。
+    /// 客户端市场页据此如实措辞——「在市场里」到底意味着什么，用户有权知道准确答案。
+    #[serde(default)]
+    pub review_mode: String,
+    #[serde(default)]
+    pub review_model: String,
     #[serde(default)]
     pub plugins: Vec<MarketEntry>,
 }
 
-/// 索引的来源坐标（可被环境变量整体覆盖）。
-struct Coord {
-    owner: String,
-    repo: String,
-    git_ref: String,
-    path: String,
-}
-
-/// 解析 `ITOOLS_REGISTRY`（`owner/repo@ref:path`），任一段缺失或格式不对就整体回落默认值。
+/// 当前市场服务器地址（与云同步共用「设置 → 网络」里那一个）。
 ///
-/// 刻意**不做部分覆盖**：半个自定义坐标比默认值更难排查（用户以为指向了自己的索引，
-/// 实际只改了 owner）。要么整条生效，要么完全不生效并写日志。
-fn coord() -> Coord {
-    let fallback = || Coord {
-        owner: DEFAULT_OWNER.into(),
-        repo: DEFAULT_REPO.into(),
-        git_ref: DEFAULT_REF.into(),
-        path: DEFAULT_PATH.into(),
-    };
-    let Ok(raw) = std::env::var(REGISTRY_ENV) else {
-        return fallback();
-    };
-    let raw = raw.trim();
-    let parsed = (|| {
-        let (repo_part, path) = raw.split_once(':')?;
-        let (owner_repo, git_ref) = repo_part.split_once('@')?;
-        let (owner, repo) = owner_repo.split_once('/')?;
-        let ok = |s: &str| !s.is_empty() && !s.contains(char::is_whitespace);
-        (ok(owner) && ok(repo) && ok(git_ref) && ok(path)).then(|| Coord {
-            owner: owner.into(),
-            repo: repo.into(),
-            git_ref: git_ref.into(),
-            path: path.into(),
-        })
-    })();
-    match parsed {
-        Some(c) => c,
-        None => {
-            ilog!("[iTools] {REGISTRY_ENV} 格式不对（应为 owner/repo@ref:path），已回落默认索引");
-            fallback()
-        }
-    }
+/// 没配置时返回 `Err` 并给出可照做的指引——**不猜、不回落到某个写死的地址**。
+fn endpoint() -> Result<String, String> {
+    crate::account::cloud_endpoint().ok_or_else(|| {
+        "还没有配置服务器地址，插件市场不可用。请到「设置 → 网络 → 服务器地址」填写后重试。"
+            .to_string()
+    })
 }
 
 fn cache_path() -> Option<PathBuf> {
@@ -202,40 +195,86 @@ fn cache_path() -> Option<PathBuf> {
 /// **索引不做哈希校验**——它就是信任的起点（哈希从它那里来），
 /// 拿它自己校验自己没有意义。它的可信度由 HTTPS 与仓库归属保证。
 pub fn fetch_index() -> Result<MarketIndex, String> {
-    let c = coord();
-    let official_url = format!(
-        "https://raw.githubusercontent.com/{}/{}/{}/{}",
-        c.owner, c.repo, c.git_ref, c.path
-    );
-    let req = mirror::Request {
-        kind: mirror::Kind::Raw,
-        official_url,
-        official_label: mirror::official_label(mirror::OFFICIAL_HOST),
-        github: Some(mirror::GhCoord {
-            owner: c.owner,
-            repo: c.repo,
-            git_ref: c.git_ref,
-            path: c.path,
-        }),
-        auth: None,
-        timeout: FETCH_TIMEOUT,
-        max_bytes: MAX_INDEX_BYTES,
-        what: "拉取插件市场索引".to_string(),
-        expect_sha256: None,
-    };
-    let got = mirror::fetch(&req)?;
-    let index: MarketIndex = serde_json::from_slice(&got.bytes)
-        .map_err(|e| format!("插件市场索引解析失败: {e}（索引文件可能损坏或不是预期格式）"))?;
+    let ep = endpoint()?;
+    let url = format!("{}/api/market/index", ep.trim_end_matches('/'));
+    let bytes = fetch_capped(&url, FETCH_TIMEOUT_SECS, MAX_INDEX_BYTES, "拉取插件市场索引")?;
+    let index: MarketIndex = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("插件市场索引解析失败: {e}（服务端返回的可能不是索引，请核对服务器地址）"))?;
     if let Some(p) = cache_path() {
         if let Some(dir) = p.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
         // 缓存写失败不影响本次结果：内存里已经有索引了，下次重新拉一遍即可。
-        if let Err(e) = std::fs::write(&p, &got.bytes) {
+        if let Err(e) = std::fs::write(&p, &bytes) {
             ilog!("[iTools] 市场索引缓存写入失败（不影响本次使用）: {e}");
         }
     }
     Ok(index)
+}
+
+/// 下载已上线的插件包（zip 字节）。
+pub fn fetch_package(entry: &MarketEntry) -> Result<Vec<u8>, String> {
+    let ep = endpoint()?;
+    let url = entry.package_url(&ep);
+    fetch_capped(
+        &url,
+        PACKAGE_TIMEOUT_SECS,
+        MAX_PACKAGE_BYTES,
+        &format!("下载插件包 {}", entry.name),
+    )
+}
+
+/// 带超时与体积上限的 GET。
+///
+/// 走 [`crate::http`] 这个**唯一出站出口**，因此「设置 → 网络」里的代理配置对市场同样生效
+/// （直接 `ureq::get` 会绕过代理，那就又成了一个「开着却不生效」的开关）。
+fn fetch_capped(url: &str, timeout_secs: u64, max: u64, what: &str) -> Result<Vec<u8>, String> {
+    let resp = crate::http::get(url)
+        .timeout(std::time::Duration::from_secs(timeout_secs))
+        .call()
+        .map_err(|e| format!("{what}失败: {}", describe(e)))?;
+
+    // 先看声明长度：能提前拒掉超大响应，省得读完才发现
+    if let Some(len) = resp.header("Content-Length").and_then(|v| v.parse::<u64>().ok()) {
+        if len > max {
+            return Err(format!("{what}失败：响应体 {len} 字节超过上限 {max}"));
+        }
+    }
+    let mut buf = Vec::new();
+    resp.into_reader()
+        .take(max + 1)
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("{what}失败：读取响应出错: {e}"))?;
+    if buf.len() as u64 > max {
+        return Err(format!("{what}失败：响应体超过上限 {max} 字节"));
+    }
+    Ok(buf)
+}
+
+/// 把 ureq 错误翻成能照做的中文。
+///
+/// 直接把 `e.to_string()` 甩给用户，多数情况是一句 `https://…: connection refused`——
+/// 用户既不知道那是市场服务器还是别的什么，也不知道下一步该干嘛。
+fn describe(e: ureq::Error) -> String {
+    match e {
+        ureq::Error::Status(code, resp) => {
+            let body: String = resp
+                .into_string()
+                .unwrap_or_default()
+                .chars()
+                .take(200)
+                .collect();
+            match code {
+                404 => "HTTP 404：服务器上没有这个端点或插件（请确认服务器地址与版本）".to_string(),
+                429 => "HTTP 429：请求过于频繁，已被服务端限流，请稍后再试".to_string(),
+                500..=599 => format!("HTTP {code}：服务端出错。{body}"),
+                _ => format!("HTTP {code}。{body}"),
+            }
+        }
+        ureq::Error::Transport(t) => {
+            format!("连接失败：{t}（服务器地址是否正确？服务端是否在运行？）")
+        }
+    }
 }
 
 /// 读本地缓存的索引（拉取失败时的兜底）。没有缓存或解析失败都返回 None。
@@ -262,8 +301,13 @@ pub struct MarketView {
     pub error: Option<String>,
     /// 当前已安装的插件名 → 版本，供 UI 标注「已安装 / 可更新」。
     pub installed: std::collections::HashMap<String, String>,
-    /// 索引来源的可读描述（如 `jimhy/iTools@main:registry/index.json`），便于用户确认自己连的是哪个市场。
+    /// 索引来源的可读描述（当前服务器地址），便于用户确认自己连的是哪个市场。
     pub source: String,
+    /// 服务端的审核方式：`llm` = 大模型自动审核；`manual` = 未接入自动审核，人工放行。
+    /// 空串 = 索引里没说（老服务端）。UI 必须据此如实措辞。
+    pub review_mode: String,
+    /// 审核模型名（`review_mode = "llm"` 时有值）。
+    pub review_model: String,
 }
 
 /// 命令：拉取市场列表。
@@ -283,8 +327,7 @@ pub async fn market_list(
                 .collect()
         })
         .unwrap_or_default();
-    let c = coord();
-    let source = format!("{}/{}@{}:{}", c.owner, c.repo, c.git_ref, c.path);
+    let source = crate::account::cloud_endpoint().unwrap_or_else(|| "（未配置服务器地址）".into());
 
     let fetched = tauri::async_runtime::spawn_blocking(fetch_index)
         .await
@@ -297,6 +340,8 @@ pub async fn market_list(
             error: None,
             installed,
             source,
+            review_mode: index.review_mode,
+            review_model: index.review_model,
         },
         Err(e) => match cached_index() {
             Some(index) => MarketView {
@@ -305,6 +350,8 @@ pub async fn market_list(
                 error: Some(e),
                 installed,
                 source,
+                review_mode: index.review_mode,
+                review_model: index.review_model,
             },
             None => MarketView {
                 plugins: Vec::new(),
@@ -312,6 +359,8 @@ pub async fn market_list(
                 error: Some(e),
                 installed,
                 source,
+                review_mode: String::new(),
+                review_model: String::new(),
             },
         },
     })
@@ -319,10 +368,9 @@ pub async fn market_list(
 
 /// 命令：从市场安装某个插件（预览阶段）。
 ///
-/// 与手动粘 URL 安装走**同一条**链路（同一套解压、路径、清单、可执行文件校验），
-/// 唯一的加强是带上索引给的内容哈希：装到的必须逐字节等于收录时审核过的那份，
-/// 否则拒绝。这也是「第三方镜像可篡改传输内容」这条风险的收口——
-/// 镜像即便被控制，也只能让你装不上，不能让你装到被改过的代码。
+/// 与手动粘 URL 安装共用**同一套**解压、路径、清单、可执行文件校验（`install.rs` 里那一份），
+/// 差别只在包从哪来、以及带不带可信哈希：市场条目带着审核时算出的内容哈希，
+/// 装到的必须逐字节等于审核过的那份，否则拒绝。
 ///
 /// 确认安装仍走 `plugin_install_confirm`（token 相同），不另开一条落地路径。
 #[tauri::command(async)]
@@ -352,17 +400,32 @@ pub async fn market_install_preview(
     }
 
     // 没有哈希就如实降级为「不校验」，绝不假装校验过。
-    // 正常情况下 CI 一定会写入 contentHash，走到这里说明索引是手工改过或版本过旧。
+    // 正常情况下服务端发布时一定会写入 contentHash，走到这里说明索引是手工改过或版本过旧。
     let expect = (!entry.content_hash.is_empty()).then(|| entry.content_hash.clone());
     if expect.is_none() {
         ilog!("[iTools] 市场条目 {name} 没有 contentHash，本次安装将不做内容校验");
     }
 
-    // 失败原因落日志：安装是「网络 + 解压 + 落盘」的长链路，UI 上那行红字一闪而过、
-    // 用户复述常常缺关键信息，没有日志就只能靠猜（本轮就为此绕了好几圈）。
-    let preview = super::install::preview_from_market(&entry.install_url(), expect, &registry, &staging)
+    let source_label = crate::account::cloud_endpoint().unwrap_or_default();
+    let entry_for_dl = entry.clone();
+    let bytes = tauri::async_runtime::spawn_blocking(move || fetch_package(&entry_for_dl))
         .await
-        .inspect_err(|e| ilog!("[iTools] 市场安装预览失败 {name}（源 {}）：{e}", entry.install_url()))?;
+        .map_err(|e| format!("插件包下载任务异常终止: {e}"))?
+        .inspect_err(|e| ilog!("[iTools] 市场插件包下载失败 {name}：{e}"))?;
+
+    // 失败原因落日志：安装是「网络 + 解压 + 落盘」的长链路，UI 上那行红字一闪而过、
+    // 用户复述常常缺关键信息，没有日志就只能靠猜。
+    let preview = super::install::preview_from_market_package(
+        bytes,
+        &entry.source_url(),
+        &entry.version,
+        &source_label,
+        expect,
+        &registry,
+        &staging,
+    )
+    .await
+    .inspect_err(|e| ilog!("[iTools] 市场安装预览失败 {name}：{e}"))?;
 
     // 纵深防御：索引条目声称的 name 必须与包里 plugin.json 的 name 一致。
     // 有 contentHash 时这条其实是冗余的（哈希对上就说明整包内容一致），
@@ -379,6 +442,27 @@ pub async fn market_install_preview(
         ));
     }
     Ok(preview)
+}
+
+/// 查一个插件在市场里的当前版本（供更新检查）。
+///
+/// 直接用索引，不额外发请求——索引本来就带着每个插件的 `version`。
+pub fn latest_version(name: &str) -> Result<Option<String>, String> {
+    let index = fetch_index()?;
+    Ok(index
+        .plugins
+        .into_iter()
+        .find(|p| p.name == name)
+        .map(|p| p.version))
+}
+
+/// 查一个插件在市场里的完整条目（供更新时下载新包）。
+pub fn find_entry(name: &str) -> Result<MarketEntry, String> {
+    fetch_index()?
+        .plugins
+        .into_iter()
+        .find(|p| p.name == name)
+        .ok_or_else(|| format!("市场里已经没有名为「{name}」的插件了"))
 }
 
 // ==================== 内容哈希 ====================

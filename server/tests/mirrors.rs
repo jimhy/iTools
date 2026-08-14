@@ -207,11 +207,21 @@ fn serve(registry: Arc<MirrorRegistry>, env: &[(&str, &str)]) -> Router {
         config.mirrors.rate_limit_window_sec as i64 * 1000,
         clock.clone(),
     ));
+    let market_limiter = SlidingWindowLimiter::new(RateLimiterOptions::new(
+        config.market.rate_limit_max,
+        config.market.rate_limit_window_sec as i64 * 1000,
+        clock.clone(),
+    ));
+    let store = Arc::new(MariaDbStore::lazy(&config.db));
+    let config = Arc::new(config);
+    let market = itools_sync::market::MarketService::new(store.clone(), config.clone(), clock.clone());
     build_router(Arc::new(AppState {
-        store: Arc::new(MariaDbStore::lazy(&config.db)),
-        config: Arc::new(config),
+        store,
+        config,
         mirrors: registry,
         mirror_limiter: Arc::new(limiter),
+        market,
+        market_limiter: Arc::new(market_limiter),
         clock,
     }))
 }

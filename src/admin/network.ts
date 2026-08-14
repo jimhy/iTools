@@ -153,6 +153,15 @@ export async function renderNetwork(root: HTMLElement, ctx: AdminCtx): Promise<v
       return;
     }
     epValue.classList.remove("value-badge-muted");
+    // 编辑框的说明与 placeholder 都由后端给的 builtinDefault 驱动：
+    // 「留空」的真实语义是「跟随官方默认服务」，不是「不连服务器」——写错这句就是误导。
+    const builtin = (info.builtinDefault ?? "").trim();
+    if (builtin) {
+      epHint.textContent = `留空即使用官方默认服务（${builtin}）；填入则改连你自己的服务端。地址只保存在本机。`;
+      epInput.placeholder = `留空 = ${builtin}`;
+    } else {
+      epHint.textContent = "留空即为「仅本地」；地址只保存在本机，不随程序内置。";
+    }
     const filled = info.userValue.trim();
     // effective 在 none 之外的三种来源都应非空；万一后端给了空，如实说「未返回地址」，不编造
     const addr = (info.effective ?? "").trim() || "（后端未返回地址）";
@@ -172,6 +181,14 @@ export async function renderNetwork(root: HTMLElement, ctx: AdminCtx): Promise<v
         epDesc.textContent =
           "开发模式（debug 构建）默认的本地服务端地址 —— 你并没有填过服务器地址。" +
           "没启动本地服务端时连不上属正常现象；正式版不会使用这个默认值。";
+        break;
+      case "builtin":
+        // 「用户没填」不等于「没连服务器」：不写明这一条，用户会以为自己处在纯本地状态，
+        // 而实际上登录、云同步、插件市场都在连这个地址。
+        epValue.textContent = addr;
+        epDesc.textContent =
+          "iTools 官方默认服务 —— 你没有填写地址，所以用的是内置默认值。" +
+          "账号登录、云同步、插件市场与插件提审都走它；要改用自建服务端，在下面填入地址即可。";
         break;
       case "none":
         epValue.textContent = "未接入云端";
@@ -297,9 +314,17 @@ export async function renderNetwork(root: HTMLElement, ctx: AdminCtx): Promise<v
     );
   }
 
+  // 说明文字里的默认地址取自后端返回的 builtinDefault，不在前端另写一遍字面量：
+  // 写两遍迟早分叉，那时界面上这句话就成了假信息。
+  const epHint = h("div", { class: "set-row-desc", text: "地址只保存在本机；正在读取默认服务地址…" });
   const editGroup = group(
     "服务器地址",
-    row("地址", "留空即为「仅本地」；地址只保存在本机，不随程序内置", epInput, epSave),
+    h(
+      "div",
+      { class: "set-row" },
+      h("div", { class: "set-row-text" }, h("div", { class: "set-row-label", text: "地址" }), epHint),
+      h("div", { class: "set-row-control" }, epInput, epSave),
+    ),
     syncBox,
   );
 
