@@ -244,14 +244,16 @@ mod tests {
             source: "https://api.example.com".into(),
             review_mode: "llm".into(),
             review_model: "gpt-5.5".into(),
+            fetched_at: 0,
+            stale: false,
         };
         freeze(
             &mut out,
             "MarketView",
             &view,
-            &["plugins", "origin", "error", "installed", "source", "reviewMode", "reviewModel"],
+            &["plugins", "origin", "error", "installed", "source", "reviewMode", "reviewModel", "fetchedAt", "stale"],
             "origin 区分 remote/cache/none —— 拿缓存与刚更新过对用户是不同的信息，不能只给 plugins。\
-             reviewMode 区分 llm（大模型自动审核）/ manual（未接入自动审核，人工放行），市场页文案据此分支。",
+             reviewMode 区分 llm（大模型自动审核）/ manual（未接入自动审核，人工放行），市场页文案据此分支。             stale=true 表示这份数据超过新鲜期（1 小时）该更新了，前端据此后台静默刷新——             注意它与 origin 是两件事：origin=cache 且 error 为空是**正常的缓存命中**，             不能渲染成「没能拉到最新」那种故障文案。",
         );
 
         // ---------- 安装 / 更新（install.rs） ----------

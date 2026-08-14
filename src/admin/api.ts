@@ -232,8 +232,12 @@ export const devSubmitPlugin = (id: string) => invoke<Submission>("dev_submit_pl
 export const devSubmissionDetail = (id: string) => invoke<Submission>("dev_submission_detail", { id });
 
 // ---------- 插件市场 ----------
-/** 拉取市场列表。失败**不 reject**：会带着 error + 本地缓存返回，由 UI 如实呈现。 */
-export const marketList = () => invoke<MarketView>("market_list");
+/** 拉取市场列表。失败**不 reject**：会带着 error + 本地缓存返回，由 UI 如实呈现。
+ *
+ *  `force=false`（默认）：缓存还在就直接返回它，**一个请求都不发**；返回值的 `stale`
+ *  告诉你这份数据是不是该更新了。`force=true`：无视缓存真拉一次（用户点「刷新」时用）。
+ *  推荐用法：先 marketList() 立即渲染，若 stale 再后台 marketList(true) 重绘。 */
+export const marketList = (force = false) => invoke<MarketView>("market_list", { force });
 /** 从市场安装（预览阶段）。与手动粘 URL 走同一条链路，额外带上索引给的内容哈希校验。
  *  确认安装仍调 pluginInstallConfirm(token)。 */
 export const marketInstallPreview = (name: string) =>

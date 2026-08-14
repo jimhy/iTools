@@ -57,14 +57,16 @@ export async function renderMarket(root: HTMLElement, ctx: AdminCtx): Promise<vo
   const refreshBtn = h("button", { class: "icon-btn", title: "重新拉取市场索引", html: REFRESH });
 
   function statusBlock(v: MarketView): HTMLElement | null {
-    // 拉取失败但有缓存可用 → 提示级；完全没数据 → 告警级。
-    // 「正常降级」与「真的不可用」必须分开呈现，前者渲染成故障会误导用户。
-    if (v.origin === "cache") {
+    // ⚠ origin="cache" 有两种截然不同的情况，不能用同一句话糊过去：
+    //   ① error 非空 → 真的拉失败了，在用旧数据兜底（要如实说明原因）；
+    //   ② error 为空 → 缓存还在新鲜期内，**这是正常的**（本来就不该每次都请求）。
+    // 把 ② 也写成「没能拉到最新」，就是把正常行为渲染成故障——那是假信息。
+    if (v.origin === "cache" && v.error) {
       return h(
         "div",
         { class: "info-box" },
         h("div", { text: "没能拉到最新的市场索引，当前展示的是上次缓存的内容。" }),
-        v.error ? h("div", { class: "info-box-detail", text: `失败原因：${v.error}` }) : null,
+        h("div", { class: "info-box-detail", text: `失败原因：${v.error}` }),
       );
     }
     if (v.origin === "none") {
@@ -189,7 +191,7 @@ export async function renderMarket(root: HTMLElement, ctx: AdminCtx): Promise<vo
     installBtn.addEventListener("click", () => {
       openInstallModal({
         toast: ctx.toast,
-        onInstalled: () => void load(),
+        onInstalled: () => void load(true),
         source: {
           title: `从市场安装 ${e.displayName || e.name}`,
           // 市场专用预览：会带上索引里的内容哈希做逐字节校验
@@ -205,6 +207,7 @@ export async function renderMarket(root: HTMLElement, ctx: AdminCtx): Promise<vo
   function rerender(): void {
     listWrap.innerHTML = "";
     trustWrap.replaceChildren(trustBlock(view));
+    freshEl.textContent = freshText(view);
     if (!view) {
       listWrap.appendChild(h("div", { class: "plugin-empty" }, h("div", { class: "plugin-empty-title", text: "加载中…" })));
       return;
@@ -233,12 +236,17 @@ export async function renderMarket(root: HTMLElement, ctx: AdminCtx): Promise<vo
     for (const e of view.plugins) listWrap.appendChild(card(e, view.installed[e.name]));
   }
 
-  async function load(): Promise<void> {
+  /** 加载策略（stale-while-revalidate）：
+   *  1. 先要缓存（force=false）—— 有就立刻渲染，不转圈、不发请求；
+   *  2. 若后端标了 stale（超过 1 小时没更新），再**后台**拉一次并重绘；
+   *  3. 点刷新按钮 = 显式意图，直接 force=true。
+   *  于是常见路径（一小时内反复进市场页）零请求、瞬开，而数据该新的时候会自己变新。 */
+  async function load(force = false): Promise<void> {
     if (loading) return;
     loading = true;
     refreshBtn.disabled = true;
     try {
-      view = await api.marketList();
+      view = await api.marketList(force);
     } catch (err) {
       // market_list 正常情况下不会 reject（失败也带缓存返回），走到这里说明命令本身出了问题
       console.error("market_list failed", err);
@@ -251,22 +259,42 @@ export async function renderMarket(root: HTMLElement, ctx: AdminCtx): Promise<vo
         source: "",
         reviewMode: "",
         reviewModel: "",
+        fetchedAt: 0,
+        stale: true,
       };
     } finally {
       loading = false;
       refreshBtn.disabled = false;
       rerender();
     }
+    // 缓存过期 → 后台静默更新一次再重绘。不 await：让用户先看到内容。
+    // 只在非强制路径触发，避免「强制拉完仍标 stale」时无限递归。
+    if (!force && view?.stale) void load(true);
   }
 
-  refreshBtn.addEventListener("click", () => void load());
+  refreshBtn.addEventListener("click", () => void load(true));
 
+  // 数据新鲜度：让用户一眼知道自己看的是不是新的（缓存命中时尤其重要）
+  const freshEl = h("span", { class: "launch-subhead-sub", text: "" });
   const subhead = h(
     "div",
     { class: "launch-subhead" },
     h("span", { class: "launch-subhead-title", text: "插件市场" }),
+    freshEl,
     h("div", { class: "launch-actions" }, refreshBtn),
   );
+
+  /** 「刚刚 / N 分钟前 / N 小时前 / 具体日期」——0 或未知一律不显示，不编造时间。 */
+  function freshText(v: MarketView | null): string {
+    if (!v || !v.fetchedAt) return "";
+    const diff = Date.now() - v.fetchedAt;
+    if (diff < 0) return "";
+    const mins = Math.floor(diff / 60000);
+    const when =
+      mins < 1 ? "刚刚更新" : mins < 60 ? `${mins} 分钟前更新` : mins < 1440 ? `${Math.floor(mins / 60)} 小时前更新` : fmtDate(v.fetchedAt) + " 更新";
+    // 后台正在拉新数据时如实说一声，免得用户以为界面卡住了
+    return v.stale ? `${when}，正在检查更新…` : when;
+  }
 
   rerender();
   root.append(h("div", { class: "launch-scroll" }, trustWrap, subhead, listWrap));

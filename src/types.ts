@@ -792,4 +792,9 @@ export interface MarketView {
   reviewMode: string;
   /** 审核模型名（reviewMode="llm" 时有值） */
   reviewModel: string;
+  /** 这批数据是什么时候拿到的（Unix 毫秒；0 = 未知 / 无数据）。UI 用它显示「更新于 X 前」。 */
+  fetchedAt: number;
+  /** 这批数据已过新鲜期（默认 1 小时）→ 前端应在后台静默 marketList(true) 再重绘。
+   *  与 origin 是两件事：origin 说数据从哪来，stale 说该不该更新。 */
+  stale: boolean;
 }

@@ -3307,6 +3307,13 @@ select {
   margin-top: 14px;
 }
 
+/* 市场页副标题旁的「数据新鲜度」小字：缓存命中时告诉用户看的是什么时候的数据 */
+.launch-subhead-sub {
+  margin-left: 10px;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
 /* ---------- 开发者中心「发布」tab（提审与审核状态） ---------- */
 
 .dev-pub-card {

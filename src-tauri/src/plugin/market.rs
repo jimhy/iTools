@@ -54,6 +54,12 @@ use crate::logging::ilog;
 
 /// 索引缓存文件名（放在 `%LOCALAPPDATA%\itools\` 下，与镜像配置缓存同级）。
 const CACHE_FILE: &str = "market-index.json";
+/// 索引缓存的新鲜期：**1 小时**。
+///
+/// 进市场页时先把缓存直接渲染出来（不转圈），超过这个时长才在后台悄悄更新一次——
+/// 索引是低频变化的数据（有人提审通过才变），每次进页面都真拉一次既慢又浪费。
+/// 用户点「刷新」按钮是显式意图，无视 TTL 直接拉。
+const CACHE_TTL_MS: i64 = 60 * 60 * 1000;
 /// 索引拉取超时（秒）与体积上限。索引是纯文本 JSON，2MB 足够放几千个条目。
 const FETCH_TIMEOUT_SECS: u64 = 10;
 const MAX_INDEX_BYTES: u64 = 2 * 1024 * 1024;
@@ -189,6 +195,25 @@ fn cache_path() -> Option<PathBuf> {
     dirs::data_local_dir().map(|d| d.join("itools").join(CACHE_FILE))
 }
 
+/// 缓存文件的外层结构：索引本体 + **这份数据是什么时候拿到的**。
+///
+/// 时间戳写进文件内容而不是靠 mtime：备份还原、同步盘、复制粘贴都会改 mtime，
+/// 那样算出来的「新鲜度」是假的——而这个值直接决定要不要跳过一次网络请求。
+#[derive(Serialize, Deserialize)]
+struct CachedIndex {
+    /// Unix 毫秒。缺失（老格式缓存）按 0 读入 → 一律视为已过期，会重新拉一次。
+    #[serde(default)]
+    fetched_at: i64,
+    index: MarketIndex,
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 /// 从远端拉取索引。走 [`mirror::fetch`]，因此自动享受「官方抢跑 → 镜像兜底」与代理设置：
 /// 拉索引本身在国内同样会被 GitHub 可达性拖住，没理由让它比装插件更难。
 ///
@@ -200,16 +225,28 @@ pub fn fetch_index() -> Result<MarketIndex, String> {
     let bytes = fetch_capped(&url, FETCH_TIMEOUT_SECS, MAX_INDEX_BYTES, "拉取插件市场索引")?;
     let index: MarketIndex = serde_json::from_slice(&bytes)
         .map_err(|e| format!("插件市场索引解析失败: {e}（服务端返回的可能不是索引，请核对服务器地址）"))?;
-    if let Some(p) = cache_path() {
-        if let Some(dir) = p.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        // 缓存写失败不影响本次结果：内存里已经有索引了，下次重新拉一遍即可。
-        if let Err(e) = std::fs::write(&p, &bytes) {
-            ilog!("[iTools] 市场索引缓存写入失败（不影响本次使用）: {e}");
-        }
-    }
+    write_cache(&index);
     Ok(index)
+}
+
+/// 把索引连同抓取时间写进缓存。写失败只记日志——内存里已经有索引了，不影响本次使用。
+fn write_cache(index: &MarketIndex) {
+    let Some(p) = cache_path() else { return };
+    if let Some(dir) = p.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let payload = CachedIndex {
+        fetched_at: now_ms(),
+        index: index.clone(),
+    };
+    match serde_json::to_vec(&payload) {
+        Ok(bytes) => {
+            if let Err(e) = std::fs::write(&p, bytes) {
+                ilog!("[iTools] 市场索引缓存写入失败（不影响本次使用）: {e}");
+            }
+        }
+        Err(e) => ilog!("[iTools] 市场索引缓存序列化失败: {e}"),
+    }
 }
 
 /// 下载已上线的插件包（zip 字节）。
@@ -277,11 +314,18 @@ fn describe(e: ureq::Error) -> String {
     }
 }
 
-/// 读本地缓存的索引（拉取失败时的兜底）。没有缓存或解析失败都返回 None。
-pub fn cached_index() -> Option<MarketIndex> {
+/// 读缓存，返回 `(索引, 抓取时间毫秒)`。
+///
+/// 兼容**老格式**（文件里直接是 `MarketIndex`，没有外层时间戳）：解析成功但抓取时间按 0 记，
+/// 于是一律判为已过期、会重新拉一次。升级后第一次进市场页多一次请求，之后就正常了——
+/// 比「把老缓存当成刚拉的」要诚实得多。
+fn read_cache() -> Option<(MarketIndex, i64)> {
     let p = cache_path()?;
     let bytes = std::fs::read(p).ok()?;
-    serde_json::from_slice(&bytes).ok()
+    if let Ok(c) = serde_json::from_slice::<CachedIndex>(&bytes) {
+        return Some((c.index, c.fetched_at));
+    }
+    serde_json::from_slice::<MarketIndex>(&bytes).ok().map(|i| (i, 0))
 }
 
 // ==================== 命令 ====================
@@ -308,6 +352,14 @@ pub struct MarketView {
     pub review_mode: String,
     /// 审核模型名（`review_mode = "llm"` 时有值）。
     pub review_model: String,
+    /// 这批数据是什么时候拿到的（Unix 毫秒；0 = 未知 / 无数据）。
+    /// UI 用它显示「更新于 X 分钟前」，让用户知道自己看的是不是新的。
+    pub fetched_at: i64,
+    /// 这批数据**已过新鲜期**（默认 1 小时），前端应在后台静默刷新一次再重绘。
+    ///
+    /// 它与 `origin` 是两件事：`origin` 说数据从哪来（远端/缓存/没有），
+    /// `stale` 说这份数据该不该更新。缓存但新鲜 → 不需要再请求。
+    pub stale: bool,
 }
 
 /// 命令：拉取市场列表。
@@ -316,8 +368,10 @@ pub struct MarketView {
 /// 用户仍然可以看缓存里的插件、也仍然可以手动粘 URL 安装。但失败原因必须原样呈现。
 #[tauri::command(async)]
 pub async fn market_list(
+    force: Option<bool>,
     registry: tauri::State<'_, super::PluginRegistry>,
 ) -> Result<MarketView, String> {
+    let force = force.unwrap_or(false);
     let installed: std::collections::HashMap<String, String> = registry
         .plugins
         .read()
@@ -329,39 +383,42 @@ pub async fn market_list(
         .unwrap_or_default();
     let source = crate::account::cloud_endpoint().unwrap_or_else(|| "（未配置服务器地址）".into());
 
+    let view = |index: MarketIndex, origin: &str, error: Option<String>, at: i64, stale: bool| MarketView {
+        plugins: index.plugins,
+        origin: origin.to_string(),
+        error,
+        installed: installed.clone(),
+        source: source.clone(),
+        review_mode: index.review_mode,
+        review_model: index.review_model,
+        fetched_at: at,
+        stale,
+    };
+
+    // 非强制时先看缓存：**还新鲜就直接返回，一个请求都不发**。
+    // 这是「进市场页不该转圈」的落点——索引是低频变化的数据，没必要每次都真拉。
+    if !force {
+        if let Some((index, at)) = tauri::async_runtime::spawn_blocking(read_cache)
+            .await
+            .map_err(|e| format!("读取市场缓存任务异常终止: {e}"))?
+        {
+            let stale = now_ms().saturating_sub(at) > CACHE_TTL_MS;
+            // 过期也先把缓存给出去（stale=true），由前端在后台再调一次 force 刷新。
+            // 「先看到旧的、随后自动变新」比「盯着转圈等网络」体验好得多，且信息如实标注。
+            return Ok(view(index, "cache", None, at, stale));
+        }
+    }
+
     let fetched = tauri::async_runtime::spawn_blocking(fetch_index)
         .await
         .map_err(|e| format!("市场索引任务异常终止: {e}"))?;
 
     Ok(match fetched {
-        Ok(index) => MarketView {
-            plugins: index.plugins,
-            origin: "remote".into(),
-            error: None,
-            installed,
-            source,
-            review_mode: index.review_mode,
-            review_model: index.review_model,
-        },
-        Err(e) => match cached_index() {
-            Some(index) => MarketView {
-                plugins: index.plugins,
-                origin: "cache".into(),
-                error: Some(e),
-                installed,
-                source,
-                review_mode: index.review_mode,
-                review_model: index.review_model,
-            },
-            None => MarketView {
-                plugins: Vec::new(),
-                origin: "none".into(),
-                error: Some(e),
-                installed,
-                source,
-                review_mode: String::new(),
-                review_model: String::new(),
-            },
+        Ok(index) => view(index, "remote", None, now_ms(), false),
+        // 拉取失败：有缓存就用缓存并**如实带上失败原因**，绝不把「拿着旧数据」说成「刚更新过」
+        Err(e) => match read_cache() {
+            Some((index, at)) => view(index, "cache", Some(e), at, true),
+            None => view(MarketIndex::default(), "none", Some(e), 0, true),
         },
     })
 }

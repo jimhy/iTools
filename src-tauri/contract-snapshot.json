@@ -196,12 +196,14 @@
   ],
   "MarketView": [
     "error",
+    "fetchedAt",
     "installed",
     "origin",
     "plugins",
     "reviewMode",
     "reviewModel",
-    "source"
+    "source",
+    "stale"
   ],
   "MirrorConfigView": [
     "fetchedAt",
