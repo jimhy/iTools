@@ -40,13 +40,18 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # 默认服务端地址由**构建期**注入，源码里一个字符都不写（公开仓库不暴露运维拓扑，
-          # 克隆仓库自己编译的人也不会莫名其妙连到官方服务器上）。
-          # 在仓库 Settings → Secrets and variables → Actions 里配 ITOOLS_DEFAULT_ENDPOINT，
-          # 形如 https://你的域名:端口（**端口不能省**）。
-          # 没配这个 secret 时构建照常成功，只是发行版没有默认地址——
-          # 用户需在「设置 → 网络」自己填，界面会如实显示「云端未接入」。
-          ITOOLS_DEFAULT_ENDPOINT: ${{ secrets.ITOOLS_DEFAULT_ENDPOINT }}
+          # ⚠ **这里刻意不注入 ITOOLS_DEFAULT_ENDPOINT**（仓库里那个 secret 保留不动，
+          # 只是这条流水线不再用它）。
+          #
+          # 分发策略是两条线，产物不同：
+          # - **GitHub Release（开源版）**：本流水线产出，**不含任何服务端地址**。
+          #   开源版不提供服务器——克隆仓库自己编译的人、从 GitHub 下载的人，
+          #   拿到的都是一个「云端未接入」的干净客户端，需要自己在「设置 → 网络」填地址。
+          # - **官网下载（自建服务版）**：**本地打包**，构建时显式带上
+          #   `ITOOLS_DEFAULT_ENDPOINT=https://…:端口`，产物上传到官网服务器分发。
+          #
+          # 别为了图省事把 secret 加回来：那会让 GitHub 上的开源包重新带上运维拓扑，
+          # 也让所有下载者的客户端默认连到自建服务器上。
         with:
           tagName: ${{ github.event.inputs.version || github.ref_name }}
           releaseName: "iTools ${{ github.event.inputs.version || github.ref_name }}"
