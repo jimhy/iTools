@@ -24,56 +24,35 @@ use crate::settings::SettingsStore;
 
 /// 连上来之后先给模型看的总说明。**直接影响 AI 会不会用对这套工具**，
 /// 所以这里写的是「怎么干活」的流程，而不是罗列有哪些函数。
-pub const SERVER_INSTRUCTIONS: &str = r#"这是 iTools 插件开发环境的 MCP 服务器。iTools 是 Windows 上的键盘驱动效率启动器，
+pub const SERVER_INSTRUCTIONS: &str = r#"iTools 插件开发环境的 MCP 服务器。iTools 是 Windows 上的键盘驱动效率启动器，
 插件是**纯前端页面**（HTML/CSS/JS），通过 window.itools.* 调用宿主能力。
 
-开始写插件之前，**先调 read_docs 读规范**（至少读 "开发规范" 那份）——插件的目录结构、
-plugin.json 字段、可用的 window.itools API、权限模型都在里面，凭猜写出来的插件装不上。
+**先看你手上有没有插件开发规范**（装了 itools-plugin-dev skill 的话它已经在你上下文里）。
+没有就先调 read_docs 读「开发规范」——目录结构、plugin.json 字段、window.itools API、
+权限模型都在里面，凭猜写出来的插件装不上。
 
-典型工作流：
-1. read_docs("开发规范")               了解怎么写
-2. 在用户的调试目录里创建插件目录       （用你的文件工具，路径见 list_plugins 返回的 dirs）
-3. rescan → list_plugins               确认被扫到，并检查 issues 里有没有 error
-4. run_plugin                          打开调试窗口实际跑一次
-5. read_logs                           看插件发出的调用、console 输出与报错
-6. 反复改 → rescan → run_plugin → read_logs
-7. **改 plugin.json 的 version**       已上线过的插件必须先升版本号（规则见下）
-8. preflight                           发布前自检（会现查线上版本并比对版本号）
-9. submit                              提交审核（服务端会跑机械校验 + 大模型读代码）
-10. publish_status                     查审核结论；被驳回时里面有模型给出的逐条理由
+工作流：建插件目录（路径见 list_plugins 返回的 dirs）→ rescan → list_plugins 查 issues →
+run_plugin 跑一次 → read_logs 看调用与报错 → 反复改 → **升 version** → preflight → submit → publish_status。
 
-════════ 版本号规则（最容易卡住的一步，请主动做，别等被拦） ════════
+════════ 版本号规则（最容易卡住的一步，主动做，别等被拦） ════════
 
-**iTools 不会自动升版本号。** 它只来自 plugin.json 的 version 字段，得你用文件工具改。
+**iTools 不会自动升版本号**，它只来自 plugin.json 的 version 字段，得你用文件工具改。
 
-何时必须升：
-- 只要 preflight / publish_status 里的 onlineVersion 不是 null（= 已上线过），
-  提交前就必须把 version 改到**严格高于**它 —— 哪怕只改了一行代码。
-- 首次提审（onlineVersion 为 null）没有这个约束，填什么都行（惯例 1.0.0）。
-
-升哪一段（语义化版本 MAJOR.MINOR.PATCH）：
-- 修 bug、改文案、调样式         → 升 PATCH：1.0.0 → 1.0.1
-- 加新功能、加新 feature/关键字   → 升 MINOR：1.0.1 → 1.1.0
-- 破坏性改动（删功能、改数据格式导致老数据读不了）→ 升 MAJOR：1.1.0 → 2.0.0
-- 拿不准就升 PATCH。preflight 返回里的 suggestedVersion 就是「末段 +1」，可直接用。
-
-硬性约束（违反会被拒或造成用户收不到更新）：
+- 只要 onlineVersion 不是 null（= 已上线过），提交前就必须把 version 改到**严格高于**它，
+  哪怕只改了一行。首次提审（onlineVersion 为 null）无此约束，惯例 1.0.0。
+- 升哪一段：修 bug / 改文案 → PATCH；加功能 → MINOR；破坏性改动 → MAJOR。拿不准就升 PATCH，
+  preflight 返回的 suggestedVersion 就是「末段 +1」，可直接用。
 - 比较方式是**按 `.` 分段的数值比较**，缺失段补 0（`1.2` 等价于 `1.2.0`）。
-- ❌ **不要用预发布后缀**（`-beta` / `-rc`）：解析不出数字的段按 0 处理，
-  于是 `1.2.0-beta` 被读成 `1.2.0`（与正式版判定相等、互相收不到更新），
-  而 `1.2.0-beta.1` 反而被读成 `1.2.0.1`、**高于**正式版 `1.2.0`。行为与 SemVer 规范相反。
-- ❌ **不要靠降版本号回滚**：客户端只认「远端更高」，把 1.2.0 改回 1.1.9 既不会提示更新、
-  也不会把用户拉回旧版，用户会一直卡在坏版本上。正确做法是**继续往上升**（发 1.2.1）。
-- ⚠ 不升版本号的后果不只是提交被拒：客户端的更新检查**只比这一个值**，
-  版本号没变的话，已经装了这个插件的用户永远收不到你的新版。
+- ❌ 别用**预发布后缀**（`-beta` / `-rc`）：非数字段按 0 处理，`1.2.0-beta` 被读成 `1.2.0`
+  （与正式版判定相等），而 `1.2.0-beta.1` 反被读成 `1.2.0.1`、**高于**正式版。行为与 SemVer 相反。
+- ❌ 别靠**降版本号回滚**：客户端只认「远端更高」，改回旧号既不提示更新、也不会把用户拉回去，
+  他们会一直卡在坏版本上。正确做法是继续往上升。
+- ⚠ 不升版本号的后果不只是提交被拒：更新检查**只比这一个值**，版本号没变老用户永远收不到新版。
 
 ════════════════════════════════════════════════════════
 
-其它要点：
-- issues 里 level=error 的插件跑不起来，必须先修；level=warn 不影响调试但发布前要清。
-- 改了插件文件后要 rescan，否则 list_plugins 拿到的还是旧清单。
-- 提交审核需要用户已登录 iTools 云账号。
-- 审核由大模型读代码判断（恶意行为、权限是否名副其实、描述是否相符），不是走过场。"#;
+其它：issues 里 level=error 必须先修（warn 不影响调试但发布前要清）；改了文件要 rescan；
+提审需用户已登录云账号；审核由大模型读代码判断（恶意行为、权限是否名副其实、描述是否相符），不是走过场。"#;
 
 // ==================== 嵌入的规范文档 ====================
 //
@@ -104,8 +83,8 @@ pub fn list() -> Vec<Value> {
     vec![
         json!({
             "name": "read_docs",
-            "description": "读 iTools 插件开发规范。**写插件之前必读**——目录结构、plugin.json 字段、\
-                可用的 window.itools API、权限模型都在里面。返回 Markdown 原文。",
+            "description": "读 iTools 插件开发规范原文（Markdown）。**装了 itools-plugin-dev skill 的话规范摘要已在你上下文里，\
+                通常不必调**；没装、或需要逐字原文与边角细节时再调。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -168,7 +147,8 @@ pub fn list() -> Vec<Value> {
             "name": "preflight",
             "description": "提交审核前的自检：缺 index.html、name 不合法、features 为空、\
                 **版本号不高于已上线版本**等「服务端一定会拒」的项。\
-                返回里带 onlineVersion 与 suggestedVersion —— 版本号被拦时把 plugin.json 的 \n                version 改成 suggestedVersion（或按语义化规则自己定一个更高的）再重试即可。\n                通过自检不代表会过审——代码审核在服务端的大模型那一侧。",
+                返回带 onlineVersion 与 suggestedVersion（版本号被拦时把 plugin.json 的 version 改成后者即可）。\
+                ⚠ 通过自检**不代表会过审**——代码审核在服务端的大模型那一侧，本地看不出结论。",
             "inputSchema": {
                 "type": "object",
                 "properties": { "id": { "type": "string", "description": "插件 id" } },
@@ -177,9 +157,10 @@ pub fn list() -> Vec<Value> {
         }),
         json!({
             "name": "submit",
-            "description": "把插件打包上传、提交审核。服务端先做机械校验，再由大模型通读代码\
-                （恶意行为、申请的权限是否名副其实、描述是否与实际功能相符），通过即自动上线到插件市场。\
-                **前置条件两条**：① 用户已登录 iTools 云账号；② 若该插件已上线过\n                （publish_status 的 onlineVersion 不为 null），必须先把 plugin.json 的 version \n                升到高于线上版本 —— iTools 不会替你升，没升会在打包前就被拦下。\n                提交后用 publish_status 查结论（要几十秒到几分钟）。",
+            "description": "把插件打包上传、提交审核（服务端机械校验 + 大模型通读代码：有无恶意行为、\
+                申请的权限是否名副其实、描述是否与实际功能相符），通过即自动上线到插件市场。\
+                **前置两条**：① 用户已登录 iTools 云账号；② 已上线过的插件必须先把 version 升到高于线上版本，\
+                iTools 不会替你升，没升在打包前就被拦下。提交后用 publish_status 查结论（几十秒到几分钟）。",
             "inputSchema": {
                 "type": "object",
                 "properties": { "id": { "type": "string", "description": "插件 id" } },
@@ -525,6 +506,26 @@ mod tests {
         for must in ["不会自动升版本号", "PATCH", "MINOR", "MAJOR", "预发布后缀", "降版本号回滚"] {
             assert!(SERVER_INSTRUCTIONS.contains(must), "版本号规则里缺了「{must}」");
         }
+    }
+
+    /// 常驻上下文的护栏。
+    ///
+    /// `instructions` + `tools/list` 是**每一轮对话都在**的固定开销（不像 skill 那样按需加载），
+    /// 用户这次根本不写插件也照样占着。写新工具时顺手把说明写长是很自然的事，
+    /// 涨上去却没有任何地方会报警——所以在这里钉一个上限。
+    ///
+    /// 撞线时先想「这段能不能挪进 skill 或工具的返回值里」，
+    /// 真有必要再连同理由一起抬高这个数。
+    #[test]
+    fn resident_context_stays_small() {
+        let tools_json = serde_json::to_string(&list()).expect("工具清单必然可序列化");
+        let total = SERVER_INSTRUCTIONS.chars().count() + tools_json.chars().count();
+        // 3800 是在 2026-08 精简后（实测 3740）之上留的一点余量，不是拍脑袋的整数。
+        assert!(
+            total <= 3800,
+            "常驻上下文涨到 {total} 字符，超过 3800 的护栏。\
+             先考虑把内容挪进 skill 或工具返回值，而不是直接抬高上限。"
+        );
     }
 
     #[test]
