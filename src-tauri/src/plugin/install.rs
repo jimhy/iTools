@@ -867,6 +867,83 @@ fn strip_single_root(dir: &Path) -> Result<PathBuf, String> {
 
 // ==================== 插件名 / 版本 ====================
 
+/// 目录改名，对 Windows 上的**瞬时占用**做有限重试。
+///
+/// 为什么需要：刚解压出来的文件带 Mark-of-the-Web（来源是网络下载的 zip），
+/// Defender 会立刻实时扫描它们；扫描期间文件被独占打开，此时 `rename` 整个目录会得到
+/// `拒绝访问 (os error 5)`。索引器、同步盘客户端也会造成同样的现象。
+/// 这类占用只持续几十到几百毫秒，退避重试几次就过去了。
+///
+/// 只对**确实可能是瞬时占用**的错误码重试（5 拒绝访问 / 32 共享冲突 / 33 锁定冲突）；
+/// 其它错误立即返回——真正的权限问题不该被重试掩盖成「慢但成功」，更不该被无限重试拖住。
+fn rename_with_retry(src: &Path, dst: &Path) -> std::io::Result<()> {
+    const TRANSIENT: [i32; 3] = [5, 32, 33];
+    let mut delay = std::time::Duration::from_millis(40);
+    let mut last = match std::fs::rename(src, dst) {
+        Ok(()) => return Ok(()),
+        Err(e) => e,
+    };
+    for attempt in 1..=5 {
+        if !last.raw_os_error().is_some_and(|c| TRANSIENT.contains(&c)) {
+            break;
+        }
+        std::thread::sleep(delay);
+        delay *= 2; // 40 / 80 / 160 / 320 / 640ms，最坏累计约 1.2s
+        match std::fs::rename(src, dst) {
+            Ok(()) => {
+                ilog!("[iTools] 插件包改名在第 {} 次重试后成功（此前被占用）", attempt);
+                return Ok(());
+            }
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
+}
+
+/// 递归复制目录（`move_dir` 的兜底路径用）。
+fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let (from, to) = (entry.path(), dst.join(entry.file_name()));
+        if entry.file_type()?.is_dir() {
+            copy_dir_all(&from, &to)?;
+        } else {
+            std::fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
+}
+
+/// 把目录搬到新位置：先试 `rename`（快，同卷是原子的），不行就退回「复制 + 删源」。
+///
+/// 为什么需要兜底：Windows 上对**刚解压出来的目录**做 rename 会间歇性地返回
+/// `拒绝访问 (os error 5)`——安全软件扫描、索引器、同步盘都可能短暂持有句柄，
+/// 而 `rename` 要求对整个目录独占。退避重试能挡住其中一部分，但实测存在**重试上千毫秒
+/// 仍不放手**的情况（本轮就是：5 次退避全失败，而同一目录用复制则毫无问题）。
+///
+/// 复制比 rename 慢，但插件包只有几百 KB，代价可以忽略；换来的是「装不上」变成「装得上」。
+/// 源目录删不掉也不算失败：它在本次安装的暂存目录里，随后会被整体清理。
+fn move_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
+    let err = match rename_with_retry(src, dst) {
+        Ok(()) => return Ok(()),
+        Err(e) => e,
+    };
+    // 诊断信息留档：下次再遇到才有据可查，不必从头猜一遍
+    let state = std::fs::metadata(src)
+        .map(|m| format!("只读={} 目录={}", m.permissions().readonly(), m.is_dir()))
+        .unwrap_or_else(|e| format!("取属性失败: {e}"));
+    ilog!(
+        "[iTools] 改名失败（{err}；源 {} {state}），改用复制落地",
+        src.display()
+    );
+    copy_dir_all(src, dst)?;
+    if let Err(e) = std::fs::remove_dir_all(src) {
+        ilog!("[iTools] 复制成功，但清理源目录失败（不影响安装，暂存区随后统一清理）: {e}");
+    }
+    Ok(())
+}
+
 /// 插件名合法性：`^[a-z0-9][a-z0-9._-]{0,63}$`。
 ///
 /// 之所以严格：这个名字**同时**是落地目录名、`itplugin://` 的路径段、
@@ -1275,7 +1352,14 @@ fn stage_from_source(
         }
         // 落地前把包移到固定位置 `<dir>/pkg`，确认时一次 rename 即到位
         let pkg = dir.join("pkg");
-        std::fs::rename(&src, &pkg).map_err(|e| format!("整理插件包失败: {e}"))?;
+        move_dir(&src, &pkg).map_err(|e| {
+            format!(
+                "整理插件包失败: {e}\n\
+                 （若持续出现「拒绝访问」，多为安全软件正在扫描刚解压的文件，\
+                 可稍后重试，或把 {} 加入杀软排除目录）",
+                dir.display()
+            )
+        })?;
 
         // **市场安装的收口**：校验的是解压后的**内容**而不是 zip 本身。
         // GitHub 的归档不是字节确定的（压缩实现一变，同一 commit 的 zip 哈希就变），
@@ -1372,10 +1456,12 @@ fn atomic_place(pkg: &Path, target: &Path, old_dir: &Path) -> Result<(), String>
     let had_old = target.exists();
     if had_old {
         let _ = std::fs::remove_dir_all(old_dir);
-        std::fs::rename(target, old_dir)
+        move_dir(target, old_dir)
             .map_err(|e| format!("移开旧插件目录失败（可能有程序正占用该目录）: {e}"))?;
     }
-    if let Err(e) = std::fs::rename(pkg, target) {
+    // 与暂存阶段同理：Windows 上刚解压/复制出来的目录常被安全软件短暂独占，
+    // 直接 rename 会得到「拒绝访问」。move_dir 会先重试、再退回复制，保证装得上。
+    if let Err(e) = move_dir(pkg, target) {
         if had_old {
             // 回滚：把旧目录搬回去，保证失败后现场不变
             if let Err(e2) = std::fs::rename(old_dir, target) {
@@ -1575,9 +1661,11 @@ pub async fn plugin_install_confirm(
     index: State<'_, SearchIndex>,
     staging: State<'_, InstallStaging>,
 ) -> Result<(), String> {
-    let pending = staging
-        .take(&token)
-        .ok_or_else(|| "安装会话已失效（可能已超时或已被处理），请重新解析仓库地址".to_string())?;
+    ilog!("[iTools] 收到安装确认请求 token={}", &token[..8.min(token.len())]);
+    let pending = staging.take(&token).ok_or_else(|| {
+        ilog!("[iTools] 安装确认失败：token={} 在暂存区里找不到", &token[..8.min(token.len())]);
+        "安装会话已失效（可能已超时或已被处理），请重新解析仓库地址".to_string()
+    })?;
     if is_builtin(&pending.name) {
         // 暂存树可能有几十 MB，这一下删除同样丢给阻塞线程池
         let dir = pending.dir.clone();
@@ -1606,6 +1694,11 @@ pub async fn plugin_install_confirm(
         let old_dir = recover_dir(&root, &pending.name);
         let placed = atomic_place(&pending.pkg, &target, &old_dir);
         let _ = std::fs::remove_dir_all(&pending.dir);
+        // 失败必须留痕：这一步是「插件装没装上」的分水岭，UI 上那行红字留不住，
+        // 没有日志就只能靠复现来猜（本轮为此绕了很久）。
+        if let Err(e) = &placed {
+            ilog!("[iTools] 插件 {} 落地失败: {e}", pending.name);
+        }
         placed?;
 
         // 「读 → 改 → 写」必须整段互斥：并发的另一次安装/更新会拿到同一份旧表并整表写回（见 update_lock）

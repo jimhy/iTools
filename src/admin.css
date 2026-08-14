@@ -548,6 +548,13 @@ select {
   font-weight: 600;
   margin-bottom: 14px;
 }
+/* 确认弹窗正文：比标题弱、比 modal-warn 中性，用于陈述「要做什么」 */
+.modal-msg {
+  font-size: 13px;
+  color: var(--text-sub);
+  margin-bottom: 14px;
+  line-height: 1.6;
+}
 .modal-warn {
   background: var(--danger-weak);
   color: var(--danger);

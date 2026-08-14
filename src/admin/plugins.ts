@@ -8,7 +8,7 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { AdminCtx } from "./main";
 import type { PluginInfo, PluginUpdate } from "../types";
-import { h, makeSwitch } from "./ui";
+import { h, makeSwitch, confirmDialog } from "./ui";
 import * as api from "./api";
 import { renderPluginDetail } from "./plugin-detail";
 import {
@@ -286,6 +286,8 @@ export async function renderPlugins(root: HTMLElement, ctx: AdminCtx): Promise<v
     // 高危能力授权（插件声明了才显示；开关切换即授权/撤销）
     if (p.permissions.length) {
       const permsRow = h("div", { class: "plugin-perms" });
+      // 同 .plugin-actions：在容器上截断，不依赖 closest（理由见下方 actions 处的注释）
+      permsRow.addEventListener("click", (e) => e.stopPropagation());
       for (const perm of p.permissions) {
         const permSw = makeSwitch(p.granted.includes(perm), async (checked) => {
           try {
@@ -321,37 +323,33 @@ export async function renderPlugins(root: HTMLElement, ctx: AdminCtx): Promise<v
     const via = updateSources.get(p.name);
     if (via) meta.appendChild(h("div", { class: "plugin-card-note", text: via, title: via }));
 
-    // 删除：两步确认（先变「确认删除」，3s 内再点才真删）
-    let pending = false;
-    let pendTimer: number | undefined;
+    // 删除：弹窗确认。
+    //
+    // 原先是「点一次变『确认删除』，3 秒内再点才真删」，实测很难用：鼠标一犹豫就超时复位，
+    // 于是每次点到的都是第一步，看着就像「点了没反应」。而且那个改按钮文案的动作会把
+    // 用户正点着的 <svg> 从 DOM 里摘掉，事件冒泡到卡片时 closest() 判断失效，反倒跳去了详情页。
+    // 换成弹窗后两个毛病一起没了：状态明确、不超时、后果写得清楚。
     const delBtn = h("button", { class: "plugin-del", title: "删除插件", html: TRASH });
     delBtn.addEventListener("click", async () => {
-      if (!pending) {
-        pending = true;
-        delBtn.classList.add("confirm");
-        delBtn.textContent = "确认删除";
-        pendTimer = window.setTimeout(() => {
-          pending = false;
-          delBtn.classList.remove("confirm");
-          delBtn.innerHTML = TRASH;
-        }, 3000);
-        return;
-      }
-      window.clearTimeout(pendTimer);
+      const ok = await confirmDialog({
+        title: "删除插件",
+        message: `确定删除「${p.display_name}」吗？`,
+        // 如实说明边界：后端只删插件目录与授权/来源记录，**不动**该插件存过的数据
+        // （见 plugin/commands.rs 的 delete_plugin）。不写清楚，用户会以为数据也一并没了。
+        warn: "插件目录将被移除。它保存的数据不会删除，重新安装后仍然可用。",
+        confirmText: "删除",
+      });
+      if (!ok) return;
       try {
         await api.deletePlugin(p.name);
         updates.delete(p.name);
         actionErrors.delete(p.name);
         updateSources.delete(p.name);
-        ctx.toast("已删除插件 " + p.name);
+        ctx.toast(`已删除插件 ${p.display_name}`);
         await reload();
       } catch (err) {
         console.error("delete_plugin failed", err);
         ctx.toast(errText(err, "删除失败"));
-        // 删除失败：复位确认态，避免下次一点即删
-        pending = false;
-        delBtn.classList.remove("confirm");
-        delBtn.innerHTML = TRASH;
       }
     });
 
@@ -368,6 +366,13 @@ export async function renderPlugins(root: HTMLElement, ctx: AdminCtx): Promise<v
 
     const u = updates.get(p.name);
     const actions = h("div", { class: "plugin-actions" });
+    // 操作区的点击一律不冒泡到卡片，否则会打开详情页。
+    //
+    // 不能只依赖下面卡片处理器里的 `e.target.closest('.plugin-actions')`：删除按钮**第一次点击时会把
+    // 自己的内容从 SVG 换成「确认删除」文字**，于是用户真正点到的那个 <path> 在事件继续冒泡之前
+    // 就已经脱离了 DOM 树——对一个已移除的节点调 closest() 只会得到 null，拦截当场失效。
+    // 现象就是「点删除直接进详情页、删除永远走不到第二步」。在容器上截断是唯一稳的做法。
+    actions.addEventListener("click", (e) => e.stopPropagation());
     if (u && u.hasUpdate) actions.appendChild(updateButton(p, u));
     const repoBtn = repoButton(p);
     if (repoBtn) actions.appendChild(repoBtn);

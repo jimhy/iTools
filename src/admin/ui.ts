@@ -191,3 +191,69 @@ export function bindHotkeyRecorder(
     input.blur();
   });
 }
+
+/** [`confirmDialog`] 的选项。 */
+export interface ConfirmOptions {
+  /** 弹窗标题，如「删除插件」。 */
+  title: string;
+  /** 正文（一句话说清「要对什么做什么」）。 */
+  message: string;
+  /** 醒目提示：这次操作的**真实后果**。写清楚会发生什么、不会发生什么。 */
+  warn?: string;
+  /** 确认按钮文案，默认「确定」。 */
+  confirmText?: string;
+  /** 是否为破坏性操作（确认按钮标红），默认 true。 */
+  danger?: boolean;
+}
+
+/**
+ * 通用确认弹窗。返回 `true` = 用户确认，`false` = 取消 / 关闭。
+ *
+ * 为什么要有它：破坏性操作曾用「点一次变文案、3 秒内再点一次」的按钮内确认，
+ * 实测很难用——鼠标一犹豫就超时复位，于是用户以为「点了没反应」，
+ * 反复点也只是在反复触发第一步。确认这种事就该用弹窗：状态明确、不会超时、
+ * 能把后果写清楚，Esc 与点遮罩都能取消。
+ */
+export function confirmDialog(opts: ConfirmOptions): Promise<boolean> {
+  return new Promise((resolve) => {
+    const mask = h("div", { class: "modal-mask" });
+    let settled = false;
+    const close = (ok: boolean): void => {
+      if (settled) return;
+      settled = true;
+      document.removeEventListener("keydown", onKey, true);
+      mask.remove();
+      resolve(ok);
+    };
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === "Escape") {
+        e.stopPropagation(); // 别让 Esc 继续冒泡去关整个窗口
+        close(false);
+      }
+    };
+
+    const modal = h(
+      "div",
+      { class: "modal" },
+      h("div", { class: "modal-title", text: opts.title }),
+      h("div", { class: "modal-msg", text: opts.message }),
+      opts.warn ? h("div", { class: "modal-warn", text: opts.warn }) : null,
+      h(
+        "div",
+        { class: "modal-actions" },
+        h("button", { class: "btn btn-quiet", text: "取消", onClick: () => close(false) }),
+        h("button", {
+          class: opts.danger === false ? "btn btn-primary" : "btn btn-danger",
+          text: opts.confirmText ?? "确定",
+          onClick: () => close(true),
+        }),
+      ),
+    );
+    mask.appendChild(modal);
+    mask.addEventListener("mousedown", (e) => {
+      if (e.target === mask) close(false);
+    });
+    document.addEventListener("keydown", onKey, true);
+    document.body.appendChild(mask);
+  });
+}

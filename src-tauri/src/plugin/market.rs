@@ -358,11 +358,19 @@ pub async fn market_install_preview(
         ilog!("[iTools] 市场条目 {name} 没有 contentHash，本次安装将不做内容校验");
     }
 
-    let preview = super::install::preview_from_market(&entry.install_url(), expect, &registry, &staging).await?;
+    // 失败原因落日志：安装是「网络 + 解压 + 落盘」的长链路，UI 上那行红字一闪而过、
+    // 用户复述常常缺关键信息，没有日志就只能靠猜（本轮就为此绕了好几圈）。
+    let preview = super::install::preview_from_market(&entry.install_url(), expect, &registry, &staging)
+        .await
+        .inspect_err(|e| ilog!("[iTools] 市场安装预览失败 {name}（源 {}）：{e}", entry.install_url()))?;
 
     // 纵深防御：索引条目声称的 name 必须与包里 plugin.json 的 name 一致。
     // 有 contentHash 时这条其实是冗余的（哈希对上就说明整包内容一致），
     // 但没有哈希时它是唯一能挡住「索引条目指向了别的插件」的检查。
+    ilog!(
+        "[iTools] 市场安装预览完成 {name}: {} 个文件，哈希校验={}，token={}",
+        preview.file_count, preview.hash_verified, &preview.token[..8.min(preview.token.len())]
+    );
     if preview.name != entry.name {
         // 暂存目录留给 sweep 清理；这里只拒绝，不动用户已装的任何东西
         return Err(format!(
