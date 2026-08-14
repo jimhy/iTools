@@ -438,6 +438,30 @@ mod tests {
     }
 
     #[test]
+    fn version_not_higher_blocks_submission_with_actionable_reason() {
+        // 海风哥的要求：版本号不符合就**不能提审**，并且要说清为什么。
+        // 这条用例钉住「拦得住」+「话里带着现有版本号」两件事——
+        // 只报一句「版本号不对」的错误等于没说。
+        let d = tmpdir("verblock");
+        write(&d, "plugin.json", "{}");
+        write(&d, "index.html", "<html></html>");
+
+        // 与线上同版本 → 拦
+        let same = preflight(&d, "demo", "1.0.0", &[], Some("1.0.0"));
+        assert!(!same.ok());
+        assert!(same.blockers.iter().any(|b| b.contains("1.0.0")), "{:?}", same.blockers);
+
+        // 低于线上 → 拦
+        let lower = preflight(&d, "demo", "0.9.9", &[], Some("1.0.0"));
+        assert!(!lower.ok());
+
+        // 高于线上 → 放行
+        let higher = preflight(&d, "demo", "1.0.1", &[], Some("1.0.0"));
+        assert!(higher.ok(), "{:?}", higher.blockers);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
     fn first_submission_has_no_version_floor() {
         let d = tmpdir("first");
         write(&d, "plugin.json", "{}");

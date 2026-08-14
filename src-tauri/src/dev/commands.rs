@@ -424,12 +424,28 @@ pub async fn dev_preflight(
     let issues = info.issues.clone();
 
     tauri::async_runtime::spawn_blocking(move || {
-        // 线上版本另有 `dev_publish_status` 查（那一步要联网）；这里只做纯本地判断，
-        // 版本号那一条由前端在拿到线上版本后单独提示——不在这里假装自己知道线上是多少。
-        super::submit::preflight(&dir, &name, &version, &issues, None)
+        // 线上版本要联网查。查不到时**按「没上线过」处理**（online=None）而不是编一个值——
+        // 那样只会少拦一条，随后服务端还会兜底拒绝并给出原文；反过来乱猜一个版本号
+        // 会把本来能提交的插件挡在门外，那才是真的坑人。
+        let online = online_version(&name);
+        super::submit::preflight(&dir, &name, &version, &issues, online.as_deref())
     })
     .await
     .map_err(|e| format!("自检任务异常终止: {e}"))
+}
+
+/// 查该插件在市场上的当前版本；查不到 / 没上线过都返回 `None`。
+///
+/// **刻意不用缓存索引**：提审前必须拿最新的线上版本比对，用一小时前的缓存会出现
+/// 「本地看着能提、服务端却拒了」的分叉。这一次请求的成本，比让作者白传一个 32MB 的包低得多。
+fn online_version(name: &str) -> Option<String> {
+    match crate::plugin::market::latest_version(name) {
+        Ok(v) => v,
+        Err(e) => {
+            ilog!("[iTools] 提审自检：查线上版本失败（按未上线处理）：{e}");
+            None
+        }
+    }
 }
 
 /// 打包并提交审核。返回服务端建立的提审单（状态一般是 `reviewing`）。
@@ -461,8 +477,12 @@ pub async fn dev_submit_plugin(
     let issues = info.issues.clone();
 
     tauri::async_runtime::spawn_blocking(move || {
-        // 提交前再跑一遍本地自检：UI 上的自检结果可能是几分钟前的，期间文件可能已被改动
-        let pre = super::submit::preflight(&dir, &name, &version, &issues, None);
+        // 提交前再跑一遍自检，并**现查一次线上版本**：
+        // UI 上那份结果可能是几分钟前的，期间文件可能被改、线上也可能已经有人发了新版。
+        // 在这里拦下来能省掉一次 32MB 上传 + 一次模型调用，而且话术是本地给的、
+        // 能说清「该怎么改」，比等服务端回一句 400 更有用。
+        let online = online_version(&name);
+        let pre = super::submit::preflight(&dir, &name, &version, &issues, online.as_deref());
         if !pre.ok() {
             return Err(format!("提交前自检未通过：\n{}", pre.blockers.join("\n")));
         }

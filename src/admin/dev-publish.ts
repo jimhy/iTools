@@ -274,13 +274,9 @@ export function renderDevPublish(host: HTMLElement, o: DevPublishOpts): void {
       return box;
     }
 
-    // 版本号那一条要联网才知道，由这里在拿到线上版本后补上（后端自检不联网）
-    const blockers = [...preflight.blockers];
-    if (status && !status.error && !status.canSubmitNewVersion && status.onlineVersion) {
-      blockers.push(
-        `版本号 v${status.localVersion} 不高于已上线的 v${status.onlineVersion}。改了代码就升 version（客户端的更新检查只比这个值）。`,
-      );
-    }
+    // 版本号那一条由**后端自检**给出（它会现查一次线上版本），前端不再自己拼——
+    // 两处各判一次迟早分叉，而且提交时后端还会再查一遍，以它为准最准确。
+    const blockers = preflight.blockers;
 
     if (!blockers.length && !preflight.warnings.length) {
       box.appendChild(h("div", { class: "dev-issues-ok", text: "没有发现会导致提交失败的问题。" }));
@@ -328,7 +324,16 @@ export function renderDevPublish(host: HTMLElement, o: DevPublishOpts): void {
     return box;
   }
 
-  /** 不能提交时的**具体**原因；能提交返回 null。 */
+  /** 给出「比它高一档」的版本号建议（末段 +1）。纯提示用，作者当然可以填别的。 */
+function bumpHint(online: string): string {
+  const parts = online.trim().replace(/^v/i, "").split(".");
+  const last = Number(parts[parts.length - 1]);
+  if (!Number.isFinite(last)) return `${online}.1`;
+  parts[parts.length - 1] = String(last + 1);
+  return parts.join(".");
+}
+
+/** 不能提交时的**具体**原因；能提交返回 null。 */
   function disabledReason(): string | null {
     if (loading) return "正在读取状态…";
     if (!plugin.runnable) return "这个插件当前跑不起来（见上方的清单问题），修好再提交";
@@ -345,7 +350,12 @@ export function renderDevPublish(host: HTMLElement, o: DevPublishOpts): void {
       return `v${status.latest.version} 还在审核中，出结果后才能提交下一版`;
     }
     if (status.onlineVersion && !status.canSubmitNewVersion) {
-      return `版本号要高于已上线的 v${status.onlineVersion}`;
+      // 说清楚「现在是多少、要改成什么、为什么」——只说「版本号不对」等于没说
+      return (
+        `本地版本 v${status.localVersion} 不高于已上线的 v${status.onlineVersion}，不能提交。` +
+        `请把 plugin.json 的 version 升上去（例如 v${bumpHint(status.onlineVersion)}）再提交` +
+        `—— 客户端的更新检查只比这一个值，不升版本号用户收不到更新。`
+      );
     }
     return null;
   }
