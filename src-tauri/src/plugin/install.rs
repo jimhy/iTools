@@ -1242,6 +1242,22 @@ pub(crate) fn blocks_builtin(source: &GitSource) -> bool {
     !source.is_market()
 }
 
+/// 「同名内置插件 + 这个来源」是否应当被拒。**安装预览、安装确认、更新共用这一个判定。**
+///
+/// 分开写过一次，代价就是标准漂移：安装看来源（市场放行），更新却只看 `is_builtin`
+/// 一律拒绝——于是市场版装得上、却永远更新不了。表现是更新检查照常报出新版本、
+/// 按钮照常可点，一点就被拒，而给出的理由「请通过应用整体更新升级」指向死路
+/// （随包分发的那份不会因为应用升级变成市场上的新版）。
+pub(crate) fn builtin_blocked(name: &str, source: &GitSource) -> bool {
+    builtin_blocked_with(is_builtin(name), source)
+}
+
+/// [`builtin_blocked`] 的纯逻辑部分：把「是不是内置」作为参数传进来，
+/// 好让测试能覆盖四种组合（`is_builtin` 读的是进程级 OnceLock，测试里设不了）。
+fn builtin_blocked_with(is_builtin: bool, source: &GitSource) -> bool {
+    is_builtin && blocks_builtin(source)
+}
+
 // ==================== 暂存区 ====================
 
 /// 一次待确认的安装。
@@ -1791,7 +1807,7 @@ pub(super) async fn preview_from_market_package(
         installed_version,
         same_source: prior_url.as_deref() == Some(source.url.as_str()),
         is_builtin: is_builtin(&name),
-        builtin_blocked: is_builtin(&name) && blocks_builtin(&source),
+        builtin_blocked: builtin_blocked(&name, &source),
         file_count,
         total_bytes,
         download_source: staged.download_source.clone(),
@@ -1882,7 +1898,7 @@ async fn preview_impl(
         // 与 plugin_install_confirm 的清授权条件严格一致（那里也是比 prior_url == source.url）
         same_source: prior_url.as_deref() == Some(source.url.as_str()),
         is_builtin: is_builtin(&name),
-        builtin_blocked: is_builtin(&name) && blocks_builtin(&source),
+        builtin_blocked: builtin_blocked(&name, &source),
         file_count,
         total_bytes,
         download_source: staged.download_source.clone(),
@@ -1936,7 +1952,7 @@ pub async fn plugin_install_confirm(
         "安装会话已失效（可能已超时或已被处理），请重新解析仓库地址".to_string()
     })?;
     // 内置插件只挡 **Git 安装**，市场安装放行（见 [`blocks_builtin`]）。
-    if is_builtin(&pending.name) && blocks_builtin(&pending.source) {
+    if builtin_blocked(&pending.name, &pending.source) {
         // 暂存树可能有几十 MB，这一下删除同样丢给阻塞线程池
         let dir = pending.dir.clone();
         let _ = tauri::async_runtime::spawn_blocking(move || std::fs::remove_dir_all(dir)).await;
@@ -2219,9 +2235,6 @@ pub async fn plugin_update(
     settings: State<'_, SettingsStore>,
     index: State<'_, SearchIndex>,
 ) -> Result<PluginUpdate, String> {
-    if is_builtin(&name) {
-        return Err(format!("「{name}」是随安装包分发的内置插件，请通过应用整体更新升级"));
-    }
     // name 来自前端，会被用于拼 `<root>/<name>` 与 `.recover-<name>`；此处收口成与安装期同一套白名单
     if !is_valid_plugin_name(&name) {
         return Err(format!("非法的插件名：{name}"));
@@ -2241,11 +2254,30 @@ pub async fn plugin_update(
     // 下载 + 原子替换 + 改锁文件全在阻塞线程池上跑；State 不跨 spawn_blocking，只带走 root/name
     let n = name.clone();
     let updated = tauri::async_runtime::spawn_blocking(move || -> Result<PluginUpdate, String> {
-        let entry = read_lock(&root)
-            .plugins
-            .get(&n)
-            .cloned()
-            .ok_or_else(|| format!("「{n}」不是从插件市场或 Git 仓库安装的，没有可用的更新来源"))?;
+        let entry = read_lock(&root).plugins.get(&n).cloned().ok_or_else(|| {
+            // 纯内置插件（没从市场装过）走到这里时，「没有更新来源」这句话技术上对，
+            // 却没给出路——而它真正的出路是市场，不是等应用发版：随包分发的那份
+            // 版本不会因为应用升级就变成市场上的新版。
+            if is_builtin(&n) {
+                format!(
+                    "「{n}」是随安装包分发的内置插件，还没从插件市场装过，所以没有更新来源。\
+                     如果市场里有更新的版本，到「插件市场」页直接安装即可——市场版可以覆盖内置版。"
+                )
+            } else {
+                format!("「{n}」不是从插件市场或 Git 仓库安装的，没有可用的更新来源")
+            }
+        })?;
+
+        // 内置插件的更新与**覆盖安装**用同一套标准（[`blocks_builtin`]）：市场来源放行、
+        // Git 来源禁止。此前这里是「只要内置就一律拒绝」，与安装路径不一致，后果是
+        // **市场版装得上、却永远更新不了**：check_one 照常报出新版本、按钮照常可点，
+        // 一点就被拒，而给出的「请通过应用整体更新升级」指向一条死路。
+        if builtin_blocked(&n, &entry.source) {
+            return Err(format!(
+                "「{n}」是随安装包分发的内置插件，只能用插件市场里的版本更新；\
+                 它当前的安装来源不是市场，已拒绝（没有审核的来源不允许顶掉随包插件）。"
+            ));
+        }
 
         let token = new_token();
         // 两条来源，两种下载方式，但**校验、落地、锁文件更新完全共用下面这一段**。
@@ -2374,6 +2406,26 @@ mod tests {
         assert_eq!(s.url, "itools-market://deskbox");
         // 市场插件跟随索引里的最新版本，不锁 commit —— 别被当成「已锁定」而排除出更新检查
         assert!(!is_pinned(&s.revision));
+    }
+
+    /// 内置插件的「能不能装」与「能不能更新」必须是**同一套标准**。
+    ///
+    /// 曾经不是：安装看来源（市场放行），更新只看 is_builtin 一律拒绝。后果是从市场装过的
+    /// 内置插件（deskbox）永远更新不了——更新检查照常报出新版、按钮照常可点，一点就被拒，
+    /// 而拒绝理由「请通过应用整体更新升级」指向死路：随包分发的那份不会因为应用升级
+    /// 就变成市场上的新版。
+    #[test]
+    fn builtin_install_and_update_share_one_rule() {
+        let market = parse_git_url("itools-market://deskbox").expect("市场 URL 应当可解析");
+        let git = parse_git_url("https://github.com/someone/itools-deskbox.git").expect("Git URL 应当可解析");
+
+        // 市场来源：过了服务端机械校验 + 代码审核，允许顶掉随包内置版
+        assert!(!builtin_blocked_with(true, &market), "内置插件必须允许用市场版更新/覆盖");
+        // Git 直装：没有任何审核，任何仓库都能顶掉随包插件，是实打实的提权面
+        assert!(builtin_blocked_with(true, &git), "内置插件不允许被 Git 直装覆盖");
+        // 非内置插件：两种来源都不受这条限制
+        assert!(!builtin_blocked_with(false, &market));
+        assert!(!builtin_blocked_with(false, &git), "非内置插件的 Git 更新不该被这条规则挡");
     }
 
     #[test]
