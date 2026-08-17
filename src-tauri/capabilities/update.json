@@ -1,0 +1,20 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "update",
+  "description": "更新窗口（label=update）的受控 IPC。它只做一件事：展示新版本说明并执行更新，所以只授予「查/下/装/开下载页」四个命令，外加关闭与拖动自己窗口的能力。**不要**把它加进 default.json —— 那会一次性把 execute / save_settings 等全部主程序命令授予它，与它的职责完全不成比例。",
+  "windows": ["update"],
+  "permissions": [
+    "core:event:default",
+    "core:window:allow-hide",
+    "core:window:allow-close",
+    "core:window:allow-set-focus",
+    "core:window:allow-minimize",
+    "core:window:allow-unminimize",
+    "core:window:allow-is-maximized",
+    "core:window:allow-start-dragging",
+    "allow-check-update",
+    "allow-download-update",
+    "allow-launch-installer-and-quit",
+    "allow-open-release-page"
+  ]
+}
