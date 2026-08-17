@@ -47,6 +47,7 @@
     "allow-run-launch-item",
     "allow-build-launch-item",
     "allow-open-admin-window",
+    "allow-open-update-window",
     "allow-close-admin-window",
     "allow-set-settings-persist",
     "allow-test-proxy",

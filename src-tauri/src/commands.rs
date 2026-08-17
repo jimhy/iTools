@@ -599,6 +599,14 @@ pub fn open_admin_window(app: AppHandle) {
     crate::open_admin(&app);
 }
 
+/// 命令：打开独立的更新窗口。
+///
+/// 主窗口那边只保留一个角标，点了就开这个窗口——更新说明放不进搜索框。
+#[tauri::command]
+pub fn open_update_window(app: AppHandle) {
+    crate::open_update(&app);
+}
+
 /// 按需提取给定路径的系统图标（仅前端可见项调用），返回 路径 → base64(PNG)。
 /// 命中缓存直接取；未命中则提取并写回缓存（含失败缓存），提取放 spawn_blocking 不占 async 执行器。
 #[tauri::command]

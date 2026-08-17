@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>iTools 更新</title>
+    <link rel="stylesheet" href="/src/update.css" />
+  </head>
+  <body>
+    <!-- 自绘标题栏：与管理中心一致（decorations:false），整条可拖动 -->
+    <header class="up-bar" data-tauri-drag-region>
+      <span class="up-bar-title" data-tauri-drag-region>iTools 更新</span>
+      <button class="up-close" id="close" title="关闭" aria-label="关闭">✕</button>
+    </header>
+
+    <main class="up-main" id="main">
+      <div class="up-loading" id="loading">正在检查更新…</div>
+    </main>
+
+    <script type="module" src="/src/update.ts"></script>
+  </body>
+</html>

@@ -34,6 +34,8 @@ const COMMANDS: &[&str] = &[
         "run_launch_item",
         "build_launch_item",
         "open_admin_window",
+        // 独立更新窗口（主窗口的角标点击后打开）
+        "open_update_window",
         "close_admin_window",
         "set_settings_persist",
         // 网络：代理连通性实测 + 当前实际生效的同步服务器地址（仅管理中心用）

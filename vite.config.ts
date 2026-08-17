@@ -30,6 +30,9 @@ export default defineConfig({
       input: {
         main: "index.html",
         admin: "admin.html",
+        // 更新窗口是独立窗口（tauri.conf.json 里 label=update），需要自己的入口，
+        // 漏了它打包后窗口会白屏
+        update: "update.html",
       },
     },
   },

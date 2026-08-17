@@ -353,6 +353,7 @@ pub fn run() {
             commands::run_launch_item,
             commands::build_launch_item,
             commands::open_admin_window,
+            commands::open_update_window,
             commands::close_admin_window,
             commands::set_settings_persist,
             // 网络：代理连通性实测 + 「当前实际生效的同步服务器地址」
@@ -512,6 +513,24 @@ pub fn open_admin(app: &AppHandle) {
         let _ = win.set_focus();
     } else {
         ilog!("[iTools] 管理中心窗口不存在（应由 tauri.conf.json 静态创建）");
+    }
+}
+
+/// 打开更新窗口（静态创建、常驻复用，与管理中心同一套路）。
+///
+/// 更新说明是一整篇 Markdown，塞在 680×64 的主搜索窗口里放不下——标题被截断、
+/// 按钮被切掉。所以它有自己的窗口，尺寸和滚动都归自己管。
+pub fn open_update(app: &AppHandle) {
+    // 主面板收起：它是个失焦即隐藏的搜索框，留着会在更新窗口后面闪
+    if let Some(main) = app.get_webview_window("main") {
+        let _ = main.hide();
+    }
+    if let Some(win) = app.get_webview_window("update") {
+        let _ = win.show();
+        let _ = win.unminimize();
+        let _ = win.set_focus();
+    } else {
+        ilog!("[iTools] 更新窗口不存在（应由 tauri.conf.json 静态创建）");
     }
 }
 

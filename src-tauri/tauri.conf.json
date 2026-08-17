@@ -45,6 +45,23 @@
         "shadow": true,
         "center": true,
         "visible": false
+      },
+      {
+        "label": "update",
+        "title": "iTools 更新",
+        "url": "update.html",
+        "width": 620,
+        "height": 660,
+        "minWidth": 480,
+        "minHeight": 420,
+        "resizable": true,
+        "maximizable": false,
+        "minimizable": true,
+        "decorations": false,
+        "transparent": false,
+        "shadow": true,
+        "center": true,
+        "visible": false
       }
     ],
     "security": {

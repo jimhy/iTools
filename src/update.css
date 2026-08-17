@@ -1,0 +1,229 @@
+/* 更新窗口。独立窗口，不再受主搜索框 680px 宽度的约束。
+   配色跟随系统深浅色，与管理中心同一套观感。 */
+
+:root {
+  --up-bg: #ffffff;
+  --up-bar: #f6f7f9;
+  --up-text: #1f2329;
+  --up-sub: #646a73;
+  --up-faint: #8f959e;
+  --up-border: rgba(0, 0, 0, 0.09);
+  --up-accent: #3b5bfe;
+  --up-hover: rgba(0, 0, 0, 0.05);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --up-bg: #1f2023;
+    --up-bar: #26282c;
+    --up-text: #e6e7ea;
+    --up-sub: #a3a7ad;
+    --up-faint: #71767c;
+    --up-border: rgba(255, 255, 255, 0.1);
+    --up-accent: #5a78ff;
+    --up-hover: rgba(255, 255, 255, 0.07);
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+body {
+  display: flex;
+  flex-direction: column;
+  background: var(--up-bg);
+  color: var(--up-text);
+  font: 13px/1.6 system-ui, "Segoe UI", "Microsoft YaHei", sans-serif;
+  overflow: hidden;
+}
+
+/* 自绘标题栏（窗口 decorations:false） */
+.up-bar {
+  flex: 0 0 auto;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  padding: 0 6px 0 14px;
+  background: var(--up-bar);
+  border-bottom: 1px solid var(--up-border);
+  user-select: none;
+}
+.up-bar-title {
+  flex: 1 1 auto;
+  font-size: 12.5px;
+  color: var(--up-sub);
+}
+.up-close {
+  flex: 0 0 auto;
+  width: 30px;
+  height: 26px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--up-sub);
+  font-size: 13px;
+  cursor: pointer;
+}
+.up-close:hover {
+  background: var(--up-hover);
+  color: var(--up-text);
+}
+
+.up-main {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 22px 24px 18px;
+}
+.up-loading {
+  margin: auto;
+  color: var(--up-faint);
+}
+
+.up-head {
+  flex: 0 0 auto;
+}
+.up-title {
+  font-size: 19px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+.up-meta {
+  margin-top: 4px;
+  font-size: 12.5px;
+  color: var(--up-faint);
+}
+
+/* 更新说明：**这里是独立窗口最大的收益**——有足够高度完整展示，
+   内容长就自己滚动，不会再把按钮挤出可视区。 */
+.up-notes {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  margin: 16px 0;
+  padding: 14px 16px;
+  border: 1px solid var(--up-border);
+  border-radius: 10px;
+  background: var(--up-bar);
+}
+.up-notes h1,
+.up-notes h2,
+.up-notes h3 {
+  margin: 14px 0 8px;
+  font-size: 14px;
+  line-height: 1.4;
+}
+.up-notes h1:first-child,
+.up-notes h2:first-child,
+.up-notes h3:first-child {
+  margin-top: 0;
+}
+.up-notes p,
+.up-notes li {
+  margin: 6px 0;
+  color: var(--up-sub);
+}
+.up-notes ul,
+.up-notes ol {
+  padding-left: 20px;
+}
+.up-notes code {
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: var(--up-hover);
+  font-family: Consolas, ui-monospace, monospace;
+  font-size: 12px;
+}
+.up-notes pre {
+  overflow-x: auto;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--up-hover);
+}
+.up-notes pre code {
+  background: none;
+  padding: 0;
+}
+.up-notes table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+.up-notes th,
+.up-notes td {
+  border: 1px solid var(--up-border);
+  padding: 5px 8px;
+  text-align: left;
+}
+.up-notes blockquote {
+  margin: 8px 0;
+  padding-left: 12px;
+  border-left: 3px solid var(--up-border);
+  color: var(--up-faint);
+}
+.up-notes img {
+  max-width: 100%;
+}
+.up-empty {
+  color: var(--up-faint);
+}
+
+.up-warn {
+  flex: 0 0 auto;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--up-faint);
+}
+
+.up-actions {
+  flex: 0 0 auto;
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 14px;
+}
+.up-btn {
+  min-width: 82px;
+  padding: 8px 16px;
+  border: 1px solid var(--up-border);
+  border-radius: 8px;
+  background: var(--up-bg);
+  color: var(--up-text);
+  font-size: 13px;
+  cursor: pointer;
+}
+.up-btn:hover:not(:disabled) {
+  background: var(--up-hover);
+}
+.up-btn-primary {
+  border-color: var(--up-accent);
+  background: var(--up-accent);
+  color: #fff;
+}
+.up-btn-primary:hover:not(:disabled) {
+  filter: brightness(1.08);
+  background: var(--up-accent);
+}
+.up-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* 「已是最新」/「检查失败」：内容少，居中更稳当 */
+.up-plain {
+  margin: auto;
+  text-align: center;
+}
+.up-plain-detail {
+  margin-top: 8px;
+  color: var(--up-sub);
+}
+.up-plain .up-actions {
+  justify-content: center;
+  margin-top: 20px;
+}

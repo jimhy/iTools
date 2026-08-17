@@ -1,6 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
 // release notes 是 Markdown，复用管理中心那份零依赖渲染器（无 innerHTML，无 XSS 面）
-import { renderMarkdown } from "./admin/markdown";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { LogicalSize, LogicalPosition } from "@tauri-apps/api/dpi";
 import { listen } from "@tauri-apps/api/event";
@@ -807,8 +806,6 @@ appWindow.onFocusChanged(({ payload: focused }) => {
   } else {
     // 拖动窗口引起的短暂失焦不隐藏（否则一按住拖动/点边缘就把面板隐藏掉）
     if (Date.now() < suppressHideUntil) return;
-    // 更新弹窗开着时同理：点弹窗按钮的瞬间若把面板藏了，用户就再也点不到「立即更新」
-    if (updateModalOpen) return;
     void hideKeepState();
     justHidden = true;
     scheduleAutoClear(); // 失焦按设置定时清除搜索内容
@@ -962,7 +959,6 @@ const UPDATE_INTERVAL_MS = 60 * 60 * 1000;
 /** 最近一次检查到的新版本信息；null = 没有新版（角标就不显示）。 */
 let pendingUpdate: UpdateInfo | null = null;
 /** 更新弹窗是否开着——开着时必须抑制「失焦隐藏」，否则点按钮的瞬间面板就没了。 */
-let updateModalOpen = false;
 
 /**
  * 静默检查更新：**失败一律不打扰用户**。
@@ -983,108 +979,11 @@ async function checkUpdateSilently(): Promise<void> {
   }
 }
 
-/** 更新确认弹窗。返回用户是否点了「立即更新」。 */
-function askUpdate(info: UpdateInfo): Promise<boolean> {
-  return new Promise((resolve) => {
-    updateModalOpen = true;
-    const mask = document.createElement("div");
-    mask.className = "update-mask";
-    let settled = false;
-    const close = (ok: boolean): void => {
-      if (settled) return;
-      settled = true;
-      updateModalOpen = false;
-      document.removeEventListener("keydown", onKey, true);
-      mask.remove();
-      void resizeToContent();
-      resolve(ok);
-    };
-    const onKey = (e: KeyboardEvent): void => {
-      if (e.key === "Escape") {
-        // 必须拦住：否则 Esc 会继续走到主面板的「关闭并藏窗」
-        e.stopPropagation();
-        e.preventDefault();
-        close(false);
-      }
-    };
-
-    const box = document.createElement("div");
-    box.className = "update-modal";
-    const title = document.createElement("div");
-    title.className = "update-modal-title";
-    title.textContent = `发现新版本 v${info.latestVersion}`;
-    const meta = document.createElement("div");
-    meta.className = "update-modal-meta";
-    meta.textContent = `当前 v${info.currentVersion} → v${info.latestVersion}`;
-
-    // 更新说明：release notes 是 **Markdown**，必须渲染。
-    // 原来直接 textContent 塞原文，于是「## 标题」「---」「| 表格 |」全以字面量示人——
-    // 一屏乱码般的符号，用户根本读不出这版改了什么。
-    // 远端图片一律不加载：这个弹窗在未经用户同意更新的情况下就会弹出来，
-    // 让它去请求 release notes 里的外链图片等于把 IP/UA 送出去。
-    const notes = document.createElement("div");
-    notes.className = "update-modal-notes";
-    const raw = (info.releaseNotes || "").trim();
-    if (raw) {
-      notes.appendChild(renderMarkdown(raw, { allowRemoteImages: false }));
-    } else {
-      notes.hidden = true;
-    }
-
-    const warn = document.createElement("div");
-    warn.className = "update-modal-warn";
-    // 如实告知：安装要退出 app，且 msi 会走系统安装向导（需要管理员授权）
-    warn.textContent = info.msiUrl
-      ? "更新将下载安装包并启动系统安装程序，iTools 会先退出。安装需要管理员授权。"
-      : "本次发布没有提供安装包直链，将为你打开下载页手动下载。";
-
-    const actions = document.createElement("div");
-    actions.className = "update-modal-actions";
-    const later = document.createElement("button");
-    later.className = "update-btn";
-    later.textContent = "稍后";
-    later.addEventListener("click", () => close(false));
-    const go = document.createElement("button");
-    go.className = "update-btn update-btn-primary";
-    go.textContent = info.msiUrl ? "立即更新" : "前往下载";
-    go.addEventListener("click", () => close(true));
-    actions.append(later, go);
-
-    box.append(title, meta, notes, warn, actions);
-    mask.appendChild(box);
-    mask.addEventListener("mousedown", (e) => {
-      if (e.target === mask) close(false);
-    });
-    document.addEventListener("keydown", onKey, true);
-    document.body.appendChild(mask);
-    void resizeToContent();
-    go.focus();
-  });
-}
-
-/** 执行更新：下载 msi → 调起安装并退出；没有直链则打开下载页。 */
-async function runUpdate(info: UpdateInfo): Promise<void> {
-  if (!info.msiUrl) {
-    void invoke("open_release_page", { url: info.releaseUrl });
-    return;
-  }
-  updateBadgeEl.title = "正在下载更新…";
-  try {
-    const path = await invoke<string>("download_update", { url: info.msiUrl });
-    await invoke("launch_installer_and_quit", { path }); // 调起安装向导并退出本进程
-  } catch (err) {
-    console.error("update failed", err);
-    // 下载/调起失败：退回下载页，别让用户卡在「点了没反应」
-    updateBadgeEl.title = "更新失败，点击前往下载页";
-    void invoke("open_release_page", { url: info.releaseUrl });
-  }
-}
-
-updateBadgeEl.addEventListener("click", async (e) => {
+updateBadgeEl.addEventListener("click", (e) => {
   e.stopPropagation(); // 别触发头像的「打开管理中心」
-  if (!pendingUpdate) return;
-  const info = pendingUpdate;
-  if (await askUpdate(info)) await runUpdate(info);
+  // 更新说明是一整篇 Markdown，塞进这个 680×64 的搜索框会被截得没法读，
+  // 所以交给独立窗口去展示；它自己会再查一次 check_update 拿最新信息。
+  void invoke("open_update_window");
 });
 
 window.setTimeout(() => void checkUpdateSilently(), UPDATE_FIRST_CHECK_MS);
