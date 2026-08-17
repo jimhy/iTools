@@ -89,7 +89,7 @@ impl SyncResult {
 }
 
 /// 单个命名空间的记录条数（`ns` 形如 `app` / `plugin:<id>`）。供「我的数据」页展示。
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct NsCount {
     /// 命名空间：`app`（主程序）或 `plugin:<插件名>`。
     pub ns: String,
@@ -155,7 +155,7 @@ impl DataSetSpec {
 }
 
 /// 云端用量快照（真实来自服务端 `GET /data/_usage`）。
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudUsage {
     /// 各命名空间在云端的条数。
@@ -203,12 +203,15 @@ struct UsageResp {
 /// 本地优先数据存储：所有读写走统一 SQLite 库的 `plugin_data` 表（并发串行化在 [`Db`] 内）。
 pub struct DataStore {
     db: Arc<Db>,
+    /// 云端用量的短缓存：(取得时刻, 结果)。见 [`DataStore::cloud_usage_cached`]。
+    /// 只缓存成功结果，失败不入缓存。
+    cloud_cache: std::sync::Mutex<Option<(std::time::Instant, CloudUsage)>>,
 }
 
 impl DataStore {
     /// 绑定统一 SQLite 库。
     pub fn load(db: Arc<Db>) -> Self {
-        Self { db }
+        Self { db, cloud_cache: std::sync::Mutex::new(None) }
     }
 
     /// 写入一条记录（先落本地、标记 dirty 待上行）。
@@ -327,7 +330,17 @@ impl DataStore {
     /// `offline` / `session_expired` / `error`）——绝不用本地数字冒充云端（诚信红线）。
     ///
     /// `account` 用于取 token；服务端判定会话无效（401/403）时**自愈清本地登录态**。
-    pub fn usage(&self, account: &AccountStore, data_sets: &DataSetSpecs) -> DataUsage {
+    /// 用量统计。
+    ///
+    /// `include_cloud=false` 时**完全不碰网络**，只返回本地统计（毫秒级）。
+    /// 「我的数据」页据此两步加载：先秒开本地，再异步补云端——
+    /// 否则每次进页面都要卡在一次云端往返上（实测约 1 秒）。
+    pub fn usage(
+        &self,
+        account: &AccountStore,
+        data_sets: &DataSetSpecs,
+        include_cloud: bool,
+    ) -> DataUsage {
         // 本地：真实统计（离线始终可用）。两张表分开数——
         // plugin_data 会上云，plugin_kv 只在本机，合成一个数字就是对用户说假话。
         let local_pairs = self.db.pd_counts();
@@ -346,10 +359,15 @@ impl DataStore {
             .map(|(ns, count)| NsCount { ns, count, items: Vec::new() })
             .collect();
 
-        // 云端：诚实门禁——未配置 / 未登录直接给原因，不发请求
-        let (cloud, cloud_reason) = match self.fetch_cloud_usage(account) {
-            Ok(c) => (Some(c), None),
-            Err(reason) => (None, Some(reason)),
+        // 云端：诚实门禁——未配置 / 未登录直接给原因，不发请求。
+        // include_cloud=false 时给 "pending"，界面显示「查询中…」而不是谎称查不到。
+        let (cloud, cloud_reason) = if include_cloud {
+            match self.cloud_usage_cached(account) {
+                Ok(c) => (Some(c), None),
+                Err(reason) => (None, Some(reason)),
+            }
+        } else {
+            (None, Some("pending".to_string()))
         };
 
         DataUsage {
@@ -399,6 +417,25 @@ impl DataStore {
     }
 
     /// 真实请求服务端 `GET /data/_usage`（带 Bearer）。返回 Err(reason) 表示不可用（诚实降级）。
+    /// 带缓存的云端用量。用量是个「大致了解」的数字，不需要每次进页面都实时打服务端；
+    /// 缓存期内直接复用，既省往返也省服务端配额。失败结果**不缓存**——
+    /// 那多半是临时的（掉线 / 会话过期），缓存它会让恢复后仍显示错误。
+    fn cloud_usage_cached(&self, account: &AccountStore) -> Result<CloudUsage, String> {
+        const TTL: Duration = Duration::from_secs(60);
+        if let Ok(g) = self.cloud_cache.lock() {
+            if let Some((at, ref c)) = *g {
+                if at.elapsed() < TTL {
+                    return Ok(c.clone());
+                }
+            }
+        }
+        let fresh = self.fetch_cloud_usage(account)?;
+        if let Ok(mut g) = self.cloud_cache.lock() {
+            *g = Some((std::time::Instant::now(), fresh.clone()));
+        }
+        Ok(fresh)
+    }
+
     fn fetch_cloud_usage(&self, account: &AccountStore) -> Result<CloudUsage, String> {
         let endpoint = crate::account::cloud_endpoint().ok_or("cloud_not_configured".to_string())?;
         let token = account.token().ok_or("not_logged_in".to_string())?;

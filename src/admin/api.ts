@@ -55,8 +55,11 @@ export const logoutAccount = (allDevices: boolean) =>
 export const deleteAccount = (username: string, password: string) =>
   invoke<AccountState>("delete_account", { username, password });
 export const syncNow = () => invoke<SyncResult>("sync_now");
-/** 「我的数据」用量：本地各命名空间条数 + 云端用量（不可用时 cloud=null + cloudReason）。 */
-export const dataUsage = () => invoke<DataUsage>("data_usage");
+/** 「我的数据」用量（本地各命名空间条数 + 云端用量；不可用时 cloud=null + cloudReason）。
+ *  `includeCloud=false` 时后端**完全不碰网络**，只回本地统计（毫秒级）——
+ *  页面据此先秒开本地、再异步补云端，避免每次进页面都卡在一次云端往返上。 */
+export const dataUsage = (includeCloud = true) =>
+  invoke<DataUsage>("data_usage", { includeCloud });
 
 // ---------- 版本更新（Gitee Releases 源） ----------
 export const getAppVersion = () => invoke<string>("get_app_version");

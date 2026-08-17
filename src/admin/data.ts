@@ -33,6 +33,8 @@ function cloudReasonText(reason: string | undefined): string {
       return "无法连接云端";
     case "session_expired":
       return "会话已失效，请重新登录";
+    case "pending":
+      return "查询中…";
     default:
       return "云端读取失败";
   }
@@ -74,11 +76,23 @@ export async function renderData(root: HTMLElement, ctx: AdminCtx): Promise<void
   let plugins: PluginInfo[];
   let usage: DataUsage;
   try {
-    [plugins, usage] = await Promise.all([api.listPlugins(), api.dataUsage()]);
+    // 先只取本地（不发网络请求），页面立即可见
+    [plugins, usage] = await Promise.all([api.listPlugins(), api.dataUsage(false)]);
   } catch (err) {
     console.error("load data usage failed", err);
     root.appendChild(h("div", { class: "panel-error", text: "数据用量加载失败" }));
     return;
+  }
+
+  /** 云端用量异步补齐：拿到就重绘那一块，失败则保留后端给出的原因，不弹窗打扰。 */
+  function loadCloudUsage(): void {
+    void api
+      .dataUsage(true)
+      .then((full) => {
+        usage = full;
+        paint();
+      })
+      .catch((err) => console.error("load cloud usage failed", err));
   }
 
   /** 把 usage + plugins 合并成有序行集合。 */
@@ -297,7 +311,7 @@ export async function renderData(root: HTMLElement, ctx: AdminCtx): Promise<void
   /** 重新拉取用量 + 插件并重绘。 */
   async function refresh(): Promise<void> {
     try {
-      [plugins, usage] = await Promise.all([api.listPlugins(), api.dataUsage()]);
+      [plugins, usage] = await Promise.all([api.listPlugins(), api.dataUsage(true)]);
     } catch (err) {
       console.error("refresh data usage failed", err);
       ctx.toast("刷新失败");
@@ -307,4 +321,7 @@ export async function renderData(root: HTMLElement, ctx: AdminCtx): Promise<void
   }
 
   paint();
+  // 首屏已用本地数据画完，这时再去补云端——用户看到的是「秒开 + 云端列稍后填上」，
+  // 而不是白屏等一次网络往返
+  loadCloudUsage();
 }

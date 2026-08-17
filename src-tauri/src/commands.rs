@@ -443,11 +443,13 @@ pub fn sync_now(account: State<'_, AccountStore>, data: State<'_, DataStore>) ->
 /// （托盘、全局热键、所有窗口一起排队）。加 async 后交由异步运行时执行。
 #[tauri::command(async)]
 pub fn data_usage(
+    include_cloud: Option<bool>,
     account: State<'_, AccountStore>,
     data: State<'_, DataStore>,
     registry: State<'_, crate::plugin::PluginRegistry>,
 ) -> DataUsage {
-    data.usage(&account, &collect_data_set_specs(&registry))
+    // 缺省 true：保持老调用方（不传参数）的行为不变
+    data.usage(&account, &collect_data_set_specs(&registry), include_cloud.unwrap_or(true))
 }
 
 /// 汇总各插件在 `plugin.json` 里声明的 `dataSets`，供「我的数据」页按**用户视角**计数。
