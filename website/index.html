@@ -26,7 +26,7 @@
           <a href="#faq">问答</a>
         </nav>
         <a class="header-download" href="/download/iTools-latest-setup.exe">
-          免费下载
+          免费下载<em data-version-badge hidden></em>
         </a>
       </div>
     </header>
@@ -43,7 +43,7 @@
             <div class="hero-actions">
               <a class="primary-download" href="/download/iTools-latest-setup.exe">
                 <span class="windows-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
-                <span><strong>下载 Windows 版</strong><small>安装包 · 64 位</small></span>
+                <span><strong>下载 Windows 版</strong><small data-version-slot>安装包 · 64 位</small></span>
                 <b aria-hidden="true">↓</b>
               </a>
               <a class="ai-tutorial-link" href="./ai-plugin.html"><i aria-hidden="true">✦</i><span><strong>让 AI 创建插件</strong><small>查看 3 分钟教程</small></span><b>→</b></a>
@@ -209,7 +209,7 @@
             <p>下载 iTools，按下 Alt + Space，剩下的交给搜索。</p>
           </div>
           <a class="card-download" href="/download/iTools-latest-setup.exe">
-            <strong>下载最新版</strong><span>Windows 11 · 64 位</span>
+            <strong>下载最新版</strong><span data-version-slot>Windows 11 · 64 位</span>
           </a>
         </div>
       </section>
@@ -238,5 +238,29 @@
         <a href="./ai-plugin.html">AI 创建插件教程</a>
       </div>
     </footer>
+
+    <script>
+      // 下载区的版本号由服务端扫**真实文件**得出（GET /api/download/latest），页面里不写死。
+      // 写死意味着每次发版都得记着回来改这一行，忘了的表现是「页面写着旧版本、下载下来是新包」，
+      // 比不显示版本号更糟。拿不到就保持原文案，绝不编一个版本号出来。
+      (async () => {
+        try {
+          const res = await fetch("/api/download/latest", { cache: "no-store" });
+          if (!res.ok) return;
+          const d = await res.json();
+          if (!d || !d.version) return;
+          const mb = d.sizeBytes ? (d.sizeBytes / 1048576).toFixed(1) + " MB · " : "";
+          document.querySelectorAll("[data-version-slot]").forEach((el) => {
+            el.textContent = "v" + d.version + " · " + mb + "64 位";
+          });
+          document.querySelectorAll("[data-version-badge]").forEach((el) => {
+            el.textContent = "v" + d.version;
+            el.hidden = false;
+          });
+        } catch (_) {
+          /* 网络不通就维持静态文案，页面照常可用 */
+        }
+      })();
+    </script>
   </body>
 </html>

@@ -272,12 +272,12 @@ footer { padding: 38px 0; border-top: 1px solid var(--line); }
 .preview-result small { color: #668474; font-size: 8px; }
 .preview-result b { color: #71d39c; font-size: 8px; }
 
-.tutorial-grid { display: grid; grid-template-columns: 210px minmax(0, 790px); justify-content: center; gap: 90px; padding-top: 80px; padding-bottom: 120px; }
-.tutorial-nav { position: sticky; top: 34px; align-self: start; display: flex; flex-direction: column; gap: 5px; padding: 18px; border: 1px solid var(--line); border-radius: 18px; background: rgba(255, 255, 255, 0.82); box-shadow: 0 12px 30px rgba(29, 39, 74, 0.06); backdrop-filter: blur(16px); }
-.tutorial-nav > span { margin: 3px 8px 10px; color: #a0a5b1; font-size: 9px; font-weight: 750; letter-spacing: 0.12em; }
-.tutorial-nav a { display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 9px; color: #666d7d; font-size: 11px; }
+.tutorial-grid { display: grid; grid-template-columns: 238px minmax(0, 790px); justify-content: center; gap: 70px; padding-top: 80px; padding-bottom: 120px; }
+.tutorial-nav { position: sticky; top: 34px; align-self: start; display: flex; flex-direction: column; gap: 7px; padding: 22px; border: 1px solid var(--line); border-radius: 18px; background: rgba(255, 255, 255, 0.82); box-shadow: 0 12px 30px rgba(29, 39, 74, 0.06); backdrop-filter: blur(16px); }
+.tutorial-nav > span { margin: 3px 10px 11px; color: #8e96a5; font-size: 12px; font-weight: 750; letter-spacing: 0.1em; }
+.tutorial-nav a { display: flex; align-items: center; gap: 12px; min-height: 42px; padding: 10px 11px; border-radius: 10px; color: #596273; font-size: 14px; line-height: 1.4; }
 .tutorial-nav a:hover { color: #285fd4; background: #edf3ff; }
-.tutorial-nav b { width: 18px; color: #9ca3b2; font: 8px ui-monospace, monospace; }
+.tutorial-nav b { width: 22px; color: #929aaa; font: 10px ui-monospace, monospace; font-weight: 650; }
 .tutorial-content { min-width: 0; }
 .tutorial-step { padding: 72px 0; border-bottom: 1px solid var(--line); scroll-margin-top: 18px; }
 .tutorial-step:first-child { padding-top: 8px; }
@@ -465,4 +465,16 @@ footer { padding: 38px 0; border-top: 1px solid var(--line); }
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
   *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
+}
+
+/* 顶栏下载按钮上的版本徽章：由 /api/download/latest 填充，拿不到就保持 hidden */
+.header-download em {
+  font-style: normal;
+  margin-left: 6px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.22);
+  font-size: 0.82em;
+  font-weight: 600;
+  letter-spacing: 0.01em;
 }

@@ -21,6 +21,8 @@
 
 use std::collections::HashSet;
 use std::net::SocketAddr;
+// axum::extract::Path 已占用 `Path` 这个名字，std 的路径类型用别名
+use std::path::Path as StdPath;
 use std::sync::Arc;
 
 use axum::body::Bytes;
@@ -61,6 +63,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     let router = Router::new()
         .route("/health", get(health))
         .route("/api/mirrors", get(get_mirrors))
+        // 官网读它来显示「最新版 vX.Y.Z」；扫真实目录得出，不写死
+        .route("/api/download/latest", get(latest_download))
         .route("/auth/login", post(login))
         .route("/auth/logout", post(logout))
         .route("/account/delete", post(delete_account))
@@ -206,6 +210,70 @@ async fn health(State(st): State<Arc<AppState>>) -> Response {
         "allowRegister": st.config.allow_register,
     }))
     .into_response()
+}
+
+/// 官网用：**服务器上实际放着的**最新安装包版本与体积（公开端点）。
+///
+/// # 为什么要有它
+///
+/// 官网是纯静态页，自己不可能知道服务器上放的是哪个版本。把版本号写死在 HTML 里，
+/// 等于给发版流程加一个「必须记得同步改页面」的步骤——那一步迟早会忘，
+/// 而忘了的表现是**页面上写着旧版本号、下载下来却是新包**，比不显示版本号更糟。
+///
+/// 所以这里扫真实目录、按文件名里的版本号取最大的那个。扫不到就返回 `version: null`，
+/// 让前端如实退回「下载最新版」，绝不编一个版本号出来。
+async fn latest_download(State(st): State<Arc<AppState>>) -> Response {
+    let Some(dir) = st.config.site.downloads.as_ref() else {
+        return Json(json!({ "version": Value::Null, "reason": "未配置下载目录" })).into_response();
+    };
+    match scan_latest_installer(dir) {
+        Some((version, size)) => Json(json!({
+            "version": version,
+            "sizeBytes": size,
+            // 官网固定链到这个名字，发版时覆盖它即可，页面不用跟着改
+            "file": "iTools-latest-setup.exe",
+        }))
+        .into_response(),
+        None => {
+            Json(json!({ "version": Value::Null, "reason": "下载目录里没有可识别的安装包" }))
+                .into_response()
+        }
+    }
+}
+
+/// 从 `iTools_<版本>_x64-setup.exe` 这类文件名里挑出版本号最大的一个，返回 (版本, 固定名文件的体积)。
+///
+/// 体积取的是**固定名那个文件**（`iTools-latest-setup.exe`，官网真正下载的就是它），
+/// 而不是带版本号那份——两者理论上一致，但真正决定用户下载多大的是前者，
+/// 报体积就该报实际会下载的那个。
+fn scan_latest_installer(dir: &StdPath) -> Option<(String, u64)> {
+    const PREFIX: &str = "iTools_";
+    const SUFFIX: &str = "_x64-setup.exe";
+
+    let mut best: Option<(Vec<u64>, String)> = None;
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Some(rest) = name.strip_prefix(PREFIX).and_then(|s| s.strip_suffix(SUFFIX)) else {
+            continue;
+        };
+        // 按 `.` 分段做数值比较（与客户端 version_gt 同口径），解析不了的段直接跳过这个文件
+        let Some(parts) = rest
+            .split('.')
+            .map(|s| s.parse::<u64>().ok())
+            .collect::<Option<Vec<u64>>>()
+        else {
+            continue;
+        };
+        if best.as_ref().is_none_or(|(b, _)| parts > *b) {
+            best = Some((parts, rest.to_string()));
+        }
+    }
+    let (_, version) = best?;
+    // 体积以官网实际会下载的那个固定名文件为准；它不在就退回 0（前端不显示体积）
+    let size = std::fs::metadata(dir.join("iTools-latest-setup.exe"))
+        .map(|m| m.len())
+        .unwrap_or(0);
+    Some((version, size))
 }
 
 /// GitHub 镜像源配置（公开端点，无需认证）。
@@ -750,6 +818,33 @@ mod site_tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("建临时站点目录");
         dir
+    }
+
+    /// 版本必须按**数值**比较：字符串排序会让 1.10.0 排在 1.9.0 前面，
+    /// 于是发了 1.10.0 之后官网反而显示 1.9.0。
+    #[test]
+    fn picks_highest_version_numerically() {
+        let dir = tmp_site("latest");
+        for n in ["iTools_1.9.0_x64-setup.exe", "iTools_1.10.0_x64-setup.exe", "iTools_1.4.0_x64-setup.exe"] {
+            std::fs::write(dir.join(n), b"x").expect("写安装包");
+        }
+        std::fs::write(dir.join("iTools-latest-setup.exe"), vec![0u8; 1234]).expect("写固定名包");
+
+        let (ver, size) = scan_latest_installer(&dir).expect("应当扫到");
+        assert_eq!(ver, "1.10.0", "1.10.0 必须大于 1.9.0（数值比较，不是字典序）");
+        assert_eq!(size, 1234, "体积要报固定名那个文件——用户实际下载的就是它");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 不认识的文件名一律跳过，绝不瞎猜出一个版本号。
+    #[test]
+    fn ignores_unrecognized_files() {
+        let dir = tmp_site("latest-junk");
+        for n in ["README.txt", "iTools_beta_x64-setup.exe", "iTools_1.2.x_x64-setup.exe", "setup.exe"] {
+            std::fs::write(dir.join(n), b"x").expect("写文件");
+        }
+        assert!(scan_latest_installer(&dir).is_none(), "没有可识别的安装包时必须返回 None");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 挂了静态站之后，**API 路由必须照常命中**。
