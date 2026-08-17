@@ -162,6 +162,12 @@ const COMMANDS: &[&str] = &[
 const APP_MANIFEST: &str = "windows-app-manifest.xml";
 
 fn main() {
+    // 前端产物变了必须重新编译：`frontendDist` 指向的 dist/ 是在**编译期**嵌进二进制的，
+    // 而 cargo 只会因为 Rust 源码变化重编。少了这一行，改完前端跑 `npm run build` +
+    // `cargo build`，cargo 会报「Finished」却什么都没做，启动起来仍是**上一次的界面**——
+    // 排查时极具迷惑性：产物时间戳没变、代码看着是新的、行为却是旧的。
+    println!("cargo:rerun-if-changed=../dist");
+
     let attributes = tauri_build::Attributes::new()
         .app_manifest(tauri_build::AppManifest::new().commands(COMMANDS))
         // 应用清单改由本文件的 emit_app_manifest 发（tauri 只负责图标 + 版本信息）。
