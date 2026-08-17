@@ -16,6 +16,7 @@
 //! - 下载/调起失败退回下载页，并把原因显示出来，不让用户卡在「点了没反应」。
 
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { renderMarkdown } from "./admin/markdown";
 import type { UpdateInfo } from "./types";
@@ -124,6 +125,9 @@ async function runUpdate(info: UpdateInfo, btn: HTMLButtonElement, warn: HTMLEle
 }
 
 async function boot(): Promise<void> {
+  // 每次都从「正在检查」重新开始：这个窗口会被复用，不清空的话会先闪一下上次的结论
+  mainEl.textContent = "";
+  mainEl.appendChild(el("div", "up-loading", "正在检查更新…"));
   try {
     const info = await invoke<UpdateInfo>("check_update");
     if (info.hasUpdate) {
@@ -139,3 +143,7 @@ async function boot(): Promise<void> {
 }
 
 void boot();
+
+// 窗口是复用的（关闭只是 hide，页面不会重新加载），所以每次被打开都要重查一次，
+// 否则界面会一直停在第一次打开时的结论上。
+void listen("update:refresh", () => void boot());

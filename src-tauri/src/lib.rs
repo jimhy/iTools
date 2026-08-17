@@ -529,6 +529,12 @@ pub fn open_update(app: &AppHandle) {
         let _ = win.show();
         let _ = win.unminimize();
         let _ = win.set_focus();
+        // ⚠ 这个窗口是**静态创建、常驻复用**的：关闭走 hide()、页面不卸载，
+        // 所以再次 show() 时前端的初始化代码**不会重新执行**，界面会停在上次的结论上
+        //（表现为：明明有新版，点开却还写着「已经是最新版本」）。
+        // 每次打开都发一个事件，让页面重新查一次。
+        use tauri::Emitter;
+        let _ = win.emit("update:refresh", ());
     } else {
         ilog!("[iTools] 更新窗口不存在（应由 tauri.conf.json 静态创建）");
     }
