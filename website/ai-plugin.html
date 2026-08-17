@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="iTools AI 插件创建教程：连接 AI 编程助手，用一句话创建、调试并使用自己的 iTools 工具。"
+    />
+    <meta name="theme-color" content="#0d1120" />
+    <title>让 AI 创建 iTools 插件 — 3 分钟教程</title>
+    <link rel="icon" href="./public/itools-icon.png" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body class="tutorial-page">
+    <header class="site-header tutorial-header">
+      <div class="container header-inner">
+        <a class="wordmark" href="./index.html" aria-label="返回 iTools 首页">
+          <img src="./public/itools-icon.png" alt="" width="40" height="40" />
+          <span>iTools</span>
+        </a>
+        <nav aria-label="教程导航">
+          <a href="#prepare">准备</a>
+          <a href="#connect">连接 AI</a>
+          <a href="#prompt">发送需求</a>
+          <a href="#verify">验证</a>
+        </nav>
+        <a class="header-download" href="/download/iTools-latest-setup.exe">下载 iTools</a>
+      </div>
+    </header>
+
+    <main id="top">
+      <section class="tutorial-hero" aria-labelledby="tutorial-title">
+        <div class="container tutorial-hero-grid">
+          <div>
+            <a class="back-link" href="./index.html">← 返回首页</a>
+            <span class="tutorial-badge"><i>✦</i> AI 插件创建教程</span>
+            <h1 id="tutorial-title">一句话，让 AI<br />为你做一个<em>新工具。</em></h1>
+            <p>无需学习编程，也不用手动复制配置。在开发者中心为 AI 助手一键安装，随后说清楚想解决的问题，AI 就会完成创建、运行和调试。</p>
+            <div class="tutorial-meta" aria-label="教程信息">
+              <span>约 3 分钟</span><span>无需写代码</span><span>开发者中心一键接入</span>
+            </div>
+            <a class="tutorial-start" href="#prepare">开始创建 <span>↓</span></a>
+          </div>
+
+          <div class="tutorial-preview" aria-label="从想法到插件的流程示意">
+            <div class="preview-top"><span>你的想法</span><i>AI 正在创建</i></div>
+            <blockquote>“做一个图片尺寸转换工具，输入宽高后自动保持比例。”</blockquote>
+            <div class="preview-progress">
+              <div><i>✓</i><span><strong>规范已读取</strong><small>read_docs</small></span></div>
+              <div><i>✓</i><span><strong>插件已生成</strong><small>plugin.json · index.html</small></span></div>
+              <div><i>✓</i><span><strong>运行验证通过</strong><small>0 errors</small></span></div>
+            </div>
+            <div class="preview-result"><span>图</span><div><strong>图片尺寸转换</strong><small>在 iTools 中输入关键词即可打开</small></div><b>可使用</b></div>
+          </div>
+        </div>
+      </section>
+
+      <div class="container tutorial-grid">
+        <aside class="tutorial-nav" aria-label="教程目录">
+          <span>教程目录</span>
+          <a href="#prepare"><b>01</b>准备 iTools</a>
+          <a href="#connect"><b>02</b>一键安装</a>
+          <a href="#prompt"><b>03</b>描述工具</a>
+          <a href="#verify"><b>04</b>创建与验证</a>
+          <a href="#use"><b>05</b>开始使用</a>
+          <a href="#troubleshoot"><b>?</b>连接问题</a>
+        </aside>
+
+        <article class="tutorial-content">
+          <section class="tutorial-step" id="prepare">
+            <div class="step-heading"><span>01</span><div><small>准备工作</small><h2>打开 iTools 开发者中心</h2></div></div>
+            <p>开发者中心是 AI 创建插件的工作台。打开 iTools，点击右上角头像进入管理中心，然后选择左侧的“开发者中心”。</p>
+            <div class="path-card"><span>iTools 右上角头像</span><i>→</i><span>管理中心</span><i>→</i><strong>开发者中心</strong></div>
+            <figure class="dev-center-figure">
+              <img src="./public/developer-center-ai.png" alt="iTools 开发者中心中为 Claude Code、Codex 和 Cursor 一键安装 MCP 与插件开发 Skill 的界面" width="1200" height="760" />
+              <figcaption><span>开发者中心界面</span><p>iTools 会检测本机 AI 客户端，并同时安装 MCP 连接与插件开发 Skill。</p></figcaption>
+            </figure>
+            <div class="dev-center-features">
+              <div><i>01</i><p><strong>AI 助手接入</strong><span>检测客户端，一键安装或更新 MCP 与 Skill。</span></p></div>
+              <div><i>02</i><p><strong>独立调试环境</strong><span>测试数据与正式插件隔离，不影响日常使用。</span></p></div>
+              <div><i>03</i><p><strong>运行与日志</strong><span>AI 可以直接运行插件、读取错误并继续修复。</span></p></div>
+            </div>
+          </section>
+
+          <section class="tutorial-step" id="connect">
+            <div class="step-heading"><span>02</span><div><small>无需复制配置</small><h2>一键安装 MCP 和 Skill</h2></div></div>
+            <p>在“AI 助手接入”区域找到你使用的客户端，点击“一键安装”。iTools 会自动完成两部分接入：</p>
+            <div class="install-parts">
+              <div><span>MCP</span><p><strong>让 AI 操作开发者中心</strong><small>可以创建、扫描、运行插件，并读取调试日志。</small></p></div>
+              <div><span>SKILL</span><p><strong>让 AI 读懂 iTools 插件规范</strong><small>知道目录结构、可用 API、权限和调试方式。</small></p></div>
+            </div>
+            <ol class="install-steps">
+              <li><b>1</b><p><strong>找到 AI 客户端</strong><span>开发者中心会自动检测 Claude Code、Codex、Cursor 等客户端。</span></p></li>
+              <li><b>2</b><p><strong>点击“一键安装”</strong><span>iTools 自动写入本地连接和 Skill，不需要打开配置文件。</span></p></li>
+              <li><b>3</b><p><strong>重启 AI 助手</strong><span>看到状态变为“已安装”后重启一次，让新能力生效。</span></p></li>
+            </ol>
+            <div class="check-line"><i>✓</i><p><strong>安装一次，之后直接说需求。</strong><span>iTools 更新了开发规范时，也可以回到这里点击“更新”或“重新安装”。</span></p></div>
+          </section>
+
+          <section class="tutorial-step" id="prompt">
+            <div class="step-heading"><span>03</span><div><small>不用写代码</small><h2>把想做的工具告诉 AI</h2></div></div>
+            <p>安装完成后，不必再告诉 AI 连接地址或开发规范。用日常语言描述用途、关键词和想要的功能即可。</p>
+            <div class="prompt-card">
+              <div><span>可直接复制的提示词</span><small>推荐</small></div>
+              <pre><code>请给 iTools 做一个插件：
+- 工具用途：[描述要解决的问题]
+- 触发关键词：[例如：字数统计]
+- 核心功能：[列出 2–4 个功能]
+- 是否需要联网：[否 / 是，并说明原因]
+
+创建完成后请自动运行和检查；
+如果发现错误，请读取日志并继续修复，直到可以正常使用。
+不要提交到插件市场，除非我明确要求。</code></pre>
+            </div>
+            <div class="idea-block">
+              <h3>没想好做什么？从这些开始</h3>
+              <div class="idea-grid">
+                <div><i>图</i><span><strong>图片尺寸转换</strong><small>输入目标宽高，自动保持比例</small></span></div>
+                <div><i>{ }</i><span><strong>JSON 格式化</strong><small>格式化、校验和差异对比</small></span></div>
+                <div><i>✓</i><span><strong>会议待办提取</strong><small>从文字中整理行动项</small></span></div>
+              </div>
+            </div>
+          </section>
+
+          <section class="tutorial-step" id="verify">
+            <div class="step-heading"><span>04</span><div><small>AI 自动完成</small><h2>看着 AI 创建并验证</h2></div></div>
+            <p>接入成功后，AI 会在后台按顺序完成这些动作。你不需要输入命令；出现错误时，它会读取日志、修改文件并再次验证。</p>
+            <div class="workflow-list">
+              <div><span>1</span><code>list_plugins</code><p>找到 iTools 指定的固定调试目录</p></div>
+              <div><span>2</span><code>rescan</code><p>让 iTools 重新扫描刚创建的插件</p></div>
+              <div><span>3</span><code>list_plugins</code><p>确认插件已识别且没有配置错误</p></div>
+              <div><span>4</span><code>run_plugin</code><p>直接打开插件，检查真实运行效果</p></div>
+              <div><span>5</span><code>read_logs</code><p>读取运行日志，有问题就继续修复</p></div>
+            </div>
+            <div class="permission-card"><i>⌁</i><div><strong>权限应该按需申请</strong><p>普通插件不需要额外权限。只有确实需要联网、运行命令、截屏、热键或录音时，才让 AI 声明对应权限，并由你确认。</p></div></div>
+          </section>
+
+          <section class="tutorial-step" id="use">
+            <div class="step-heading"><span>05</span><div><small>创建完成</small><h2>在 iTools 里直接使用</h2></div></div>
+            <p>AI 显示验证通过后，按下 <kbd>Alt</kbd> + <kbd>Space</kbd>，输入你设置的触发关键词，新工具就会打开。</p>
+            <div class="use-demo"><kbd>Alt</kbd><b>+</b><kbd>Space</kbd><i>→</i><span>输入“字数统计”</span><i>→</i><strong>打开插件</strong></div>
+            <p class="small-copy">想分享给其他用户时，再明确告诉 AI 提交插件市场。AI 应先更新版本号并执行预检，只有在你已登录且确认提交后才会发布。</p>
+          </section>
+
+          <section class="tutorial-step troubleshoot" id="troubleshoot">
+            <div class="step-heading"><span>?</span><div><small>常见问题</small><h2>AI 连不上 iTools？</h2></div></div>
+            <div class="trouble-grid">
+              <div><strong>先检查这 4 项</strong><ul><li>iTools 与 AI 助手是否为最新版</li><li>开发者中心是否检测到该客户端</li><li>MCP 和 Skill 状态是否都为“已安装”</li><li>安装后是否重启了 AI 助手</li></ul></div>
+              <div><strong>仍然无法连接</strong><p>先在对应客户端一行点击“重新安装”，然后重启 iTools 与 AI 助手。如果系统使用了代理或 VPN，请确保本机地址不会被代理转发。</p></div>
+            </div>
+            <details class="manual-fallback"><summary>没有检测到我的 AI 客户端怎么办？<span>＋</span></summary><p>先确认 AI 客户端已经安装并至少启动过一次，再重新打开开发者中心。仍未检测到时，请根据开发者中心里的提示选择对应客户端目录；无需自己编写 MCP 配置。</p></details>
+          </section>
+
+          <section class="tutorial-cta">
+            <span>✦</span><div><small>现在轮到你的想法</small><h2>先创建第一个专属工具。</h2><p>下载 iTools，连接你熟悉的 AI 助手，从一句话开始。</p></div>
+            <a href="/download/iTools-latest-setup.exe">下载 iTools <b>↓</b></a>
+          </section>
+        </article>
+      </div>
+    </main>
+
+    <footer>
+      <div class="container footer-inner">
+        <a class="wordmark" href="./index.html"><img src="./public/itools-icon.png" alt="" width="34" height="34" /><span>iTools</span></a>
+        <p>让每个人都能用 AI 创建自己的工具。</p>
+        <a href="./index.html">返回首页</a>
+      </div>
+    </footer>
+  </body>
+</html>

@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta
       name="description"
-      content="iTools 是一款为 Windows 打造的键盘驱动效率启动器，快速搜索应用、文件与常用工具。"
+      content="iTools 是一款为 Windows 打造的效率启动器：快速搜索应用、文件与常用工具，也能让 AI 为你创建专属插件。"
     />
     <meta name="theme-color" content="#f7f8fb" />
     <title>iTools — 少一点寻找，多一点完成</title>
@@ -20,6 +20,7 @@
           <span>iTools</span>
         </a>
         <nav aria-label="主导航">
+          <a href="#ai-create">AI 创建插件</a>
           <a href="#features">能力</a>
           <a href="#experience">体验</a>
           <a href="#faq">问答</a>
@@ -39,11 +40,14 @@
             <p class="hero-lead">
               iTools 把散落在电脑里的应用、文件和常用工具，收进一个随叫随到的搜索框。
             </p>
-            <a class="primary-download" href="/download/iTools-latest-setup.exe">
-              <span class="windows-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
-              <span><strong>下载 Windows 版</strong><small>安装包 · 64 位</small></span>
-              <b aria-hidden="true">↓</b>
-            </a>
+            <div class="hero-actions">
+              <a class="primary-download" href="/download/iTools-latest-setup.exe">
+                <span class="windows-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+                <span><strong>下载 Windows 版</strong><small>安装包 · 64 位</small></span>
+                <b aria-hidden="true">↓</b>
+              </a>
+              <a class="ai-tutorial-link" href="./ai-plugin.html"><i aria-hidden="true">✦</i><span><strong>让 AI 创建插件</strong><small>查看 3 分钟教程</small></span><b>→</b></a>
+            </div>
             <p class="hero-note"><span>✓</span> 无广告 · 安装即用 · Windows 11</p>
           </div>
 
@@ -81,6 +85,48 @@
           <div><strong>&lt; 1 秒</strong><span>输入即响应</span></div>
           <div><strong>本地优先</strong><span>搜索留在电脑</span></div>
           <div><strong>可扩展</strong><span>插件持续生长</span></div>
+        </div>
+      </section>
+
+      <section class="section ai-create" id="ai-create" aria-labelledby="ai-create-title">
+        <div class="container ai-create-grid">
+          <div class="ai-create-copy">
+            <span class="ai-badge"><i>✦</i> AI 原生插件创作</span>
+            <h2 id="ai-create-title">说出想法，<br /><em>AI 把它变成工具。</em></h2>
+            <p>
+              不会写代码也没关系。告诉 AI 你想解决什么问题，它就能按照 iTools 规范创建插件、运行检查、读取日志并继续修正。
+            </p>
+            <ol class="ai-steps">
+              <li><span>01</span><div><strong>描述你的需求</strong><small>“帮我做一个批量整理文件名的工具”</small></div></li>
+              <li><span>02</span><div><strong>AI 自动创建与调试</strong><small>生成插件、运行测试、发现问题后自行修正</small></div></li>
+              <li><span>03</span><div><strong>马上在 iTools 使用</strong><small>输入关键词，打开专属于你的新工具</small></div></li>
+            </ol>
+            <a class="ai-primary-link" href="./ai-plugin.html">查看 AI 创建插件教程 <span>→</span></a>
+          </div>
+
+          <div class="ai-demo" aria-label="AI 创建 iTools 插件流程示意">
+            <div class="ai-demo-bar"><span></span><span></span><span></span><strong>AI 编程助手</strong><i>已连接 iTools</i></div>
+            <div class="ai-demo-body">
+              <div class="chat user-chat">
+                <small>你</small>
+                <p>帮我做一个可以快速统计文字数量的 iTools 插件，输入文字就自动显示字数和阅读时间。</p>
+              </div>
+              <div class="chat ai-chat">
+                <div class="ai-avatar">✦</div>
+                <div>
+                  <small>AI</small>
+                  <p>好的，我会按 iTools 插件规范创建并验证。</p>
+                  <ul class="tool-flow">
+                    <li><i>✓</i><span>读取插件规范</span><b>read_docs</b></li>
+                    <li><i>✓</i><span>创建插件文件</span><b>2 files</b></li>
+                    <li><i>✓</i><span>重新扫描插件</span><b>rescan</b></li>
+                    <li><i>✓</i><span>运行并检查日志</span><b>run_plugin</b></li>
+                  </ul>
+                  <div class="ai-done"><span>✓</span><strong>插件已可使用</strong><small>在 iTools 中输入“字数统计”即可打开</small></div>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -179,6 +225,7 @@
             <details><summary>支持哪些系统？<span>＋</span></summary><p>当前正式版面向 Windows 11 64 位系统，并依赖系统自带的 WebView2 运行环境。</p></details>
             <details><summary>如何获取后续更新？<span>＋</span></summary><p>iTools 会在后台安静地检查正式版本，发现新版后可在应用内安装。</p></details>
             <details><summary>搜索内容会被上传吗？<span>＋</span></summary><p>不会。应用与文件搜索、快捷启动和本地工具都在你的电脑上完成。</p></details>
+            <details><summary>不会编程，也能创建插件吗？<span>＋</span></summary><p>可以。连接支持 MCP 的 AI 编程助手后，只要描述工具用途，AI 就能按 iTools 规范创建、运行并调试插件。</p></details>
           </div>
         </div>
       </section>
@@ -188,7 +235,7 @@
       <div class="container footer-inner">
         <a class="wordmark" href="#top"><img src="./public/itools-icon.png" alt="" width="34" height="34" /><span>iTools</span></a>
         <p>为专注工作而生的 Windows 效率启动器。</p>
-        <a href="https://github.com/jimhy/iTools">GitHub</a>
+        <a href="./ai-plugin.html">AI 创建插件教程</a>
       </div>
     </footer>
   </body>
