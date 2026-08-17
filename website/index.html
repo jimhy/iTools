@@ -25,9 +25,6 @@
           <a href="#experience">体验</a>
           <a href="#faq">问答</a>
         </nav>
-        <a class="header-download" href="/download/iTools-latest-setup.exe">
-          免费下载<em data-version-badge hidden></em>
-        </a>
       </div>
     </header>
 
@@ -252,10 +249,6 @@
           const mb = d.sizeBytes ? (d.sizeBytes / 1048576).toFixed(1) + " MB · " : "";
           document.querySelectorAll("[data-version-slot]").forEach((el) => {
             el.textContent = "v" + d.version + " · " + mb + "64 位";
-          });
-          document.querySelectorAll("[data-version-badge]").forEach((el) => {
-            el.textContent = "v" + d.version;
-            el.hidden = false;
           });
         } catch (_) {
           /* 网络不通就维持静态文案，页面照常可用 */
