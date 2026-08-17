@@ -321,6 +321,19 @@ pub fn run() {
             }
 
             setup_tray(app.handle())?;
+
+            // 【启动竞态】主窗口是 tauri.conf.json 静态创建的，它的 WebView 会在 setup 跑完之前
+            // 就加载页面并执行 JS。而 UsageStore / PluginRegistry 等 State 要等插件扫描完才
+            // manage（实测约 1 秒），于是首屏那次 home_data 会撞上
+            // 「state not managed for field `store`」被直接拒掉——表现为主面板只剩内置工具，
+            // 且**不会自愈**（前端没有重试），直到用户做了别的操作触发重新加载。
+            //
+            // 这里在 setup 收尾时广播一次：前端收到就重新取数据。
+            // 前端另有重试兜底，两条路都留着——事件可能在前端注册监听之前就发出去了。
+            {
+                use tauri::Emitter;
+                let _ = app.emit("app-ready", ());
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

@@ -449,10 +449,25 @@ function showHome(): void {
   void refreshHome();
 }
 
-async function refreshHome(): Promise<void> {
+/** 拉取首屏数据（问候语 + 最近使用 + 已固定）。
+ *
+ *  ⚠ 主窗口的 WebView 会**先于后端 setup 完成**就执行到这里：`UsageStore` / `PluginRegistry`
+ *  等 State 要等插件扫描结束才 manage（实测约 1 秒），这期间调用会被
+ *  「state not managed for field `store`」直接拒掉。
+ *
+ *  原来失败就 return，于是界面永久停在「只有内置工具」的半截状态，且**不会自愈**——
+ *  必须做点别的操作（打开插件等）才恢复。所以这里退避重试；后端 setup 收尾还会广播
+ *  `app-ready` 再催一次，两条路互为兜底（事件可能在监听注册之前就发出，光靠它不保险）。
+ */
+async function refreshHome(retry = 0): Promise<void> {
   try {
     homeData = await invoke<HomeData>("home_data");
   } catch (err) {
+    // 启动早期的失败几乎都是时序问题；累计约 4 秒仍不行才认输
+    if (retry < 8) {
+      window.setTimeout(() => void refreshHome(retry + 1), 120 * (retry + 1));
+      return;
+    }
     console.error("home_data failed", err);
     return;
   }
@@ -942,6 +957,8 @@ void applySettings();
 void listen("settings-changed", () => void applySettings(true));
 // 账号资料变更（改昵称/头像、退出/注销）后刷新主界面问候语与头像字母
 void listen("profile-changed", () => void refreshHome());
+// 后端 setup 完成：首屏那次调用可能正好撞在 State 尚未 manage 的窗口期，这里补取一次
+void listen("app-ready", () => void refreshHome());
 
 input.focus();
 showHome();
