@@ -70,6 +70,36 @@ export function toast(msg: string): void {
   toastTimer = window.setTimeout(() => el.classList.remove("show"), 1800);
 }
 
+// ---------- 面板级错误 ----------
+
+/**
+ * 面板加载失败提示：一句话原因 + 「重试」按钮。
+ *
+ * 为什么必须带按钮：管理中心窗口**只隐藏不销毁**，面板渲染失败后就永久停在错误页——
+ * 用户重开窗口看到的还是它，只能点去别的导航再点回来才会重渲染，等于「坏了不会自愈」。
+ * 而首屏失败最常见的原因（后端 State 尚未 manage、临时网络抖动）都是重试一次就好的。
+ *
+ * `retry` 传面板自己的渲染入口即可，root 会先被清空。
+ */
+export function panelError(root: HTMLElement, message: string, retry: () => void): void {
+  root.innerHTML = "";
+  root.appendChild(
+    h(
+      "div",
+      { class: "panel-error" },
+      h("div", { text: message }),
+      h("button", {
+        class: "btn btn-primary panel-error-retry",
+        text: "重试",
+        onClick: () => {
+          root.innerHTML = "";
+          retry();
+        },
+      }),
+    ),
+  );
+}
+
 // ---------- 开关 ----------
 
 /** iOS 风格开关：返回 label.switch 元素，勾选变化时回调新状态。 */

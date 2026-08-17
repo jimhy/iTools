@@ -8,7 +8,7 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { AdminCtx } from "./main";
 import type { PluginInfo, PluginUpdate } from "../types";
-import { h, makeSwitch, confirmDialog } from "./ui";
+import { h, makeSwitch, confirmDialog, panelError } from "./ui";
 import * as api from "./api";
 import { renderPluginDetail } from "./plugin-detail";
 import {
@@ -133,7 +133,9 @@ export async function renderPlugins(root: HTMLElement, ctx: AdminCtx): Promise<v
     list = await api.listPlugins();
   } catch (err) {
     console.error("list_plugins failed", err);
-    root.appendChild(h("div", { class: "panel-error", text: "插件列表加载失败：" + errText(err, "未知错误") }));
+    panelError(root, "插件列表加载失败：" + errText(err, "未知错误"), () =>
+      void renderPlugins(root, ctx),
+    );
     return;
   }
 

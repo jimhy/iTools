@@ -212,10 +212,19 @@ select {
   padding: 24px 28px;
 }
 
+/* 视图宿主：每次切页新建一个，用于隔离上一页在途的异步重绘（见 admin/main.ts switchView）。
+   display:contents 让它不产生盒子，子元素照旧直接参与 .content 的布局与滚动。 */
+.view-host {
+  display: contents;
+}
+
 .panel-error {
   color: var(--danger);
   padding: 40px;
   text-align: center;
+}
+.panel-error-retry {
+  margin-top: 16px;
 }
 
 /* ---------- 通用卡片/按钮/字段 ---------- */

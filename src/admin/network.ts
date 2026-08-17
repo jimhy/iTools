@@ -15,7 +15,7 @@
 
 import type { AdminCtx } from "./main";
 import type { AccountState, AppSettings } from "../types";
-import { h, makeSwitch } from "./ui";
+import { h, makeSwitch, panelError } from "./ui";
 import * as api from "./api";
 
 /** 把 invoke 抛出的东西转成可读文本。Tauri 的 `Err(String)` 到前端就是个字符串，
@@ -51,7 +51,7 @@ export async function renderNetwork(root: HTMLElement, ctx: AdminCtx): Promise<v
     settings = await api.getSettings();
   } catch (err) {
     console.error("get_settings failed", err);
-    root.appendChild(h("div", { class: "panel-error", text: "设置加载失败" }));
+    panelError(root, "设置加载失败", () => void renderNetwork(root, ctx));
     return;
   }
   let account: AccountState | null = null;

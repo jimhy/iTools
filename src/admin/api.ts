@@ -1,6 +1,6 @@
 //! 管理中心与 Rust 后端之间的 invoke 封装，集中类型标注。
 //! 参数键用 camelCase（Tauri 2 默认自动转 snake_case）。
-import { invoke } from "@tauri-apps/api/core";
+import { invoke as rawInvoke } from "@tauri-apps/api/core";
 import type {
   AppSettings,
   ProfileView,
@@ -31,6 +31,40 @@ import type {
   Preflight,
   Submission,
 } from "../types";
+
+// ---------- 启动竞态兜底 ----------
+
+/**
+ * 管理中心窗口由 `tauri.conf.json` 静态创建，它的 WebView 会**先于后端 `setup()` 完成**
+ * 就加载页面并执行 JS；而 `ProfileStore` / `AccountStore` / `PluginRegistry` 等 State
+ * 要等插件扫描、播种结束才 `manage`（首次安装尤其慢）。撞进这个窗口期的 invoke 会被
+ * 「state not managed for field `xxx` on command `yyy`」直接拒掉——表现为首屏「我的账号」
+ * 显示「账号信息加载失败」，且**不会自愈**（管理中心窗口只隐藏不销毁，boot 只跑一次，
+ * 必须点别的导航再点回来才重渲染）。
+ *
+ * 主窗口在 v1.4.4 已用同样的思路修过（见 `src/main.ts` 的 refreshHome）。这里把重试下沉到
+ * invoke 封装层，管理中心所有面板一并受益，面板代码一行不用改。
+ *
+ * 只对「State 尚未 manage」这一种错误重试：它只可能出现在启动窗口期；真的漏了 manage 时
+ * 重试 8 次（累计约 4.3 秒）后照样抛出，不会把 bug 藏起来。
+ */
+function isStateNotManaged(err: unknown): boolean {
+  return typeof err === "string" && err.includes("state not managed");
+}
+
+const sleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => window.setTimeout(resolve, ms));
+
+async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  for (let retry = 0; ; retry++) {
+    try {
+      return await rawInvoke<T>(cmd, args);
+    } catch (err) {
+      if (retry >= 8 || !isStateNotManaged(err)) throw err;
+      await sleep(120 * (retry + 1)); // 退避：120/240/…/960ms，累计约 4.3 秒
+    }
+  }
+}
 
 // ---------- 设置 ----------
 export const getSettings = () => invoke<AppSettings>("get_settings");

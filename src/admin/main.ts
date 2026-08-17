@@ -109,36 +109,48 @@ function switchView(view: ViewId): void {
   navItems.forEach((n) => n.classList.toggle("active", n.dataset.view === view));
   contentEl.innerHTML = "";
   contentEl.scrollTop = 0;
+  // 每个视图渲染进**自己的**宿主容器，而不是共用 contentEl。
+  //
+  // 面板普遍是「先用本地数据画一屏，再等一次网络请求回来重绘」（如「我的数据」的云端用量）。
+  // 若共用 contentEl，用户在请求在途时切走，回调照样 `root.innerHTML=""` 再塞内容——
+  // 把已经切过去的「我的账号」整页覆盖成「我的数据」的内容。
+  //
+  // 换成一次性的宿主后，切页即把上一个宿主从文档里摘掉，迟到的回调只会写进那个离线节点，
+  // 用户看不见、也污染不了当前页；面板代码无需逐个去判断「我还是当前页吗」，不会漏。
+  // 宿主用 `display: contents`（见 admin.css .view-host），不产生盒子、不影响任何布局。
+  const host = document.createElement("div");
+  host.className = "view-host";
+  contentEl.appendChild(host);
   switch (view) {
     case "account":
-      void renderAccount(contentEl, ctx);
+      void renderAccount(host, ctx);
       break;
     case "network":
-      void renderNetwork(contentEl, ctx);
+      void renderNetwork(host, ctx);
       break;
     case "settings":
-      void renderSettings(contentEl, ctx);
+      void renderSettings(host, ctx);
       break;
     case "launch":
-      void renderLaunch(contentEl, ctx);
+      void renderLaunch(host, ctx);
       break;
     case "plugins":
-      void renderPlugins(contentEl, ctx);
+      void renderPlugins(host, ctx);
       break;
     case "dev":
-      void renderDev(contentEl, ctx);
+      void renderDev(host, ctx);
       break;
     case "data":
-      void renderData(contentEl, ctx);
+      void renderData(host, ctx);
       break;
     case "ai":
-      renderPlaceholder(contentEl, "AI Agent 连接", "后续规划中，敬请期待。");
+      renderPlaceholder(host, "AI Agent 连接", "后续规划中，敬请期待。");
       break;
     case "all":
-      renderPlaceholder(contentEl, "所有功能", "后续规划中，敬请期待。");
+      renderPlaceholder(host, "所有功能", "后续规划中，敬请期待。");
       break;
     case "market":
-      void renderMarket(contentEl, ctx);
+      void renderMarket(host, ctx);
       break;
   }
 }

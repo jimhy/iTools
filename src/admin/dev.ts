@@ -27,7 +27,7 @@ import type {
   AiClient,
   AiClientsStatus,
 } from "../types";
-import { h, makeSwitch } from "./ui";
+import { h, makeSwitch, panelError } from "./ui";
 import * as api from "./api";
 import { errText, permLabel } from "./plugin-install";
 import { createDevLogView, type DevLogView } from "./dev-log";
@@ -132,10 +132,10 @@ export async function renderDev(root: HTMLElement, ctx: AdminCtx): Promise<void>
   } catch (err) {
     if (gen !== generation) return;
     console.error("dev center load failed", err);
-    scroll.innerHTML = "";
-    scroll.appendChild(
-      h("div", { class: "panel-error", text: "开发者中心加载失败：" + errText(err, "未知错误") }),
-    );
+    panelError(scroll, "开发者中心加载失败：" + errText(err, "未知错误"), () => {
+      root.innerHTML = "";
+      void renderDev(root, ctx);
+    });
     return;
   }
   if (gen !== generation) return; // 加载期间已切走：不要把界面挂到已被清空的容器上

@@ -7,7 +7,7 @@
 
 import type { AdminCtx } from "./main";
 import type { PluginInfo, DataUsage, ItemCount } from "../types";
-import { h } from "./ui";
+import { h, panelError } from "./ui";
 import * as api from "./api";
 
 // ---------- 图标 ----------
@@ -80,7 +80,7 @@ export async function renderData(root: HTMLElement, ctx: AdminCtx): Promise<void
     [plugins, usage] = await Promise.all([api.listPlugins(), api.dataUsage(false)]);
   } catch (err) {
     console.error("load data usage failed", err);
-    root.appendChild(h("div", { class: "panel-error", text: "数据用量加载失败" }));
+    panelError(root, "数据用量加载失败", () => void renderData(root, ctx));
     return;
   }
 

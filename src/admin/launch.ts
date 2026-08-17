@@ -1,7 +1,7 @@
 //! 本地启动面板：总开关 + 自定义文件/文件夹清单（选择/拖放添加、单删/批删、立即启动）。
 import type { AdminCtx } from "./main";
 import type { AppSettings, LaunchItem } from "../types";
-import { h } from "./ui";
+import { h, panelError } from "./ui";
 import { setDropZone } from "./dnd";
 import * as api from "./api";
 
@@ -60,7 +60,7 @@ export async function renderLaunch(root: HTMLElement, ctx: AdminCtx): Promise<vo
     settings = await api.getSettings();
   } catch (err) {
     console.error("get_settings failed", err);
-    root.appendChild(h("div", { class: "panel-error", text: "本地启动设置加载失败" }));
+    panelError(root, "本地启动设置加载失败", () => void renderLaunch(root, ctx));
     return;
   }
 

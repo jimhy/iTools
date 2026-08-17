@@ -8,7 +8,7 @@
 
 import type { AdminCtx } from "./main";
 import type { ProfileView, AccountState } from "../types";
-import { h } from "./ui";
+import { h, panelError } from "./ui";
 import { setDropZone, clearDropZone } from "./dnd";
 import * as api from "./api";
 
@@ -57,7 +57,7 @@ export async function renderAccount(root: HTMLElement, ctx: AdminCtx): Promise<v
     [profile, account] = await Promise.all([api.getProfile(), api.accountState()]);
   } catch (err) {
     console.error("load account failed", err);
-    root.appendChild(h("div", { class: "panel-error", text: "账号信息加载失败" }));
+    panelError(root, "账号信息加载失败", () => void renderAccount(root, ctx));
     return;
   }
 
