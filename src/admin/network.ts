@@ -14,7 +14,7 @@
 //! 「开关显示开着、实际关着」的分叉（准则里「看着能用、点了不生效」的典型形态）。
 
 import type { AdminCtx } from "./main";
-import type { AccountState, AppSettings, EndpointInfo } from "../types";
+import type { AccountState, AppSettings } from "../types";
 import { h, makeSwitch } from "./ui";
 import * as api from "./api";
 
@@ -43,11 +43,6 @@ function maskProxyAddr(addr: string): string {
   const at = rest.lastIndexOf("@");
   if (at < 0) return s;
   return `${scheme}***@${rest.slice(at + 1)}`;
-}
-
-/** info-box 里的一组要点（`text` 走 textContent，不注入 HTML）。 */
-function bullets(items: string[]): HTMLUListElement {
-  return h("ul", { class: "info-list" }, ...items.map((t) => h("li", { text: t })));
 }
 
 export async function renderNetwork(root: HTMLElement, ctx: AdminCtx): Promise<void> {
@@ -131,103 +126,44 @@ export async function renderNetwork(root: HTMLElement, ctx: AdminCtx): Promise<v
   //   ② 「我在哪儿改」—— 编辑入口从「我的账号 → 修改账号 → 数据同步」搬到了这里，
   //      全局只此一处，不会出现两个输入框互相不同步。
 
-  const epValue = h("span", { class: "value-badge", text: "读取中…" });
-  const epDesc = h("div", { class: "set-row-desc", text: "正在读取当前实际生效的地址…" });
-
-  const endpointRow = h(
-    "div",
-    { class: "set-row" },
-    h("div", { class: "set-row-text" }, h("div", { class: "set-row-label", text: "当前生效的地址" }), epDesc),
-    h("div", { class: "set-row-control" }, epValue),
-  );
-
-  async function loadEndpoint(): Promise<void> {
-    let info: EndpointInfo;
-    try {
-      info = await api.syncEndpointInfo();
-    } catch (err) {
-      console.error("sync_endpoint_info failed", err);
-      epValue.textContent = "读取失败";
-      epValue.classList.add("value-badge-muted");
-      epDesc.textContent = `无法读取当前生效地址：${errText(err)}。这里不显示猜测值。`;
-      return;
-    }
-    epValue.classList.remove("value-badge-muted");
-    // 编辑框的说明与 placeholder 都由后端给的 builtinDefault 驱动：
-    // 「留空」的真实语义是「跟随官方默认服务」，不是「不连服务器」——写错这句就是误导。
-    const builtin = (info.builtinDefault ?? "").trim();
-    if (builtin) {
-      epHint.textContent = `留空即使用官方默认服务（${builtin}）；填入则改连你自己的服务端。地址只保存在本机。`;
-      epInput.placeholder = `留空 = ${builtin}`;
-    } else {
-      epHint.textContent = "留空即为「仅本地」；地址只保存在本机，不随程序内置。";
-    }
-    const filled = info.userValue.trim();
-    // effective 在 none 之外的三种来源都应非空；万一后端给了空，如实说「未返回地址」，不编造
-    const addr = (info.effective ?? "").trim() || "（后端未返回地址）";
-    switch (info.source) {
-      case "user":
-        epValue.textContent = addr;
-        epDesc.textContent = "来自你在「我的账号 → 修改账号 → 数据同步」填写的地址。";
-        break;
-      case "env":
-        epValue.textContent = addr;
-        epDesc.textContent =
-          "由环境变量 ITOOLS_SYNC_ENDPOINT 指定，优先级最高，界面改不动它" +
-          (filled ? `；你在账号页填的「${filled}」当前被它覆盖，不生效。` : "。");
-        break;
-      case "devDefault":
-        epValue.textContent = addr;
-        epDesc.textContent =
-          "开发模式（debug 构建）默认的本地服务端地址 —— 你并没有填过服务器地址。" +
-          "没启动本地服务端时连不上属正常现象；正式版不会使用这个默认值。";
-        break;
-      case "builtin":
-        // 「用户没填」不等于「没连服务器」：不写明这一条，用户会以为自己处在纯本地状态，
-        // 而实际上登录、云同步、插件市场都在连这个地址。
-        epValue.textContent = addr;
-        epDesc.textContent =
-          "iTools 官方默认服务 —— 你没有填写地址，所以用的是内置默认值。" +
-          "账号登录、云同步、插件市场与插件提审都走它；要改用自建服务端，在下面填入地址即可。";
-        break;
-      case "none":
-        epValue.textContent = "未接入云端";
-        epValue.classList.add("value-badge-muted");
-        epDesc.textContent =
-          "还没有配置同步服务器地址：登录与云同步不可用，数据只存本机（本地优先，离线可用）。";
-        break;
-    }
-  }
-
-  const endpoint = group(
-    "云同步服务器",
-    endpointRow,
-  );
-
-  // ---------- 地址编辑 + 登录同步（原「我的账号 → 修改账号 → 数据同步」） ----------
+  // ---------- 地址编辑 + 登录同步 ----------
   //
   // iTools 是**本地优先**的：数据始终先落本机、离线可用；填了服务器地址并登录之后，
   // 才会把数据同步上去。地址只保存在本机、不随程序内置（安全红线：不写死服务端地址）。
 
   const epInput = h("input", { class: "field-input-sm", type: "text", placeholder: "如 https://api.example.com:7010" });
-  epInput.value = settings.sync_endpoint || "";
+  // 不回显已保存的地址（界面上不展示服务器地址）。
+  // placeholder 要如实区分「已配置 / 未配置」——否则一个空输入框既可能是没配过、
+  // 也可能是配了不显示，而这两种状态下点「保存并接入」的后果是相反的。
+  function refreshEpPlaceholder(): void {
+    epInput.placeholder = settings.sync_endpoint
+      ? "已配置（留空保存将清除）"
+      : "留空 = 使用默认服务";
+  }
+  refreshEpPlaceholder();
   const epSave = h("button", { class: "btn btn-primary", text: "保存并接入" });
   epSave.addEventListener("click", async () => {
+    // 地址栏为空直接返回：输入框不回显已保存的地址，空着多半是「刚打开页面还没填」，
+    // 而不是「想清掉配置」。若把空值当成清除，一次误点就会静默断开云端。
+    const addr = epInput.value.trim();
+    if (!addr) return;
     epSave.disabled = true;
     const prev = settings.sync_endpoint;
     try {
       // 地址是整包设置的一部分，走同一个 save()，好让代理那边的校验/回滚逻辑照常生效
-      settings.sync_endpoint = epInput.value.trim();
+      settings.sync_endpoint = addr;
       await api.saveSettings(settings);
       savedProxyEnabled = settings.proxy_enabled;
       savedProxyAddress = settings.proxy_address;
       ctx.toast(settings.sync_endpoint ? "已保存服务器地址" : "已清除服务器地址");
-      await loadEndpoint(); // 重读「当前生效」——它未必等于你刚填的（环境变量优先级更高）
+      epInput.value = "";
+      refreshEpPlaceholder();
       await loadAccount();
     } catch (err) {
       console.error("save sync_endpoint failed", err);
       settings.sync_endpoint = prev;
-      epInput.value = prev || "";
+      epInput.value = "";
+      refreshEpPlaceholder();
       ctx.toast(errText(err));
     } finally {
       epSave.disabled = false;
@@ -287,42 +223,15 @@ export async function renderNetwork(root: HTMLElement, ctx: AdminCtx): Promise<v
         ctx.toast(errText(err));
       }
     });
-    const syncBtn = h("button", { class: "btn btn-primary", text: "立即同步" });
-    syncBtn.addEventListener("click", async () => {
-      syncBtn.disabled = true;
-      syncBtn.textContent = "同步中…";
-      try {
-        const r = await api.syncNow();
-        // 诚实呈现：没同步就说明原因，不谎报成功
-        ctx.toast(
-          r.synced
-            ? `已同步（上行 ${r.pushed} 条，下行 ${r.pulled} 条）`
-            : r.message || `未同步${r.reason ? `：${r.reason}` : ""}`,
-        );
-        if (r.reason === "session_expired") await loadAccount(); // 后端已清本地会话，UI 诚实转为未登录
-      } catch (err) {
-        console.error("sync_now failed", err);
-        ctx.toast(errText(err));
-      } finally {
-        syncBtn.disabled = false;
-        syncBtn.textContent = "立即同步";
-      }
-    });
-    syncBox.replaceChildren(
-      row(`已登录：${a.username}`, "登录后自动把本地数据同步到上面的服务器", sw),
-      row("手动同步", "立即执行一次双向同步", syncBtn),
-    );
+    syncBox.replaceChildren(row("开启云同步", null, sw));
   }
 
-  // 说明文字里的默认地址取自后端返回的 builtinDefault，不在前端另写一遍字面量：
-  // 写两遍迟早分叉，那时界面上这句话就成了假信息。
-  const epHint = h("div", { class: "set-row-desc", text: "地址只保存在本机；正在读取默认服务地址…" });
   const editGroup = group(
     "服务器地址",
     h(
       "div",
       { class: "set-row" },
-      h("div", { class: "set-row-text" }, h("div", { class: "set-row-label", text: "地址" }), epHint),
+      h("div", { class: "set-row-text" }, h("div", { class: "set-row-label", text: "地址" })),
       h("div", { class: "set-row-control" }, epInput, epSave),
     ),
     syncBox,
@@ -509,78 +418,23 @@ export async function renderNetwork(root: HTMLElement, ctx: AdminCtx): Promise<v
 
   const proxy = group(
     "网络代理",
-    row(
-      "启用代理",
-      "开启后，iTools 的出站请求会经过下面填写的代理服务器；关闭则全部直连。",
-      proxySwitch,
-    ),
+    row("启用代理", null, proxySwitch),
+    // ⚠ 这里原本有一段说明，逐条列举后端 http.rs::normalize_proxy 接受的地址形态
+    //（HTTP / socks5 / socks4 的差异、鉴权、端口必填、IPv6 不支持等）。按产品要求本页不再
+    // 显示任何行内说明，该段已移除——**后端支持的形态没有变**，改动代理解析时不必回来同步这里。
     row(
       "代理地址",
-      // ⚠ 这句话必须与后端 http.rs::normalize_proxy 接受的形态一字不差地对应，
-      // 包括「socks4/4a 带凭据会被拒」这类细节 —— 少写一条，用户就会照着填然后吃一记拒绝。
-      // （曾有一版写着「不支持 SOCKS」，理由是「开 socks-proxy 会让二进制启动即崩」。那是误判：
-      //  崩的是拿不到应用清单的 lib 单测二进制，与 socks 无关，已修；SOCKS 现已真实可用。）
-      "支持 127.0.0.1:7897（不写 scheme 默认按 HTTP 代理处理）、http://…、" +
-        "https://…（同样按 HTTP CONNECT 代理处理，不与代理之间再套 TLS）、" +
-        "socks5://…（socks:// 与 socks5h:// 等同于 socks5，域名交给代理解析）、" +
-        "socks4:// 与 socks4a://（这两种协议本身没有鉴权字段，带 user:pass 会被拒绝）。" +
-        "HTTP 与 socks5 都支持带认证的 user:pass@host:port（按最后一个 @ 切分，密码里可以有 @）。" +
-        "端口必填；IPv6 字面量（如 [::1]:7897）暂不支持，请改用域名或 IPv4。" +
-        "Clash / v2rayN 的混合端口 HTTP 与 SOCKS 都收，写成 http://主机:端口 或 socks5://主机:端口 都行。",
+      null,
       proxyAddr,
       proxyTestBtn,
     ),
     proxyTestRow,
     proxyNote,
-    h(
-      "div",
-      { class: "info-box set-note" },
-      h("div", { class: "info-title", text: "开启后，这些流量会经过你的代理" }),
-      bullets([
-        "插件安装：从 Git 仓库 / 镜像下载插件包",
-        "插件更新：检查远端版本，以及更新时的重新下载",
-        "插件下载源：从同步服务端拉取镜像清单，以及挑选下载源时对各镜像站的探测请求",
-        "云账号与数据同步：登录、退出、注销账号、推送 / 拉取同步数据，以及「我的数据」里查询云端用量",
-        "iTools 自身更新：检查新版本，以及下载 .msi 安装包",
-        "插件发起的网络请求：插件通过 itools.fetch 访问的地址",
-      ]),
-    ),
-    h(
-      "div",
-      { class: "info-box set-note" },
-      h("div", { class: "info-title", text: "本地地址一律直连，不走代理" }),
-      // 这几条与 http.rs::is_bypass_host 一一对应，别写窄了：
-      // 回环是整个 127.0.0.0/8（不只 127.0.0.1），且 ::ffff:127.0.0.1 这类
-      // IPv4-mapped 写法会被折回 IPv4 再判定（换个写法就绕不过去，才是坑）。
-      bullets([
-        "localhost（主机名末尾的点会被忽略，localhost. 同样直连）",
-        "本机回环：整段 127.0.0.0/8（127.0.0.1、127.0.0.53… 都算）与 IPv6 的 ::1",
-        "局域网地址：10.x.x.x、172.16–31.x.x、192.168.x.x",
-        "上面这些地址的 IPv4-mapped IPv6 写法（如 ::ffff:127.0.0.1）同样直连",
-        "*.local 主机名",
-      ]),
-      h("div", {
-        text:
-          "这是硬规则，开关打开也不例外：代理与本机同步服务端往往都在 127.0.0.1 上，" +
-          "把本地请求塞进代理会直接把本机服务打断。" +
-          "因此若上面的同步服务器地址是本机地址（如 http://127.0.0.1:8787），" +
-          "登录与同步请求同样不会经过代理。",
-      }),
-    ),
-    h(
-      "div",
-      { class: "info-box set-note" },
-      h("div", { class: "info-title", text: "关于「测试」按钮" }),
-      h("div", {
-        text:
-          "它测的是输入框里填的这个地址本身，与上面的开关无关 —— 开关关着也能测。" +
-          "但测通不等于流量在走代理：只有把开关打开，上面列出的请求才会真的经过它。" +
-          "若结果显示「并未经过代理」，说明这次是直连，不能据此认为代理可用。",
-      }),
-    ),
+    // 这里原本有三个说明框（哪些流量走代理 / 本地地址一律直连 / 「测试」按钮测的是什么）。
+    // 按产品要求本页不再显示说明性内容，已移除。**后端行为一条都没变**：
+    // 本地地址直连仍由 http.rs::is_bypass_host 硬性保证，改那边时不必回来同步这里。
   );
 
-  root.appendChild(h("div", { class: "settings-scroll" }, endpoint, editGroup, proxy));
-  void loadEndpoint();
+  root.appendChild(h("div", { class: "settings-scroll" }, editGroup, proxy));
   void loadAccount();
 }

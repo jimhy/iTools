@@ -299,12 +299,4 @@ export async function renderMarket(root: HTMLElement, ctx: AdminCtx): Promise<vo
   rerender();
   root.append(h("div", { class: "launch-scroll" }, trustWrap, subhead, listWrap));
   await load();
-
-  // 索引来源展示在最后：多数用户不关心，但自建/联调时必须能一眼看出连的是哪个市场
-  const srcLine = h("div", { class: "launch-intro", text: "" });
-  root.querySelector(".launch-scroll")?.appendChild(srcLine);
-  if (view) {
-    srcLine.textContent =
-      `市场服务器：${(view as MarketView).source}（在「设置 → 网络 → 服务器地址」里更改）`;
-  }
 }
