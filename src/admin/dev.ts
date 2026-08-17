@@ -24,9 +24,8 @@ import type {
   DevIssue,
   DevMockConfig,
   DevPluginInfo,
-  McpStatus,
-  SkillTarget,
-  SkillsStatus,
+  AiClient,
+  AiClientsStatus,
 } from "../types";
 import { h, makeSwitch } from "./ui";
 import * as api from "./api";
@@ -148,277 +147,279 @@ export async function renderDev(root: HTMLElement, ctx: AdminCtx): Promise<void>
   active = instance;
 
   // ---------- 顶部说明 ----------
-  function intro(): HTMLElement {
-    return h(
+  // ==================== AI 助手接入 ====================
+  //
+  // 这一段是开发者中心的门面。设计上只讲一件事：**让你的 AI 会写 iTools 插件**。
+  //
+  // 早先这里是三张并列的卡片（MCP 连接配置 / skill 安装 / 调试环境说明），
+  // 每张都带大段解释文字，光是读完就得半分钟——而用户真正要做的只有一个动作。
+  // 现在按**客户端**组织：一行一个 AI 助手，一个按钮同时装好 MCP 与 skill；
+  // 每处说明压到一句；不影响操作的背景知识（调试环境怎么隔离的）折叠起来，想看再看。
+
+  /** AI 接入状态（异步读到后重绘）。 */
+  let ai: AiClientsStatus | null = null;
+
+  /** 页头：一句话说清这页是干什么的 + 右上角环境状态。 */
+  function aiHeader(): HTMLElement {
+    const box = h("div", { class: "dev-hero" });
+    const left = h(
       "div",
-      { class: "launch-intro" },
+      {},
+      h("div", { class: "dev-hero-kicker", text: "AI 插件创作" }),
+      h("h2", { class: "dev-hero-title", text: "让 AI 帮你写插件" }),
       h("div", {
-        text: "正在开发的插件跑在这里：独立的加载目录、独立的测试数据库、独立的沙盒与授权表、被 Mock 掉的云同步。调试怎么折腾都不会碰到已安装的正式插件，也不会把调试数据传上云端。",
-      }),
-      h("div", {
-        class: "dev-intro-sub",
-        text: "正式插件要求 plugin.json 里的 name 必须和目录名一致，不一致会被直接跳过；调试环境刻意放宽了这条 —— 照样加载，但会在下面把问题如实标出来。",
-      }),
-      // 这条行为差异不写在界面上，开发者调试时会发现 settings.get 拿不到自己配的值，
-      // 十有八九当成 bug 去查（准则：行为差异要在 UI 上告知，不能只写在文档里）。
-      h("div", {
-        class: "dev-intro-sub",
-        text: "还有一条差异要先知道：调试会话里 itools.settings.get() / all() 只返回 settings.json 里声明的 default，读不到任何用户设置值 —— 这是刻意的隔离（免得调试插件串到正式插件的用户设置）。想验证不同取值的表现，请直接改 settings.json 里的 default 再重新运行。",
+        class: "dev-hero-sub",
+        text: "连接、规范、调试都由 iTools 准备好，你只需要描述想法。",
       }),
     );
-  }
+    box.appendChild(left);
 
-  // ---------- 调试目录管理 ----------
-  /** MCP 服务器状态（异步读到后重绘那一块，读不到就如实显示原因）。 */
-  let mcp: McpStatus | null = null;
-
-  /** 「AI 助手接入」卡片：把可复制的连接配置直接摆出来。
-   *
-   *  显示的地址来自后端**实际的监听结果**——服务器没起来就显示失败原因，
-   *  绝不给一个「看着能连、连了没反应」的地址。 */
-  function mcpCard(): HTMLElement {
-    const box = h("div", { class: "dev-dirs" });
-    box.appendChild(h("div", { class: "dev-sec-title", text: "让 AI 帮你写插件（MCP）" }));
-
-    if (!mcp) {
-      box.appendChild(
-        h(
-          "div",
-          { class: "dev-mcp-state" },
-          h("span", { class: "dev-mcp-dot" }),
-          h("span", { class: "dev-mcp-state-text", text: "正在读取状态…" }),
-        ),
-      );
-      return box;
-    }
-    if (!mcp.running) {
-      box.appendChild(
-        h(
-          "div",
-          { class: "dev-mcp-state" },
-          h("span", { class: "dev-mcp-dot dev-mcp-dot-off" }),
-          h("span", { class: "dev-mcp-state-text", text: "未运行" }),
-        ),
-      );
-      box.appendChild(
-        h(
-          "div",
-          { class: "info-box info-box-warn" },
-          h("div", { text: "MCP 服务器没有在运行，AI 助手连不上。" }),
-          h("div", { class: "info-box-detail", text: mcp.error ?? "（后端没有给出原因）" }),
-          h("div", {
-            class: "info-box-detail",
-            text: "端口被占用时可用环境变量 ITOOLS_MCP_PORT 换一个（设 0 由系统分配），重启 iTools 生效。",
-          }),
-        ),
-      );
-      return box;
-    }
-
-    // ⚠ 状态必须**显式**说出来：只摆一个地址，用户无从判断服务器是不是真在跑
-    //（原来就是这样，海风哥一眼就发现「状态没显示」）。这里的取值来自后端实际的监听结果。
-    box.appendChild(
-      h(
-        "div",
-        { class: "dev-mcp-state" },
-        h("span", { class: "dev-mcp-dot dev-mcp-dot-on" }),
-        h("span", { class: "dev-mcp-state-text", text: `运行中 · 监听端口 ${mcp.port}` }),
-      ),
-    );
-    box.appendChild(
-      h("div", {
-        class: "dev-sec-desc",
-        text:
-          "在 AI 编程助手（Claude Code / Cursor 等）里加上下面这段配置，它就能直接读插件开发规范、" +
-          "跑触发模拟器、看调试日志、做发布前自检并提交审核 —— 一台装好 iTools 的电脑，填一行就能开始写插件。",
+    // 右上角状态：来自后端实际状态，不是写死的装饰
+    const ok = !!ai?.mcpRunning;
+    const pill = h(
+      "div",
+      { class: "dev-env-pill" + (ok ? "" : " dev-env-pill-off") },
+      h("span", { class: "dev-env-dot" }),
+      h("span", {
+        text: !ai
+          ? "正在检查环境…"
+          : ok
+            ? "本地开发环境已就绪"
+            : "MCP 服务器未运行",
       }),
     );
-
-    const conf = JSON.stringify({ mcpServers: { itools: { url: mcp.url } } }, null, 2);
-    const pre = h("pre", { class: "dev-log-pre", text: conf });
-    const copyBtn = h("button", { class: "btn btn-sm", text: "复制配置" });
-    copyBtn.addEventListener("click", () => {
-      void navigator.clipboard
-        .writeText(conf)
-        .then(() => ctx.toast("已复制 MCP 配置"))
-        .catch(() => ctx.toast("复制失败，请手动选中复制"));
-    });
-    const copyUrlBtn = h("button", { class: "btn btn-sm", text: "只复制地址" });
-    copyUrlBtn.addEventListener("click", () => {
-      void navigator.clipboard
-        .writeText(mcp!.url)
-        .then(() => ctx.toast("已复制地址"))
-        .catch(() => ctx.toast("复制失败，请手动选中复制"));
-    });
-
-    box.append(
-      h("div", { class: "dev-path-row" }, h("span", { class: "dev-path-label", text: "地址" }), h("code", { class: "dev-path", text: mcp.url })),
-      pre,
-      h("div", { class: "dev-run-actions" }, copyBtn, copyUrlBtn),
-      // 这条是整张卡片上最该被看见的一句（它说明了一个真实的安全边界），
-      // 用最淡的 dev-hint 渲染等于埋掉它——改用告警样式。
-      h(
-        "div",
-        { class: "info-box info-box-warn" },
-        h("div", { text: "这个端点没有鉴权" }),
-        h("div", {
-          class: "info-box-detail",
-          text:
-            "它只监听本机（127.0.0.1、不对外），但本机上任何程序都能调用它 —— " +
-            "其中包括「提交审核」，那会用你已登录的账号把插件传去审核。" +
-            "这是面向本地开发场景的取舍；要关掉它，设环境变量 ITOOLS_MCP=off 后重启 iTools。",
-        }),
-      ),
-    );
+    if (ai && !ai.mcpRunning) pill.title = ai.mcpUrl || "开发者中心的 MCP 服务器没有起来";
+    box.appendChild(pill);
     return box;
   }
 
-  /** skill 安装状态（异步读到后重绘这一块）。 */
-  let skills: SkillsStatus | null = null;
+  /** 「AI 助手接入」主卡片。 */
+  function aiClientsCard(): HTMLElement {
+    const box = h("div", { class: "dev-ai-card" });
 
-  /** 「给 AI 装上插件开发 skill」卡片。
-   *
-   *  与 MCP 卡片的分工：MCP 让 AI 能**驱动**开发者中心（跑模拟器 / 读日志 / 提审），
-   *  skill 让它**知道 iTools 插件该怎么写**。
-   *
-   *  ⚠ 这个功能会往用户的 `~/.claude`、`~/.codex` 里写文件 —— 那是**别的程序的地盘**。
-   *  所以完整路径、装的是不是 iTools 版、能不能动，全部如实摆在界面上；
-   *  后端会拒绝的情况（目录不是 iTools 装的），这里**不摆按钮**，而不是让用户点了才吃一个错误。 */
-  function skillCard(): HTMLElement {
-    const box = h("div", { class: "dev-dirs" });
-    box.appendChild(h("div", { class: "dev-sec-title", text: "给 AI 装上插件开发 skill" }));
-    box.appendChild(
-      h("div", {
-        class: "dev-sec-desc",
-        text:
-          "MCP 让 AI 能驱动开发者中心（跑触发模拟器、读调试日志、提审），skill 让它知道 iTools 插件该怎么写 —— 两者互补。" +
-          "装上之后直接说「给 iTools 做个 XX 插件」就行，不用再把规范贴给它。",
-      }),
+    const head = h(
+      "div",
+      { class: "dev-ai-head" },
+      h("span", { class: "dev-ai-icon", text: "✦" }),
+      h(
+        "div",
+        { class: "dev-ai-head-text" },
+        h("strong", { text: "AI 助手接入" }),
+        h("small", { text: "选择你使用的 AI 助手，iTools 会同时装好 MCP 连接和插件开发 Skill。" }),
+      ),
     );
-
-    if (!skills) {
-      box.appendChild(
-        h(
-          "div",
-          { class: "dev-mcp-state" },
-          h("span", { class: "dev-mcp-dot" }),
-          h("span", { class: "dev-mcp-state-text", text: "正在读取安装状态…" }),
-        ),
+    if (ai) {
+      head.appendChild(
+        h("span", {
+          class: "dev-ai-count",
+          text: ai.detectedCount > 0 ? `已检测到 ${ai.detectedCount} 个客户端` : "未检测到客户端",
+        }),
       );
+    }
+    box.appendChild(head);
+
+    if (!ai) {
+      box.appendChild(h("div", { class: "dev-ai-loading", text: "正在读取接入状态…" }));
       return box;
     }
 
-    // 源都没有就别摆按钮：点了必然失败的控件等于骗人
-    if (!skills.sourceAvailable) {
+    // 拿不到接入地址 / 没有 skill 源时，按钮一律不可用——并且**说清楚为什么**，
+    // 而不是摆一个点了必然失败的按钮
+    const blocker = !ai.mcpRunning
+      ? "MCP 服务器没有运行，拿不到接入地址。"
+      : !ai.skillSourceAvailable
+        ? ai.skillSourceError ?? "这个安装包里没带 skill 源文件。"
+        : null;
+    if (blocker) {
       box.appendChild(
-        h(
-          "div",
-          { class: "info-box info-box-warn" },
-          h("div", { text: "这个安装包里没带 skill 源文件，装不了。" }),
-          h("div", { class: "info-box-detail", text: skills.sourceError ?? "（后端没有给出原因）" }),
-        ),
+        h("div", { class: "info-box info-box-warn" }, h("div", { class: "info-box-detail", text: blocker })),
       );
-      return box;
     }
 
-    const list = h("div", { class: "dev-dir-list" });
-    for (const t of skills.targets) list.appendChild(skillRow(t));
+    const list = h("div", { class: "dev-ai-list" });
+    for (const c of ai.clients) list.appendChild(aiClientRow(c, blocker));
     box.appendChild(list);
+
+    box.appendChild(
+      h(
+        "div",
+        { class: "dev-ai-tip" },
+        h("span", { class: "dev-ai-tip-mark", text: "✓" }),
+        h("span", { text: "无需复制配置；装完重启 AI 助手，就可以直接让它创建 iTools 插件。" }),
+      ),
+    );
     return box;
   }
 
-  /** 一个客户端的安装行。 */
-  function skillRow(t: SkillTarget): HTMLElement {
-    const bundled = skills?.bundledVersion ?? "";
-    const tags = h("div", { class: "dev-dir-tags" });
+  /** 客户端图标：用首字母 + 品牌色块，避免为三个 logo 引入图片资源。 */
+  function clientMark(id: string): HTMLElement {
+    const text = id === "claude" ? "C" : id === "codex" ? "◇" : "◌";
+    return h("span", { class: `dev-ai-mark dev-ai-mark-${id}`, text });
+  }
 
-    if (t.installed && t.managed) {
-      tags.appendChild(
-        h("span", {
-          class: "plugin-badge" + (t.outdated ? " dev-badge-err" : " plugin-badge-muted"),
-          text: t.outdated ? `已装 v${t.installedVersion ?? "?"} · 可更新` : `已装 v${t.installedVersion ?? "?"}`,
-          title: t.outdated ? `随包版本是 v${bundled}，装的是旧的` : "与随包版本一致",
-        }),
-      );
-    } else if (t.installed) {
-      tags.appendChild(
-        h("span", {
-          class: "plugin-badge dev-badge-err",
-          text: "非 iTools 安装",
-          title: "这个目录不是 iTools 装的，安装与卸载都不会碰它",
-        }),
-      );
-    } else {
-      tags.appendChild(h("span", { class: "plugin-badge plugin-badge-muted", text: "未安装" }));
-    }
-    if (!t.clientDetected) {
-      tags.appendChild(
-        h("span", {
-          class: "plugin-badge plugin-badge-muted",
-          text: "未检测到该客户端",
-          title: "家目录下没有它的配置目录。仍然可以装（之后再装客户端也认得），只是它现在多半没在用。",
-        }),
-      );
-    }
+  /** 一行一个 AI 助手。 */
+  function aiClientRow(c: AiClient, blocker: string | null): HTMLElement {
+    const row = h("div", { class: "dev-ai-row" + (c.ready ? " dev-ai-row-on" : "") });
 
-    const item = h(
-      "div",
-      { class: "dev-skill-item" },
+    row.append(
+      clientMark(c.id),
       h(
         "div",
-        { class: "dev-path-row" },
-        h("span", { class: "dev-path-label", text: t.label }),
-        h("code", { class: "dev-path", text: t.dir, title: t.dir }),
-        tags,
+        { class: "dev-ai-name" },
+        h("strong", { text: c.label }),
+        h("small", {
+          text: c.detected ? "已检测到客户端" : "未检测到，装了也不影响",
+          title: `MCP 配置：${c.configPath}\nSkill 目录：${c.skillPath}`,
+        }),
       ),
     );
 
-    // 非托管目录：如实说明为什么这里没有按钮
-    if (t.note) {
-      item.appendChild(
+    // 两个能力标签：各自如实反映状态，而不是笼统一个「已安装」
+    const tags = h("div", { class: "dev-ai-tags" });
+    const tag = (label: string, on: boolean, warn: boolean, tip: string) =>
+      h("span", {
+        class: "dev-ai-tag" + (warn ? " dev-ai-tag-warn" : on ? " dev-ai-tag-on" : ""),
+        text: label,
+        title: tip,
+      });
+    tags.append(
+      tag(
+        "MCP",
+        c.mcpReady,
+        c.mcpStale,
+        c.mcpStale ? "配着的地址与当前监听的不一致，点「重新安装」可修正" : c.mcpReady ? "已接入" : "未接入",
+      ),
+      tag(
+        "SKILL",
+        c.skillReady,
+        c.skillOutdated,
+        c.skillOutdated
+          ? `已装 v${c.skillVersion ?? "?"}，随包版本是 v${ai?.bundledVersion ?? "?"}`
+          : c.skillReady
+            ? `已装 v${c.skillVersion ?? "?"}`
+            : "未安装",
+      ),
+    );
+    row.appendChild(tags);
+
+    const stateText = c.ready
+      ? "已接入"
+      : c.mcpStale || c.skillOutdated
+        ? "需更新"
+        : c.mcpReady || c.skillReady
+          ? "未完成"
+          : "未接入";
+    row.appendChild(
+      h(
+        "div",
+        { class: "dev-ai-state" },
+        h("span", { class: "dev-ai-state-dot" + (c.ready ? " on" : "") }),
+        h("span", { text: stateText }),
+      ),
+    );
+
+    const actions = h("div", { class: "dev-ai-actions" });
+    const disabled = !!blocker || !c.cliReady;
+    const btn = h("button", {
+      class: "btn btn-sm" + (c.ready ? "" : " btn-primary"),
+      text: c.ready ? "重新安装" : c.mcpReady || c.skillReady ? "补全接入" : "一键安装",
+    }) as HTMLButtonElement;
+    if (disabled) {
+      btn.disabled = true;
+      btn.title = blocker ?? c.note ?? "缺少必要的命令行工具";
+    }
+    btn.addEventListener("click", () => void runAi(btn, () => api.aiClientInstall(c.id), `已为 ${c.label} 完成接入`));
+    actions.appendChild(btn);
+
+    if (c.mcpReady || c.skillReady) {
+      const off = h("button", { class: "btn btn-sm", text: "断开" }) as HTMLButtonElement;
+      off.addEventListener("click", () =>
+        void runAi(off, () => api.aiClientUninstall(c.id), `已断开 ${c.label}`),
+      );
+      actions.appendChild(off);
+    }
+    row.appendChild(actions);
+
+    // note 里是「为什么不能装 / 为什么状态不对」，属于要看见的信息，但不该常驻——
+    // 只有真的有问题时才占一行
+    if (c.note) {
+      const wrap = h("div", { class: "dev-ai-row-wrap" }, row);
+      wrap.appendChild(h("div", { class: "dev-ai-note", text: c.note }));
+      return wrap;
+    }
+    return h("div", { class: "dev-ai-row-wrap" }, row);
+  }
+
+  /** 安装/卸载的公共执行体：禁用按钮 → 调命令 → 用后端原文报结果。 */
+  async function runAi(
+    btn: HTMLButtonElement,
+    op: () => Promise<AiClientsStatus>,
+    okMsg: string,
+  ): Promise<void> {
+    btn.disabled = true;
+    const before = btn.textContent;
+    btn.textContent = "处理中…";
+    try {
+      ai = await op();
+      ctx.toast(okMsg);
+      paint();
+    } catch (err) {
+      console.error("ai client op failed", err);
+      // 后端会说清「skill 成了但 MCP 没成」这类半成功情况，原文透给用户
+      ctx.toast(errText(err, "操作失败"));
+      btn.disabled = false;
+      btn.textContent = before;
+      // 失败后也要刷新状态：半成功时界面必须反映真实结果
+      void api.aiClientsStatus().then((st) => {
+        ai = st;
+        paint();
+      }).catch(() => {});
+    }
+  }
+
+  /** 底部两栏：左边示例提示词，右边 AI 的自动流程。 */
+  function aiShowcase(): HTMLElement {
+    const box = h("div", { class: "dev-ai-showcase" });
+    box.append(
+      h(
+        "div",
+        { class: "dev-ai-prompt" },
+        h("span", { class: "dev-ai-prompt-kicker", text: "试试这样说" }),
+        h("p", { text: "“给 iTools 做个字数统计插件，输入文字后显示字数和阅读时间。”" }),
+      ),
+      h(
+        "div",
+        { class: "dev-ai-flow" },
+        h("strong", { text: "AI 会自动完成" }),
         h(
           "div",
-          { class: "info-box info-box-warn" },
-          h("div", { class: "info-box-detail", text: t.note }),
+          { class: "dev-ai-flow-steps" },
+          ...["读取规范", "创建插件", "运行调试"].flatMap((s) => [
+            h("span", { class: "dev-ai-step", text: s }),
+            h("i", { class: "dev-ai-arrow", text: "→" }),
+          ]),
+          h("span", { class: "dev-ai-step dev-ai-step-done", text: "完成" }),
         ),
-      );
-      return item;
+      ),
+    );
+    return box;
+  }
+
+  /** 调试环境的背景说明。**默认折叠**——它是「需要时才查」的知识，不是每次进页面都要读的。
+   *
+   *  但不能删：里面两条是**行为差异**（name 校验放宽、settings 只给默认值），
+   *  不写出来开发者会当成 bug 去查（见开发准则：行为差异必须在 UI 上告知）。 */
+  function envNote(): HTMLElement {
+    const box = h("details", { class: "dev-envnote" });
+    box.appendChild(h("summary", { text: "调试环境是怎么隔离的？（点开查看）" }));
+    for (const t of [
+      "正在开发的插件跑在独立的加载目录、独立的测试数据库、独立的沙盒与授权表里，云同步也被 Mock 掉了。调试怎么折腾都碰不到已安装的正式插件，也不会把调试数据传上云端。",
+      "正式环境要求 plugin.json 的 name 与目录名一致，不一致直接跳过；调试环境刻意放宽了这条 —— 照样加载，但会在下面把问题如实标出来。所以「调试能跑」不等于「能发布」。",
+      "调试会话里 itools.settings.get() / all() 只返回 settings.json 声明的 default，读不到用户设置值 —— 这是刻意隔离。想验证不同取值，请直接改 settings.json 里的 default 再重新运行。",
+    ]) {
+      box.appendChild(h("p", { text: t }));
     }
-
-    const actions = h("div", { class: "dev-run-actions" });
-    const run = async (btn: HTMLButtonElement, op: () => Promise<SkillsStatus>, okMsg: string) => {
-      btn.disabled = true;
-      try {
-        skills = await op();
-        ctx.toast(okMsg);
-        paint();
-      } catch (err) {
-        console.error("skills op failed", err);
-        // 后端拒绝的原因（如「这个目录不是 iTools 装的」）要原样给用户看，不改写成泛泛的失败
-        ctx.toast(errText(err, "操作失败"));
-        btn.disabled = false;
-      }
-    };
-
-    const installLabel = !t.installed ? "安装" : t.outdated ? `更新到 v${bundled}` : "重新安装";
-    const installBtn = h("button", {
-      class: "btn btn-sm" + (t.installed && !t.outdated ? "" : " btn-primary"),
-      text: installLabel,
-    }) as HTMLButtonElement;
-    installBtn.addEventListener("click", () => {
-      void run(installBtn, () => api.skillsInstall(t.id), `已安装到 ${t.label}`);
-    });
-    actions.appendChild(installBtn);
-
-    if (t.installed && t.managed) {
-      const rmBtn = h("button", { class: "btn btn-sm", text: "卸载" }) as HTMLButtonElement;
-      rmBtn.addEventListener("click", () => {
-        void run(rmBtn, () => api.skillsUninstall(t.id), `已从 ${t.label} 卸载`);
-      });
-      actions.appendChild(rmBtn);
-    }
-    item.appendChild(actions);
-    return item;
+    return box;
   }
 
   function dirsCard(): HTMLElement {
@@ -1125,7 +1126,7 @@ export async function renderDev(root: HTMLElement, ctx: AdminCtx): Promise<void>
     const main = plugins.length
       ? h("div", { class: "dev-main" }, listPane(), detailPane())
       : h("div", { class: "dev-main dev-main-empty" }, emptyGuide());
-    scroll.append(intro(), mcpCard(), skillCard(), dirsCard(), main);
+    scroll.append(aiHeader(), aiClientsCard(), aiShowcase(), envNote(), dirsCard(), main);
   }
 
   /** 列表指纹：只覆盖会影响界面的字段。用来判断「后台刷新到底有没有变化」，
@@ -1175,39 +1176,26 @@ export async function renderDev(root: HTMLElement, ctx: AdminCtx): Promise<void>
 
   paint();
 
-  // MCP 状态要问后端（它是实际监听结果），拿到后只重绘这一块。
-  // 读失败也如实呈现——把「查不到」显示成「没运行」会让人白折腾端口。
+  // 接入状态要问后端（MCP 是否在监听、各家配没配、skill 装没装），拿到后重绘这一块。
+  // 读失败也如实呈现：把「查不到」显示成「未接入」会让用户一直点安装、一直失败。
   void api
-    .mcpStatus()
+    .aiClientsStatus()
     .then((st) => {
       if (active !== instance) return;
-      mcp = st;
+      ai = st;
       paint();
     })
     .catch((err) => {
       if (active !== instance) return;
-      console.error("mcp_status failed", err);
-      mcp = { running: false, port: 0, url: "", error: `读取状态失败：${errText(err, "未知错误")}` };
-      paint();
-    });
-
-  // skill 安装状态同理：读失败就把原因显示成「源不可用」，不假装成「未安装」——
-  // 后者会让用户一直点安装、一直失败。
-  void api
-    .skillsStatus()
-    .then((st) => {
-      if (active !== instance) return;
-      skills = st;
-      paint();
-    })
-    .catch((err) => {
-      if (active !== instance) return;
-      console.error("skills_status failed", err);
-      skills = {
-        sourceAvailable: false,
-        sourceError: `读取安装状态失败：${errText(err, "未知错误")}`,
+      console.error("ai_clients_status failed", err);
+      ai = {
+        mcpRunning: false,
+        mcpUrl: "",
+        skillSourceAvailable: false,
+        skillSourceError: `读取接入状态失败：${errText(err, "未知错误")}`,
         bundledVersion: "",
-        targets: [],
+        detectedCount: 0,
+        clients: [],
       };
       paint();
     });

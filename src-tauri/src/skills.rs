@@ -22,21 +22,11 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
-use crate::logging::ilog;
-
 /// skill 目录名。既是源目录名，也是我们在用户 skills 目录里的命名空间。
-const SKILL_NAME: &str = "itools-plugin-dev";
+pub(crate) const SKILL_NAME: &str = "itools-plugin-dev";
 
 /// 安装标记文件名。**覆盖与卸载的唯一凭据**，没有它我们就当那个目录不是自己的。
-const MARKER: &str = ".installed-by-itools.json";
-
-/// 支持的客户端：`(id, 展示名, 家目录下的配置目录名)`。
-///
-/// 两家吃的是同一份 `SKILL.md`（开放格式），所以源目录只有一份、装到两处。
-const TARGETS: &[(&str, &str, &str)] = &[
-    ("claude", "Claude Code", ".claude"),
-    ("codex", "Codex CLI", ".codex"),
-];
+pub(crate) const MARKER: &str = ".installed-by-itools.json";
 
 /// 安装标记的内容。
 #[derive(Debug, Serialize, Deserialize)]
@@ -48,57 +38,11 @@ struct Marker {
     version: String,
 }
 
-/// 一个目标客户端的安装状态。
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SkillTarget {
-    /// 客户端 id（`claude` / `codex`），调用安装/卸载时传它。
-    pub id: String,
-    /// 给用户看的名字。
-    pub label: String,
-    /// 完整目标路径。**面板上要显示出来**——写别人的目录，得让他先看见写到哪。
-    pub dir: String,
-    /// 家目录下有没有这个客户端的配置目录。没有多半是没装该客户端（仍允许安装）。
-    pub client_detected: bool,
-    /// 目标目录存不存在。
-    pub installed: bool,
-    /// 是不是 iTools 装的（有 [`MARKER`]）。`installed` 为真而这里为假 = 用户自己的同名 skill。
-    pub managed: bool,
-    /// 已装的版本（来自标记文件；非托管目录读不到，为 None）。
-    pub installed_version: Option<String>,
-    /// 已装版本与随包版本不一致 —— 该更新了。
-    pub outdated: bool,
-    /// 需要额外讲清楚的情况（如「目录已存在但不是 iTools 装的」）。
-    pub note: Option<String>,
-}
-
-/// 全部目标的安装状态 + 源可用性。
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SkillsStatus {
-    /// 随包的 skill 源目录在不在。**为假时一切安装按钮都该禁用**，而不是点了才报错。
-    pub source_available: bool,
-    /// 源不可用的真实原因。
-    pub source_error: Option<String>,
-    /// 随包 skill 的版本（= 当前 iTools 版本）。
-    pub bundled_version: String,
-    pub targets: Vec<SkillTarget>,
-}
-
-fn home() -> Result<PathBuf, String> {
-    dirs::home_dir().ok_or_else(|| "找不到当前用户的家目录，无法定位 skills 目录".to_string())
-}
-
-/// 某客户端的 skill 安装目录：`~/<client>/skills/itools-plugin-dev`。
-fn target_dir(home: &Path, client_dir: &str) -> PathBuf {
-    home.join(client_dir).join("skills").join(SKILL_NAME)
-}
-
 /// 随包分发的 skill 源目录。
 ///
 /// 与 [`crate::plugin::resolve_plugins_root`] 同一套双分支：dev 下用项目根的 `skills/`
 /// （改完立刻能装，不用重新打包），打包后用 `resource_dir/skills`。
-fn source_dir(app: &AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn source_dir(app: &AppHandle) -> Result<PathBuf, String> {
     if let Some(dev) = dev_source_dir() {
         return Ok(dev);
     }
@@ -120,7 +64,7 @@ fn source_dir(app: &AppHandle) -> Result<PathBuf, String> {
 ///
 /// 单独抽出来是为了能被测试直接跑——它是「面板上的安装按钮在 dev 下到底能不能用」的全部依据。
 /// 打包后不会命中（安装目录里没有 `src-tauri`），那时走 `resource_dir`。
-fn dev_source_dir() -> Option<PathBuf> {
+pub(crate) fn dev_source_dir() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     exe.ancestors()
         .find(|anc| anc.join("src-tauri").is_dir())
@@ -136,64 +80,11 @@ fn read_marker(dir: &Path) -> Option<Marker> {
     (m.installed_by == "iTools").then_some(m)
 }
 
-fn scan_target(home: &Path, id: &str, label: &str, client_dir: &str, bundled: &str) -> SkillTarget {
-    let dir = target_dir(home, client_dir);
-    let installed = dir.is_dir();
-    let marker = if installed { read_marker(&dir) } else { None };
-    let managed = marker.is_some();
-    let installed_version = marker.map(|m| m.version);
-    let outdated = managed && installed_version.as_deref() != Some(bundled);
-    let note = if installed && !managed {
-        Some(format!(
-            "这个目录已经存在，但不是 iTools 装的（没有 {MARKER} 标记）。\
-             为免覆盖你自己的文件，安装与卸载都不会碰它；确实要换成 iTools 版的话，请先手动删除或改名。"
-        ))
-    } else {
-        None
-    };
-    SkillTarget {
-        id: id.to_string(),
-        label: label.to_string(),
-        dir: dir.display().to_string(),
-        client_detected: home.join(client_dir).is_dir(),
-        installed,
-        managed,
-        installed_version,
-        outdated,
-        note,
-    }
-}
-
-/// 当前状态（面板渲染 + 每次安装/卸载后回传）。
-fn status_of(app: &AppHandle) -> Result<SkillsStatus, String> {
-    let home = home()?;
-    let bundled = env!("CARGO_PKG_VERSION");
-    let (source_available, source_error) = match source_dir(app) {
-        Ok(_) => (true, None),
-        Err(e) => (false, Some(e)),
-    };
-    Ok(SkillsStatus {
-        source_available,
-        source_error,
-        bundled_version: bundled.to_string(),
-        targets: TARGETS
-            .iter()
-            .map(|(id, label, cdir)| scan_target(&home, id, label, cdir, bundled))
-            .collect(),
-    })
-}
-
-fn find_target(id: &str) -> Result<(&'static str, &'static str, &'static str), String> {
-    TARGETS
-        .iter()
-        .find(|(tid, _, _)| *tid == id)
-        .copied()
-        .ok_or_else(|| {
-            format!(
-                "不认识的客户端「{id}」。支持的是：{}",
-                TARGETS.iter().map(|(i, _, _)| *i).collect::<Vec<_>>().join(" / ")
-            )
-        })
+/// 某个 skill 目录里装的是哪个版本（**只认带我们标记的**，别人放的返回 None）。
+///
+/// 给 [`crate::ai_clients`] 用：它按客户端组织状态，不需要整个 `SkillTarget`。
+pub(crate) fn installed_version(dir: &Path) -> Option<String> {
+    read_marker(dir).map(|m| m.version)
 }
 
 /// 递归复制，**跳过源目录里可能存在的标记文件**（标记只应由本模块写）。
@@ -219,7 +110,7 @@ fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
 ///
 /// 与命令层分开是为了**能被测试真正跑一遍**：命令层只做「id → 路径」的解析，
 /// 所有会动文件的判断都在这里，测试因此可以覆盖完整的装 / 覆盖 / 拒绝流程。
-fn install_to(src: &Path, dst: &Path, version: &str) -> Result<(), String> {
+pub(crate) fn install_to(src: &Path, dst: &Path, version: &str) -> Result<(), String> {
     if dst.is_dir() && read_marker(dst).is_none() {
         return Err(format!(
             "{} 已经存在，但不是 iTools 装的（没有 {MARKER} 标记）。\
@@ -254,7 +145,7 @@ fn install_to(src: &Path, dst: &Path, version: &str) -> Result<(), String> {
 }
 
 /// 删掉 `dst`，但**只在它带我们的标记时**。
-fn uninstall_at(dst: &Path) -> Result<(), String> {
+pub(crate) fn uninstall_at(dst: &Path) -> Result<(), String> {
     if !dst.is_dir() {
         return Err(format!("本来就没装（{}）。", dst.display()));
     }
@@ -265,41 +156,6 @@ fn uninstall_at(dst: &Path) -> Result<(), String> {
         ));
     }
     std::fs::remove_dir_all(dst).map_err(|e| format!("删除失败（{}）：{e}", dst.display()))
-}
-
-// ==================== 命令 ====================
-
-/// 命令：读 skill 安装状态。
-#[tauri::command]
-pub fn skills_status(app: AppHandle) -> Result<SkillsStatus, String> {
-    status_of(&app)
-}
-
-/// 命令：把 skill 装到指定客户端（已装则整目录替换成随包版本）。
-///
-/// 目标存在但**没有**我们的标记时**直接拒绝**，不覆盖：那是用户自己的同名 skill。
-#[tauri::command]
-pub fn skills_install(app: AppHandle, target: String) -> Result<SkillsStatus, String> {
-    let (_, label, client_dir) = find_target(&target)?;
-    let src = source_dir(&app)?;
-    let home = home()?;
-    let dst = target_dir(&home, client_dir);
-
-    install_to(&src, &dst, env!("CARGO_PKG_VERSION")).map_err(|e| format!("{label}：{e}"))?;
-    ilog!("[iTools] 已安装 skill 到 {}", dst.display());
-    status_of(&app)
-}
-
-/// 命令：卸载（只删**带我们标记**的目录）。
-#[tauri::command]
-pub fn skills_uninstall(app: AppHandle, target: String) -> Result<SkillsStatus, String> {
-    let (_, label, client_dir) = find_target(&target)?;
-    let home = home()?;
-    let dst = target_dir(&home, client_dir);
-
-    uninstall_at(&dst).map_err(|e| format!("{label}：{e}"))?;
-    ilog!("[iTools] 已卸载 skill：{}", dst.display());
-    status_of(&app)
 }
 
 #[cfg(test)]
@@ -334,18 +190,6 @@ mod tests {
         std::fs::write(tmp.join(MARKER), "{ 这不是 json").expect("写坏标记");
         assert!(read_marker(&tmp).is_none(), "解析失败要退化成「不是我们的」，不能 panic");
         let _ = std::fs::remove_dir_all(&tmp);
-    }
-
-    /// 目标路径必须落在 `<客户端>/skills/<命名空间>` 下，不能越出去。
-    #[test]
-    fn target_path_stays_in_its_namespace() {
-        let home = PathBuf::from("C:\\Users\\someone");
-        for (_, _, cdir) in TARGETS {
-            let p = target_dir(&home, cdir);
-            assert!(p.starts_with(&home), "目标必须在家目录内");
-            assert!(p.ends_with(SKILL_NAME), "目标必须以命名空间目录结尾，不能是 skills 根");
-            assert_eq!(p.parent().and_then(|x| x.file_name()), Some("skills".as_ref()));
-        }
     }
 
     /// 复制时不能把源目录里混进来的标记文件也带过去（标记只能由安装流程写）。
@@ -408,47 +252,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// 状态字段的四种组合必须自洽 —— 面板完全按它们决定摆不摆按钮、摆哪个，
-    /// 这里错一个字段，界面上就会出现一个「点了必然失败」的控件。
-    #[test]
-    fn scan_reports_managed_outdated_and_note_consistently() {
-        let base = std::env::temp_dir().join("itools-skill-test-scan");
-        let _ = std::fs::remove_dir_all(&base);
-        let home = base.join("home");
-        let dir = target_dir(&home, ".claude");
-        let scan = || scan_target(&home, "claude", "Claude Code", ".claude", "1.2.0");
-
-        // ① 没装
-        let t = scan();
-        assert!(!t.installed && !t.managed && !t.outdated, "没装时三个标志都该是 false");
-        assert!(t.note.is_none(), "没装不需要额外说明");
-        assert!(!t.client_detected, "家目录里没有 .claude 就该如实说没检测到");
-
-        // ② 装了、版本一致
-        std::fs::create_dir_all(&dir).expect("建目录");
-        std::fs::write(dir.join(MARKER), r#"{"installedBy":"iTools","version":"1.2.0"}"#).expect("写标记");
-        let t = scan();
-        assert!(t.installed && t.managed, "带标记的目录是我们的");
-        assert!(!t.outdated, "同版本不该报「可更新」");
-        assert!(t.client_detected, "目录建出来了就该检测到");
-
-        // ③ 装了、版本落后
-        std::fs::write(dir.join(MARKER), r#"{"installedBy":"iTools","version":"1.0.0"}"#).expect("写旧标记");
-        let t = scan();
-        assert!(t.outdated, "版本不一致要报「可更新」");
-        assert_eq!(t.installed_version.as_deref(), Some("1.0.0"));
-
-        // ④ 目录在、但不是我们装的
-        std::fs::remove_file(dir.join(MARKER)).expect("删标记");
-        let t = scan();
-        assert!(t.installed && !t.managed, "没标记就不是我们的");
-        assert!(!t.outdated, "不是我们的就谈不上「可更新」");
-        assert!(t.installed_version.is_none(), "读不到版本就别编一个");
-        assert!(t.note.is_some(), "非托管必须给出说明——面板靠它决定不摆按钮");
-
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
     /// 用户自己放的同名 skill：既不覆盖也不删除，且**原文件必须原封不动**。
     #[test]
     fn refuses_to_touch_a_dir_we_did_not_install() {
@@ -471,11 +274,5 @@ mod tests {
             "被拒绝的两次操作都不许改动用户的文件"
         );
         let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    fn unknown_target_is_rejected_with_the_valid_list() {
-        let e = find_target("cursor").expect_err("不支持的客户端要报错");
-        assert!(e.contains("claude") && e.contains("codex"), "错误里要给出支持的清单：{e}");
     }
 }

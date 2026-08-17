@@ -22,7 +22,13 @@ tauri-plugin-global-shortcut = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-notification = "2"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# preserve_order：改写 AI 客户端的 MCP 配置时要原样保留用户其余键的顺序。
+# `~/.claude.json` 有 100KB+ 全是它自己的运行状态，键序被打乱虽不改变语义，
+# 却会让用户完全看不出我们到底动了哪一处。
+serde_json = { version = "1", features = ["preserve_order"] }
+# Codex 的 MCP 配置是 TOML（`[mcp_servers.<name>]`）。用 toml_edit 而不是 toml：
+# 前者**保留注释与原有格式**，只改我们那一段——用户在 config.toml 里写的注释不能被吃掉。
+toml_edit = "0.22"
 walkdir = "2"
 fuzzy-matcher = "0.3"
 dirs = "5"

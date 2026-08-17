@@ -5,6 +5,30 @@
     "syncEnabled",
     "username"
   ],
+  "AiClient": [
+    "cliReady",
+    "configPath",
+    "detected",
+    "id",
+    "label",
+    "mcpReady",
+    "mcpStale",
+    "note",
+    "ready",
+    "skillOutdated",
+    "skillPath",
+    "skillReady",
+    "skillVersion"
+  ],
+  "AiClientsStatus": [
+    "bundledVersion",
+    "clients",
+    "detectedCount",
+    "mcpRunning",
+    "mcpUrl",
+    "skillSourceAvailable",
+    "skillSourceError"
+  ],
   "AppSettings": [
     "auto_clear_seconds",
     "autostart",
@@ -341,23 +365,6 @@
   "SettingsSchema": [
     "groups",
     "version"
-  ],
-  "SkillTarget": [
-    "clientDetected",
-    "dir",
-    "id",
-    "installed",
-    "installedVersion",
-    "label",
-    "managed",
-    "note",
-    "outdated"
-  ],
-  "SkillsStatus": [
-    "bundledVersion",
-    "sourceAvailable",
-    "sourceError",
-    "targets"
   ],
   "Submission": [
     "contentHash",

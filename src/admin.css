@@ -3516,3 +3516,358 @@ select {
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* ==================== 开发者中心 · AI 助手接入 ====================
+   参照产品设计稿重排：这一页原来是三张并列卡片 + 大段说明文字，
+   信息密度高但主线不清。现在只讲一件事——让你的 AI 会写 iTools 插件：
+   一行一个助手、一个按钮装好两样东西、每处说明一句话。 */
+
+.dev-hero {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 4px 2px 18px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 20px;
+}
+.dev-hero-kicker {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: var(--text-faint);
+  text-transform: uppercase;
+}
+.dev-hero-title {
+  margin: 6px 0 8px;
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+.dev-hero-sub {
+  font-size: 13px;
+  color: var(--text-sub);
+}
+
+/* 右上角环境状态：绿=就绪，灰=没起来。取值来自后端实际监听结果 */
+.dev-env-pill {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(52, 199, 89, 0.28);
+  background: rgba(52, 199, 89, 0.1);
+  color: #2a9a4c;
+  font-size: 12.5px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.dev-env-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.dev-env-pill-off {
+  border-color: var(--border);
+  background: var(--bg-sunken);
+  color: var(--text-faint);
+}
+
+/* ---------- 主卡片 ---------- */
+.dev-ai-card {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--bg-elev);
+  padding: 20px;
+  margin-bottom: 16px;
+}
+.dev-ai-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.dev-ai-icon {
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(135deg, #6d5bfe, #4b7bff);
+  color: #fff;
+  font-size: 15px;
+}
+.dev-ai-head-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.dev-ai-head-text strong {
+  display: block;
+  font-size: 15px;
+  color: var(--text);
+}
+.dev-ai-head-text small {
+  display: block;
+  margin-top: 3px;
+  font-size: 12.5px;
+  color: var(--text-sub);
+}
+.dev-ai-count {
+  flex: 0 0 auto;
+  padding: 5px 11px;
+  border-radius: 999px;
+  background: var(--bg-sunken);
+  color: var(--text-sub);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.dev-ai-loading {
+  padding: 18px 2px;
+  color: var(--text-faint);
+  font-size: 13px;
+}
+
+/* ---------- 客户端行 ---------- */
+.dev-ai-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.dev-ai-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg);
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.dev-ai-row:hover {
+  border-color: var(--border-strong);
+}
+/* 已接入：左侧一道绿边，扫一眼就知道哪几个好了 */
+.dev-ai-row-on {
+  border-left: 3px solid #34c759;
+}
+.dev-ai-mark {
+  flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 600;
+}
+.dev-ai-mark-claude {
+  background: linear-gradient(135deg, #d97757, #c15f3c);
+}
+.dev-ai-mark-codex {
+  background: linear-gradient(135deg, #3a3d44, #202225);
+}
+.dev-ai-mark-cursor {
+  background: linear-gradient(135deg, #7b61ff, #5b46d6);
+}
+.dev-ai-name {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.dev-ai-name strong {
+  display: block;
+  font-size: 13.5px;
+  color: var(--text);
+}
+.dev-ai-name small {
+  display: block;
+  margin-top: 2px;
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+
+/* 能力标签：MCP / SKILL 各自独立反映状态，不合并成一个「已安装」 */
+.dev-ai-tags {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 6px;
+}
+.dev-ai-tag {
+  padding: 3px 9px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-sunken);
+  color: var(--text-faint);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+.dev-ai-tag-on {
+  border-color: rgba(52, 199, 89, 0.3);
+  background: rgba(52, 199, 89, 0.12);
+  color: #2a9a4c;
+}
+/* 过期 / 地址不一致：比「没装」更需要被看见——它是「看着装了其实连不上」 */
+.dev-ai-tag-warn {
+  border-color: rgba(240, 160, 32, 0.35);
+  background: rgba(240, 160, 32, 0.14);
+  color: #b47612;
+}
+.dev-ai-state {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 68px;
+  font-size: 12.5px;
+  color: var(--text-sub);
+}
+.dev-ai-state-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--border-strong);
+}
+.dev-ai-state-dot.on {
+  background: #34c759;
+}
+.dev-ai-actions {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 8px;
+}
+.dev-ai-row-wrap + .dev-ai-row-wrap {
+  margin-top: 0;
+}
+/* 只有真的有问题时才出现，不常驻占位 */
+.dev-ai-note {
+  margin: 6px 2px 0 46px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: #b47612;
+}
+
+/* 底部提示条 */
+.dev-ai-tip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+  padding: 11px 14px;
+  border-radius: 10px;
+  background: var(--accent-weak);
+  color: var(--text-sub);
+  font-size: 12.5px;
+}
+.dev-ai-tip-mark {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: var(--accent);
+  color: #fff;
+  font-size: 11px;
+}
+
+/* ---------- 底部两栏：示例提示词 + 自动流程 ---------- */
+.dev-ai-showcase {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  margin-bottom: 18px;
+}
+@media (max-width: 900px) {
+  .dev-ai-showcase {
+    grid-template-columns: 1fr;
+  }
+}
+.dev-ai-prompt {
+  padding: 20px;
+  border-radius: 14px;
+  background: linear-gradient(135deg, #1e2a52, #2b3f7a);
+  color: #fff;
+}
+.dev-ai-prompt-kicker {
+  font-size: 11.5px;
+  letter-spacing: 0.06em;
+  color: rgba(255, 255, 255, 0.62);
+}
+.dev-ai-prompt p {
+  margin: 10px 0 0;
+  font-size: 14.5px;
+  line-height: 1.6;
+}
+.dev-ai-flow {
+  padding: 20px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--bg-elev);
+}
+.dev-ai-flow strong {
+  display: block;
+  font-size: 13.5px;
+  color: var(--text);
+  margin-bottom: 14px;
+}
+.dev-ai-flow-steps {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.dev-ai-step {
+  padding: 6px 11px;
+  border-radius: 8px;
+  background: var(--bg-sunken);
+  color: var(--text-sub);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.dev-ai-step-done {
+  background: rgba(52, 199, 89, 0.14);
+  color: #2a9a4c;
+}
+.dev-ai-arrow {
+  color: var(--text-faint);
+  font-size: 11px;
+  font-style: normal;
+}
+
+/* ---------- 折叠的背景说明 ---------- */
+.dev-envnote {
+  margin-bottom: 18px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-sunken);
+  padding: 0 16px;
+}
+.dev-envnote > summary {
+  cursor: pointer;
+  padding: 12px 0;
+  font-size: 12.5px;
+  color: var(--text-sub);
+  list-style: none;
+}
+.dev-envnote > summary::-webkit-details-marker {
+  display: none;
+}
+.dev-envnote > summary::before {
+  content: "▸ ";
+  color: var(--text-faint);
+}
+.dev-envnote[open] > summary::before {
+  content: "▾ ";
+}
+.dev-envnote p {
+  margin: 0 0 12px;
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--text-sub);
+}

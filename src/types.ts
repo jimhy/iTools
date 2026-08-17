@@ -674,35 +674,45 @@ export interface McpStatus {
   error: string | null;
 }
 
-/** 一个 AI 客户端的 skill 安装状态，与 Rust 侧 `SkillTarget` 一致。 */
-export interface SkillTarget {
-  /** 客户端 id（`claude` / `codex`），安装/卸载时传它。 */
+/** 一个 AI 助手的接入状态，与 Rust 侧 `AiClient` 一致。
+ *  MCP 与 skill 两件事**分别**呈现状态，因为它们可能一个成一个败。 */
+export interface AiClient {
+  /** `claude` / `codex` / `cursor`，安装与卸载时传它。 */
   id: string;
   label: string;
-  /** 完整目标路径。**必须显示出来**——这是写别人的配置目录，用户点之前有权知道写到哪。 */
-  dir: string;
-  /** 家目录下有没有该客户端的配置目录（没有多半是没装它，但仍允许安装）。 */
-  clientDetected: boolean;
-  installed: boolean;
-  /** 是不是 iTools 装的。installed 为真而这里为假 = 用户自己的同名 skill，我们不碰。 */
-  managed: boolean;
-  /** 已装版本（非托管目录读不到，为 null）。 */
-  installedVersion: string | null;
-  /** 已装版本与随包版本不一致，该更新了。 */
-  outdated: boolean;
-  /** 需要额外说清楚的情况（如「这个目录不是 iTools 装的」）。 */
+  /** 家目录下有没有它的配置目录。没有多半是没装这个客户端（仍允许安装，但要如实标注）。 */
+  detected: boolean;
+  /** MCP 已接入（读配置文件得来，不依赖 CLI 在不在）。 */
+  mcpReady: boolean;
+  /** 配着的地址与当前实际监听地址不一致（换过端口）——「配了但连不上」，比没配更迷惑人。 */
+  mcpStale: boolean;
+  /** skill 已装且是 iTools 装的。 */
+  skillReady: boolean;
+  skillOutdated: boolean;
+  skillVersion: string | null;
+  /** 接入 MCP 依赖的命令行工具在不在。**为假时一键按钮必须禁用**。 */
+  cliReady: boolean;
+  /** MCP 配置文件完整路径——写别人的文件，用户有权先看见写到哪。 */
+  configPath: string;
+  skillPath: string;
+  /** 需要额外说清的情况（skill 目录不是 iTools 装的、CLI 缺失、地址过期等）。 */
   note: string | null;
+  /** 两样都齐且都不过期。**由后端算好**，前端别再拼一遍判断逻辑。 */
+  ready: boolean;
 }
 
-/** skill 安装总状态，与 Rust 侧 `SkillsStatus` 一致。
- *  sourceAvailable=false 时安装按钮要**禁用**并显示 sourceError，
- *  不能让用户点了才发现安装包里没带 skill。 */
-export interface SkillsStatus {
-  sourceAvailable: boolean;
-  sourceError: string | null;
-  /** 随包 skill 的版本（= 当前 iTools 版本）。 */
+/** AI 助手接入的整页状态，与 Rust 侧 `AiClientsStatus` 一致。 */
+export interface AiClientsStatus {
+  /** MCP 服务器在不在跑。没跑就拿不到接入地址，一键按钮要禁用并说明原因。 */
+  mcpRunning: boolean;
+  mcpUrl: string;
+  /** 随包 skill 源可用吗（打包漏了 resources 就是 false）。 */
+  skillSourceAvailable: boolean;
+  skillSourceError: string | null;
   bundledVersion: string;
-  targets: SkillTarget[];
+  /** 检测到几个客户端。 */
+  detectedCount: number;
+  clients: AiClient[];
 }
 
 /** 开发者中心的全局配置快照，与 Rust 侧 `DevConfig` 一致。 */

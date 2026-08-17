@@ -26,7 +26,7 @@ import type {
   DevLogEntry,
   DevMockConfig,
   McpStatus,
-  SkillsStatus,
+  AiClientsStatus,
   PublishStatus,
   Preflight,
   Submission,
@@ -231,15 +231,17 @@ export const devSetMock = (cfg: DevMockConfig) => invoke<void>("dev_set_mock", {
 /** MCP 服务器的运行状态与连接地址。**来自实际监听结果**：起不来时 running=false 且带真实原因。 */
 export const mcpStatus = () => invoke<McpStatus>("mcp_status");
 
-// ---------- 插件开发 skill 的一键安装 ----------
-/** 读 skill 在各 AI 客户端里的安装状态（装没装、是不是 iTools 装的、要不要更新）。 */
-export const skillsStatus = () => invoke<SkillsStatus>("skills_status");
-/** 把随包的 skill 装到指定客户端（已装则整目录替换）。
- *  目标目录存在但**不是** iTools 装的（没有标记文件）时后端会**拒绝**并原样返回原因，
- *  UI 要把这条原因如实显示出来——绝不能悄悄覆盖用户自己的同名 skill。 */
-export const skillsInstall = (target: string) => invoke<SkillsStatus>("skills_install", { target });
-/** 卸载。后端只删**带 iTools 标记**的目录，其余一律拒绝并说明原因。 */
-export const skillsUninstall = (target: string) => invoke<SkillsStatus>("skills_uninstall", { target });
+// ---------- AI 助手接入（MCP + 插件开发 skill） ----------
+/** 读各 AI 助手的接入状态：MCP 配没配、skill 装没装、客户端检测到没有、CLI 在不在。 */
+export const aiClientsStatus = () => invoke<AiClientsStatus>("ai_clients_status");
+/** 一键接入：同时装 skill 与配 MCP。
+ *  两件事**分别报告成败**——一件成一件败时后端会说清哪个成了哪个没成，
+ *  UI 必须把这条原文显示出来，不能笼统报「失败」。 */
+export const aiClientInstall = (target: string) =>
+  invoke<AiClientsStatus>("ai_client_install", { target });
+/** 断开接入：删 skill（只删带 iTools 标记的）+ 移除 MCP 配置（只删 itools 那一项）。 */
+export const aiClientUninstall = (target: string) =>
+  invoke<AiClientsStatus>("ai_client_uninstall", { target });
 
 // ---------- 插件提审 ----------
 /** 查一个调试插件的发布状态（线上版本 + 提审历史）。**要联网**，会拉市场索引与提审接口。

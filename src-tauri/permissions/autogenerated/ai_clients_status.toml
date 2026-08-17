@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-ai-clients-status"
+description = "Enables the ai_clients_status command without any pre-configured scope."
+commands.allow = ["ai_clients_status"]
+
+[[permission]]
+identifier = "deny-ai-clients-status"
+description = "Denies the ai_clients_status command without any pre-configured scope."
+commands.deny = ["ai_clients_status"]

@@ -146,10 +146,10 @@ const COMMANDS: &[&str] = &[
         "dev_submission_detail",
         // 插件开发 MCP 服务器的运行状态（开发者中心面板显示连接地址用）
         "mcp_status",
-        // 把随包的 itools-plugin-dev skill 装进 AI 客户端的 skills 目录（仅管理中心）
-        "skills_status",
-        "skills_install",
-        "skills_uninstall",
+        // AI 助手接入：一键把 MCP 端点与插件开发 skill 装进 Claude Code / Codex / Cursor
+        "ai_clients_status",
+        "ai_client_install",
+        "ai_client_uninstall",
         // 上次更新检查的结果快照（本地瞬时，不发请求）
         "update_status",
         // 由插件调试窗口（plugin-dev）的 bridge 探针调用，**不授予**正式插件窗口

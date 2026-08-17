@@ -785,41 +785,53 @@ mod tests {
             "running / port / url 都来自**实际的监听结果**，不是配置项的回显：             端口被占用时 running=false 且 error 里是真实原因，面板不许显示一个假的「运行中」             或一个连不上的地址。",
         );
 
-        // ---------- skill 一键安装（skills.rs） ----------
+        // ---------- AI 助手接入（ai_clients.rs） ----------
         freeze(
             &mut out,
-            "SkillTarget",
-            &crate::skills::SkillTarget {
+            "AiClient",
+            &crate::ai_clients::AiClient {
                 id: "claude".into(),
                 label: "Claude Code".into(),
-                dir: "C:\\Users\\me\\.claude\\skills\\itools-plugin-dev".into(),
-                client_detected: true,
-                installed: true,
-                managed: true,
-                installed_version: Some("1.2.0".into()),
-                outdated: false,
+                detected: true,
+                mcp_ready: true,
+                mcp_stale: false,
+                skill_ready: true,
+                skill_outdated: false,
+                skill_version: Some("1.3.1".into()),
+                cli_ready: true,
+                config_path: "C:\\Users\\me\\.claude.json".into(),
+                skill_path: "C:\\Users\\me\\.claude\\skills\\itools-plugin-dev".into(),
                 note: None,
+                ready: true,
             },
             &[
-                "id", "label", "dir", "clientDetected", "installed", "managed",
-                "installedVersion", "outdated", "note",
+                "id", "label", "detected", "mcpReady", "mcpStale", "skillReady",
+                "skillOutdated", "skillVersion", "cliReady", "configPath", "skillPath", "note", "ready",
             ],
-            "写的是**别的程序**的配置目录，所以 dir 必须在面板上显示出来（点之前就知道写到哪）；\
-             managed=false 表示那个目录不是 iTools 装的，此时安装与卸载都必须拒绝、\
-             并在 note 里说明原因——绝不覆盖或删除用户自己放的同名 skill。",
+            "一行一个 AI 助手，MCP 与 skill 两个状态**分别**如实呈现：\
+             cliReady=false 时一键按钮必须禁用（而不是点了才发现 claude 不在 PATH）；\
+             mcpStale=true 表示配着的地址与当前实际监听的不一致（换过端口），\
+             这种「配了但连不上」比没配更迷惑人，必须单独标出来。\
+             configPath / skillPath 要显示出来——写的是别的程序的文件，用户有权先看见写到哪。",
         );
         freeze(
             &mut out,
-            "SkillsStatus",
-            &crate::skills::SkillsStatus {
-                source_available: true,
-                source_error: None,
-                bundled_version: "1.2.0".into(),
-                targets: Vec::new(),
+            "AiClientsStatus",
+            &crate::ai_clients::AiClientsStatus {
+                mcp_running: true,
+                mcp_url: "http://127.0.0.1:7345/mcp".into(),
+                skill_source_available: true,
+                skill_source_error: None,
+                bundled_version: "1.3.1".into(),
+                detected_count: 3,
+                clients: Vec::new(),
             },
-            &["sourceAvailable", "sourceError", "bundledVersion", "targets"],
-            "sourceAvailable=false 时安装按钮要**禁用**并显示 sourceError，\
-             不能让用户点了才发现安装包里根本没带 skill。",
+            &[
+                "mcpRunning", "mcpUrl", "skillSourceAvailable", "skillSourceError",
+                "bundledVersion", "detectedCount", "clients",
+            ],
+            "mcpRunning=false 时拿不到接入地址，一键按钮要禁用并说明原因；\
+             skillSourceAvailable=false 说明安装包漏带了 skill 资源，同样不能让用户白点。",
         );
 
         // ---------- 插件提审（dev/submit.rs） ----------

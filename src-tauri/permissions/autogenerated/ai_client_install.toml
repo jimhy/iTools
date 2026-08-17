@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-ai-client-install"
+description = "Enables the ai_client_install command without any pre-configured scope."
+commands.allow = ["ai_client_install"]
+
+[[permission]]
+identifier = "deny-ai-client-install"
+description = "Denies the ai_client_install command without any pre-configured scope."
+commands.deny = ["ai_client_install"]

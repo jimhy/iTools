@@ -1,5 +1,6 @@
 // iTools 主库入口：命令注册、协议、托盘、窗口、插件系统。
 mod account;
+mod ai_clients;
 mod commands;
 /// 前后端契约快照（纯测试模块：钉死跨 invoke 边界的字段名 + 导出机器可读清单）。
 #[cfg(test)]
@@ -17,6 +18,7 @@ mod mcp;
 mod plugin;
 mod profile;
 mod search;
+mod mcp_config;
 mod settings;
 mod skills;
 mod store;
@@ -450,9 +452,9 @@ pub fn run() {
             dev::commands::dev_submit_plugin,
             dev::commands::dev_submission_detail,
             mcp::mcp_status,
-            skills::skills_status,
-            skills::skills_install,
-            skills::skills_uninstall,
+            ai_clients::ai_clients_status,
+            ai_clients::ai_client_install,
+            ai_clients::ai_client_uninstall,
             updater::update_status,
             dev::storage::dev_storage_list,
             dev::storage::dev_storage_set,
