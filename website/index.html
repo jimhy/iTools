@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta
       name="description"
-      content="iTools 是一款为 Windows 打造的效率启动器：快速搜索应用、文件与常用工具，也能让 AI 为你创建专属插件。"
+      content="iTools 是一款为 Windows 打造的效率启动器：全盘文件毫秒级搜索，不会编程也能用 AI 快速创建自己心仪、好用的插件。"
     />
     <meta name="theme-color" content="#f7f8fb" />
     <title>iTools — 少一点寻找，多一点完成</title>
@@ -20,6 +20,7 @@
           <span>iTools</span>
         </a>
         <nav aria-label="主导航">
+          <a href="#search">全盘搜索</a>
           <a href="#ai-create">AI 创建插件</a>
           <a href="#features">能力</a>
           <a href="#experience">体验</a>
@@ -35,7 +36,7 @@
             <div class="eyebrow"><span></span>Windows 效率启动器</div>
             <h1 id="hero-title">少一点寻找，<br /><em>多一点完成。</em></h1>
             <p class="hero-lead">
-              iTools 把散落在电脑里的应用、文件和常用工具，收进一个随叫随到的搜索框。
+              按下 Alt + Space，全盘文件毫秒级呈现；应用、命令和常用工具，也在同一个搜索框里。
             </p>
             <div class="hero-actions">
               <a class="primary-download" href="/download/iTools-latest-setup.exe">
@@ -79,51 +80,68 @@
 
         <div class="container proof-row">
           <div><strong>Alt + Space</strong><span>全局唤起</span></div>
-          <div><strong>&lt; 1 秒</strong><span>输入即响应</span></div>
+          <div><strong>毫秒级</strong><span>搜索响应</span></div>
           <div><strong>本地优先</strong><span>搜索留在电脑</span></div>
-          <div><strong>可扩展</strong><span>插件持续生长</span></div>
+          <div><strong>无需编程</strong><span>AI 创建插件</span></div>
+        </div>
+      </section>
+
+      <section class="section search-showcase" id="search" aria-labelledby="search-showcase-title">
+        <div class="container search-showcase-grid">
+          <div class="search-showcase-copy">
+            <span class="search-kicker"><i aria-hidden="true"></i>全盘文件搜索</span>
+            <h2 id="search-showcase-title">整个电脑，<br /><em>毫秒找到。</em></h2>
+            <p>
+              输入 <kbd>/f</kbd> 和关键词，iTools 会在全盘文件与文件夹中即时筛选。无需翻目录，想找的结果边输入边出现。
+            </p>
+            <div class="search-capabilities">
+              <div><span>01</span><p><strong>全盘覆盖</strong><small>从系统盘到其他磁盘，文件和文件夹一起找</small></p></div>
+              <div><span>02</span><p><strong>毫秒级响应</strong><small>输入关键词的同时，搜索结果即时收窄</small></p></div>
+              <div><span>03</span><p><strong>键盘直达</strong><small>上下选择，按下回车立即打开</small></p></div>
+            </div>
+            <div class="search-shortcut"><kbd>Alt</kbd><b>+</b><kbd>Space</kbd><span>唤起后输入 <strong>/f 文件名</strong></span></div>
+          </div>
+          <figure class="search-visual">
+            <div class="search-visual-top"><span></span><span></span><span></span><strong>iTools 全盘搜索</strong><i>毫秒级</i></div>
+            <img
+              src="./public/search-showcase.png"
+              alt="iTools 使用 /f 命令进行全盘文件毫秒级搜索的界面"
+              width="1536"
+              height="1024"
+              loading="lazy"
+            />
+            <figcaption><span>实时结果</span> 输入 <strong>/f</strong> 与关键词，全盘文件即刻呈现</figcaption>
+          </figure>
         </div>
       </section>
 
       <section class="section ai-create" id="ai-create" aria-labelledby="ai-create-title">
         <div class="container ai-create-grid">
           <div class="ai-create-copy">
-            <span class="ai-badge"><i>✦</i> AI 原生插件创作</span>
-            <h2 id="ai-create-title">说出想法，<br /><em>AI 把它变成工具。</em></h2>
+            <span class="ai-badge"><i>✦</i> 人人都能创造</span>
+            <h2 id="ai-create-title">不会编程，<br />也能快速做出<br /><em>心仪的插件。</em></h2>
             <p>
-              不会写代码也没关系。告诉 AI 你想解决什么问题，它就能按照 iTools 规范创建插件、运行检查、读取日志并继续修正。
+              无需学习代码。用日常语言告诉 AI 你想要怎样的工具，它会按照 iTools 规范完成创建、调试和验证，直到真正好用。
             </p>
             <ol class="ai-steps">
-              <li><span>01</span><div><strong>描述你的需求</strong><small>“帮我做一个批量整理文件名的工具”</small></div></li>
-              <li><span>02</span><div><strong>AI 自动创建与调试</strong><small>生成插件、运行测试、发现问题后自行修正</small></div></li>
-              <li><span>03</span><div><strong>马上在 iTools 使用</strong><small>输入关键词，打开专属于你的新工具</small></div></li>
+              <li><span>01</span><div><strong>说出心仪的功能</strong><small>“帮我做一个好看、好用的专注计时工具”</small></div></li>
+              <li><span>02</span><div><strong>AI 自动创建与优化</strong><small>生成插件、运行检查，遇到问题继续修正</small></div></li>
+              <li><span>03</span><div><strong>直接在 iTools 使用</strong><small>无需部署，输入关键词就能打开自己的工具</small></div></li>
             </ol>
             <a class="ai-primary-link" href="./ai-plugin.html">查看 AI 创建插件教程 <span>→</span></a>
           </div>
 
-          <div class="ai-demo" aria-label="AI 创建 iTools 插件流程示意">
+          <figure class="ai-demo">
             <div class="ai-demo-bar"><span></span><span></span><span></span><strong>AI 编程助手</strong><i>已连接 iTools</i></div>
-            <div class="ai-demo-body">
-              <div class="chat user-chat">
-                <small>你</small>
-                <p>帮我做一个可以快速统计文字数量的 iTools 插件，输入文字就自动显示字数和阅读时间。</p>
-              </div>
-              <div class="chat ai-chat">
-                <div class="ai-avatar">✦</div>
-                <div>
-                  <small>AI</small>
-                  <p>好的，我会按 iTools 插件规范创建并验证。</p>
-                  <ul class="tool-flow">
-                    <li><i>✓</i><span>读取插件规范</span><b>read_docs</b></li>
-                    <li><i>✓</i><span>创建插件文件</span><b>2 files</b></li>
-                    <li><i>✓</i><span>重新扫描插件</span><b>rescan</b></li>
-                    <li><i>✓</i><span>运行并检查日志</span><b>run_plugin</b></li>
-                  </ul>
-                  <div class="ai-done"><span>✓</span><strong>插件已可使用</strong><small>在 iTools 中输入“字数统计”即可打开</small></div>
-                </div>
-              </div>
-            </div>
-          </div>
+            <img
+              src="./public/ai-plugin-showcase.png"
+              alt="用户描述专注计时工具，AI 自动创建并完成 iTools 插件的三步流程"
+              width="1536"
+              height="1024"
+              loading="lazy"
+            />
+            <figcaption><span><i>1</i>描述想法</span><b>→</b><span><i>2</i>AI 自动创建</span><b>→</b><span><i>3</i>马上使用</span></figcaption>
+          </figure>
         </div>
       </section>
 
@@ -136,8 +154,8 @@
           </div>
           <div class="feature-grid">
             <article class="feature-card blue-card">
-              <span>01</span><i></i><h3>一呼即应</h3>
-              <p>按下 Alt + Space，从任何界面唤起 iTools。应用、文件、命令和答案，都在指尖汇合。</p>
+              <span>01</span><i></i><h3>全盘毫秒搜索</h3>
+              <p>快速检索整个电脑里的文件与文件夹。输入关键词，毫秒级呈现匹配结果。</p>
             </article>
             <article class="feature-card violet-card">
               <span>02</span><i></i><h3>找到，也做到</h3>
@@ -221,7 +239,7 @@
             <details><summary>iTools 可以免费使用吗？<span>＋</span></summary><p>可以。iTools 目前面向所有个人用户免费提供下载与使用。</p></details>
             <details><summary>支持哪些系统？<span>＋</span></summary><p>当前正式版面向 Windows 11 64 位系统，并依赖系统自带的 WebView2 运行环境。</p></details>
             <details><summary>如何获取后续更新？<span>＋</span></summary><p>iTools 会在后台安静地检查正式版本，发现新版后可在应用内安装。</p></details>
-            <details><summary>搜索内容会被上传吗？<span>＋</span></summary><p>不会。应用与文件搜索、快捷启动和本地工具都在你的电脑上完成。</p></details>
+            <details><summary>搜索内容会被上传吗？<span>＋</span></summary><p>不会。全盘文件索引、应用搜索、快捷启动和本地工具都在你的电脑上完成。</p></details>
             <details><summary>不会编程，也能创建插件吗？<span>＋</span></summary><p>可以。连接支持 MCP 的 AI 编程助手后，只要描述工具用途，AI 就能按 iTools 规范创建、运行并调试插件。</p></details>
           </div>
         </div>
