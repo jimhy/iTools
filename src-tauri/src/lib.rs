@@ -46,6 +46,23 @@ use sync::DataStore;
 pub fn run() {
     // 最先初始化文件日志（exe 同目录 itools.log），后续所有 [iTools] 日志都落文件+stderr
     logging::init();
+    // 【提权索引守护模式】itools.exe --mft-daemon
+    //
+    // ⚠ 必须在 `tauri::Builder` **之前**拦下：守护是纯后台无窗口进程，一旦走进 Builder
+    // 就会建 WebView 主窗口、装托盘图标、注册全局热键——用户会莫名多出一个「管理员身份的
+    // iTools」，热键还会跟真正的主进程抢注册（先注册的赢，后者静默失败），
+    // 表现为「唤起热键忽然指向另一个空窗口」。所以这里判完就 return，绝不往下走。
+    //
+    // 拦截点放在 logging::init() **之后**：init() 只是以追加方式打开 exe 同目录的
+    // itools.log（每行 flush，多进程共写安全），不碰 tauri、不建窗口；而守护是
+    // SW_HIDE 拉起的、没有控制台，stderr 无人接收——下面「未提权直接退出」那条日志
+    // 只有落到文件里才查得到。
+    //
+    // 用 args_os 而不是 args：后者遇到非 UTF-8 参数会 panic，启动期不该因一个脏参数崩。
+    // skip(1) 跳过 argv[0]（exe 自身路径）。
+    if std::env::args_os().skip(1).any(|a| a == search::mft::DAEMON_ARG) {
+        run_mft_daemon(); // 内部一定 exit，永不返回
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
@@ -369,6 +386,12 @@ pub fn run() {
             commands::open_update_window,
             commands::close_admin_window,
             commands::set_settings_persist,
+            // 全盘文件名索引（/f 直读 NTFS MFT，见 search/mft/）：
+            // 查状态 / 用户主动开启（会弹一次 UAC 拉起提权守护）/ 重建索引
+            commands::file_index_status,
+            commands::file_index_enable,
+            commands::file_index_rebuild,
+            commands::file_index_disable,
             // 网络：代理连通性实测 + 「当前实际生效的同步服务器地址」
             http::test_proxy,
             account::sync_endpoint_info,
@@ -481,6 +504,39 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("运行 iTools 失败");
+}
+
+/// 守护模式主体：自检提权 → 跑索引守护循环。**只在带 `--mft-daemon` 时调用，永不返回。**
+///
+/// 返回类型是 `!`：所有分支都以 `std::process::exit` 收尾，调用点因此不需要 `return`，
+/// 也不会产生「unreachable code」告警。
+fn run_mft_daemon() -> ! {
+    // 【诚信红线】没提权就**直接失败退出**，绝不建一个空索引装作在工作。
+    //
+    // 读 MFT（FSCTL_ENUM_USN_DATA）没有非提权变通路径：实测非提权下每个盘都是
+    // ERROR_ACCESS_DENIED(5)（取证见 search/mft/volume.rs 模块文档）。此时若照常起
+    // 管道应答查询，主进程会拿到 `Some(vec![])`——按契约那是「索引可用但确实没匹配」，
+    // 于是**不会降级**到别的后端，用户搜什么都是 0 条，比干脆报错糟得多。
+    if !search::mft::is_elevated() {
+        ilog!("[iTools] MFT 索引守护启动失败：本进程未提权，读 MFT 必然全盘 ACCESS_DENIED，直接退出");
+        std::process::exit(2);
+    }
+    ilog!("[iTools] MFT 索引守护启动（已提权），开始建全盘文件名索引");
+    match search::mft::daemon::run() {
+        Ok(()) => {
+            // 实际上走不到这里：`daemon::run` 末尾是 `ipc::serve` 的 accept 死循环，
+            // 只会以 Err 收尾；而 Shutdown 请求是在守护自己的 handler 里 `exit(0)` 的
+            //（要先把响应帧写回客户端，见 daemon.rs::handle）。留着这一支只为把 `!`
+            // 的所有分支写全，不代表存在「正常退出」这条路径。
+            ilog!("[iTools] MFT 索引守护正常退出");
+            std::process::exit(0);
+        }
+        Err(e) => {
+            // 多半是管道建不起来（同名管道被占）；日志是唯一线索，守护没有界面
+            ilog!("[iTools] MFT 索引守护异常退出：{e}");
+            std::process::exit(1);
+        }
+    }
 }
 
 /// 注册唤起热键：优先用设置里的组合；无效/被占用则回退候选链。

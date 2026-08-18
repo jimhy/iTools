@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-file-index-status"
+description = "Enables the file_index_status command without any pre-configured scope."
+commands.allow = ["file_index_status"]
+
+[[permission]]
+identifier = "deny-file-index-status"
+description = "Denies the file_index_status command without any pre-configured scope."
+commands.deny = ["file_index_status"]

@@ -97,7 +97,30 @@ windows = { version = "0.61", features = [
     "Win32_UI_Shell",
     "Win32_Graphics_Gdi",
     # IShellLinkW::GetPath 的 WIN32_FIND_DATAW（解析 .lnk 指向的真实目标，用于去掉图标上的快捷方式箭头）
+    # 另供 MFT 直读用 CreateFileW 打开卷设备（\\.\C:）与 GetVolumeInformationW 认 NTFS
     "Win32_Storage_FileSystem",
+    # ↓ 以下 8 项为「全盘文件名秒搜」（直读 NTFS MFT，见 src/search/mft/）所需
+    # FSCTL_ENUM_USN_DATA / FSCTL_READ_USN_JOURNAL 及其结构体
+    # （MFT_ENUM_DATA_V0 / READ_USN_JOURNAL_DATA_V0 / USN_JOURNAL_DATA_V0 / USN_RECORD_V2 / USN_REASON_*）
+    "Win32_System_Ioctl",
+    # DeviceIoControl：上面那些 FSCTL 的唯一下发通道
+    "Win32_System_IO",
+    # CreateNamedPipeW / ConnectNamedPipe：主进程 ↔ 提权索引守护的命名管道（见 mft/ipc.rs）
+    "Win32_System_Pipes",
+    # SECURITY_ATTRIBUTES / TOKEN_USER / TOKEN_ELEVATION / GetTokenInformation：
+    # 给管道设 SDDL（只放行当前用户）+ 守护进程自检是否真的提权
+    "Win32_Security",
+    # ConvertStringSecurityDescriptorToSecurityDescriptorW（SDDL→SD）/ ConvertSidToStringSidW（SID→管道名）
+    "Win32_Security_Authorization",
+    # OpenProcessToken / GetCurrentProcess：取当前进程令牌（上面两项都要用）
+    "Win32_System_Threading",
+    # SW_HIDE：ShellExecuteW("runas") 提权拉起守护时不闪窗口
+    "Win32_UI_WindowsAndMessaging",
+    # DRIVE_FIXED（只索引本地固定盘，跳过网络盘/光驱/U 盘）。
+    # ⚠ 微软把这个常量放在 WindowsProgramming 而**不是** Storage_FileSystem 里，
+    # 且它是裸 u32（无 newtype，别写 `DRIVE_FIXED.0`）；GetDriveTypeW 本身在 FileSystem。
+    # 该 feature 目前已被依赖树里别的 crate 顺带打开，这里显式声明是为了不靠别人的 feature 活着。
+    "Win32_System_WindowsProgramming",
     # WinRT：离线 OCR（Windows.Media.Ocr）
     "Foundation",
     "Globalization",
@@ -105,6 +128,19 @@ windows = { version = "0.61", features = [
     "Media_Ocr",
     "Storage_Streams",
 ] }
+
+# debug 构建的调试信息等级。
+#
+# 默认的 `debug = 2`（完整变量信息）会让 `cargo build` 直接把 rustc 压垮：
+# 2026-08-17 实测报 `STATUS_ACCESS_VIOLATION (0xc0000005)`，换个时机报
+# `rustc-LLVM ERROR: out of memory`——都发生在 **lib 这个编译单元**上，它要同时产
+# staticlib + cdylib + rlib 三份产物，而 `windows` crate 那一大堆 feature 生成的类型
+# 会让调试信息体量再翻几倍。（`cargo test` 反而没事，它不产 cdylib/staticlib。）
+#
+# `line-tables-only` 保留**文件名 + 行号**，panic 回溯、`RUST_BACKTRACE`、断点定位都照常，
+# 只是看不到局部变量的值。真要逐变量调试某个模块时，临时把这里改回 2 并只编那一个 crate。
+[profile.dev]
+debug = "line-tables-only"
 
 [profile.release]
 codegen-units = 1

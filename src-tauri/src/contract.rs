@@ -103,7 +103,7 @@ fn freeze<T: Serialize>(
 mod tests {
     use super::*;
     use crate::account::{AccountState, EndpointInfo};
-    use crate::commands::HomeData;
+    use crate::commands::{FileIndexEnableResult, FileIndexStatus, HomeData};
     use crate::http::ProxyTestResult;
     use crate::dev::logs::DevLogEntry;
     use crate::dev::mock::DevMockConfig;
@@ -428,6 +428,49 @@ mod tests {
             },
             &["user", "recent", "pinned"],
             "主面板首屏数据。",
+        );
+
+        // ---------- 全盘文件名索引（commands.rs 的 file_index_* 三条命令） ----------
+        // 本结构**没有** #[serde(rename_all)]：字段名原样 snake_case（ready_drives / memory_mb）,
+        // 与它包装的 mft::ipc::StatusDto 保持一致。
+        freeze(
+            &mut out,
+            "FileIndexStatus",
+            &FileIndexStatus {
+                running: true,
+                state: "partial".into(),
+                ready_drives: vec!["C".into(), "D".into()],
+                failed_drives: vec![("E".into(), "拒绝访问（读取磁盘索引需要管理员权限）".into())],
+                entries: 4_640_000,
+                memory_mb: 230,
+                excluded: 8_800_000,
+            },
+            &[
+                "running", "state", "ready_drives", "failed_drives", "entries", "memory_mb",
+                "excluded",
+            ],
+            "running 与 state 是**两件事**，前端不许合并：running=false 时 state 恒为 \"off\"\
+             （守护没在应答，那时其余字段全是零值——不许渲染成「索引里 0 个文件」或「已就绪」）；\
+             running=true 时 state ∈ building | ready | partial | error，building 期间 /f 的结果\
+             本来就不全，必须与 ready 分开呈现。failed_drives 是 [盘符, 原因原文] 的二元组数组\
+             （TS 侧写成 [string, string][]），原因必须原样展示——只说「部分磁盘不可用」\
+             等于把用户蒙在鼓里。",
+        );
+
+        freeze(
+            &mut out,
+            "FileIndexEnableResult",
+            &FileIndexEnableResult {
+                outcome: "starting".into(),
+                running: true,
+                message: "已获得管理员授权，正在建立全盘索引".into(),
+            },
+            &["outcome", "running", "message"],
+            "outcome ∈ already_running | starting | declined | pending，四种结局必须被前端分开对待，\
+             否则「开启全盘索引」就是个点了看不出发生什么的按钮。pending 是**诚实的「不确定」**\
+             （提权请求发了，8 秒内既没等到守护上线也没确证被拒，UAC 对话框可能还开着），\
+             不得渲染成失败；declined 只在本次调用期间确证被拒时才给（判据局限见 commands.rs 里的注释）。\
+             message 是后端给用户的中文原文，前端直接显示、不要自己另写一套文案。",
         );
 
         // ---------- 账号 / 同步 ----------

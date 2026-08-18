@@ -3,9 +3,14 @@ pub mod apps_folder;
 pub mod builtins;
 pub mod files;
 pub mod icon;
+/// 全盘文件名秒搜（直读 NTFS MFT，提权守护进程 + 命名管道）。
+/// 存在的理由见 `mft/mod.rs`：Windows Search 的索引范围通常只有 `C:\Users\`，
+/// 其它盘一条都搜不到，且 CONTAINS 只支持词前缀。
+pub mod mft;
 pub mod winsearch;
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use fuzzy_matcher::skim::SkimMatcherV2;
@@ -28,7 +33,7 @@ pub struct SearchItem {
     pub action: String,
 }
 
-/// 内存搜索索引：应用启动扫描；文件优先走 Windows Search 秒搜，不可用则 walkdir 兜底
+/// 内存搜索索引：应用启动扫描；文件搜索三级降级（MFT 全盘 → Windows Search → walkdir 兜底）
 pub struct SearchIndex {
     apps: Arc<RwLock<Vec<apps::AppEntry>>>,
     /// 「本地启动」清单里的自定义文件/文件夹，一并参与默认搜索
@@ -36,6 +41,8 @@ pub struct SearchIndex {
     /// 插件命令（页面插件），一并参与默认搜索（kind=plugin，回车打开插件窗口）
     plugins: Arc<RwLock<Vec<crate::plugin::PluginCommand>>>,
     files: Arc<RwLock<Vec<files::FileEntry>>>,
+    /// walkdir 兜底索引是否已安排过扫描（一次性闸门，见 `scan_walkdir_index`）
+    walkdir_scan_started: Arc<AtomicBool>,
     winsearch: winsearch::WinSearchWorker,
     icon_cache: IconCache,
 }
@@ -46,19 +53,26 @@ impl SearchIndex {
         let custom = Arc::new(RwLock::new(Vec::new()));
         let plugins = Arc::new(RwLock::new(Vec::new()));
         let files = Arc::new(RwLock::new(Vec::new()));
+        let walkdir_scan_started = Arc::new(AtomicBool::new(false));
         let winsearch = winsearch::WinSearchWorker::new();
         let icon_cache: IconCache = Arc::new(Mutex::new(HashMap::new()));
 
-        // Windows Search 可用时走它全盘秒搜；不可用才用 walkdir 遍历用户目录兜底
-        if !winsearch.available {
-            let files_bg = Arc::clone(&files);
-            std::thread::spawn(move || {
-                let scanned = files::scan_files();
-                if let Ok(mut guard) = files_bg.write() {
-                    *guard = scanned;
-                }
-            });
-        }
+        // walkdir 索引是 `/f` 的最后一级兜底，只有「MFT 守护在跑」时才真的多余。
+        //
+        // 这里刻意**不**看 `winsearch.available`：老写法是「Windows Search 可用就不建 walkdir 索引」，
+        // 而实测本机 SystemIndex 的索引范围只有 C:\Users\ 与开始菜单——服务「可用」并不等于
+        // 「搜得到」。于是「服务在跑但索引范围窄」这个最常见的情况下，第 3 级降级成了空壳，
+        // 用户搜其它盘/搜不到词前缀时一条结果都拿不到。
+        let files_bg = Arc::clone(&files);
+        let started_bg = Arc::clone(&walkdir_scan_started);
+        std::thread::spawn(move || {
+            // is_running() 要走一次命名管道往返（守护缺席时 open 立刻失败，不会久等），
+            // 但仍放在后台线程里做，保持 new() 不阻塞窗口启动这一特性。
+            if mft::MftSearch::is_running() {
+                return;
+            }
+            scan_walkdir_index(&files_bg, &started_bg);
+        });
 
         spawn_app_scan(Arc::clone(&apps), Arc::clone(&icon_cache), custom_apps);
 
@@ -67,6 +81,7 @@ impl SearchIndex {
             custom,
             plugins,
             files,
+            walkdir_scan_started,
             winsearch,
             icon_cache,
         }
@@ -111,7 +126,7 @@ impl SearchIndex {
 
     /// 查询入口：
     /// - 默认：内置命令置顶 + 应用模糊匹配（支持中文名的拼音全拼/首字母）
-    /// - `/f xxx`：文件搜索（Windows Search 全盘秒搜，或 walkdir 兜底）
+    /// - `/f xxx`：文件搜索（MFT 全盘秒搜 → Windows Search → walkdir 三级降级，见 [`Self::query_files`]）
     pub fn query(&self, raw: &str, limit: usize) -> Vec<SearchItem> {
         let query = raw.trim();
         if query.is_empty() {
@@ -170,25 +185,65 @@ impl SearchIndex {
         out
     }
 
-    /// 文件搜索：优先 Windows Search 全盘秒搜，不可用则 walkdir 索引模糊兜底
+    /// 文件搜索：三级降级，**前一级「用不了」才降到下一级**（而不是「没搜到就降级」）。
+    ///
+    /// 1. MFT 全盘索引（提权守护）——真子串 + 全盘覆盖，最优；
+    /// 2. Windows Search 索引——词前缀，覆盖范围取决于系统索引配置；
+    /// 3. walkdir 内存索引——只覆盖用户常用目录，但永远在。
     fn query_files(&self, query: &str, limit: usize) -> Vec<SearchItem> {
-        if self.winsearch.available {
-            return self
-                .winsearch
-                .query(query, limit)
-                .into_iter()
-                .map(|(name, path, is_dir)| SearchItem {
-                    id: path.clone(),
-                    title: name,
-                    subtitle: path.clone(),
-                    kind: if is_dir { "folder" } else { "file" }.to_string(),
-                    target: path,
-                    icon: None,
-                    action: "open".to_string(),
-                })
-                .collect();
+        // 第 1 级。`None` = 守护没起/超时（后端用不了）；`Some(vec![])` = 索引可用但确实没匹配。
+        let mft_hit = mft::MftSearch::query(query, limit);
+        let backend = pick_file_backend(mft_hit.is_some(), self.winsearch.available);
+        if backend != FileBackend::Mft {
+            // 守护没起来 → 顺手引导用户开启全盘索引（本次查询不等它，见函数注释）
+            spawn_mft_bootstrap();
         }
+        match backend {
+            // unwrap_or_default 只是为了不 unwrap：pick_file_backend 返回 Mft 的前提就是 is_some()
+            FileBackend::Mft => mft_hit.unwrap_or_default(),
+            FileBackend::WinSearch => self.query_files_winsearch(query, limit),
+            FileBackend::Walkdir => {
+                // 启动时守护在跑 → 我们没建 walkdir 索引（省内存）；守护后来被杀/崩了就会落到这里，
+                // 而索引是空的。补建一次（后台，一个进程内最多一次），下次按键兜底就有货了，
+                // 而不是让用户面对一个「永远 0 条」的搜索框。
+                if self.files.read().map(|f| f.is_empty()).unwrap_or(false) {
+                    self.spawn_walkdir_scan();
+                }
+                self.query_files_walkdir(query, limit)
+            }
+        }
+    }
 
+    /// 后台补建 walkdir 兜底索引（`scan_walkdir_index` 内有「最多扫一次」的闸门）
+    fn spawn_walkdir_scan(&self) {
+        let files = Arc::clone(&self.files);
+        let started = Arc::clone(&self.walkdir_scan_started);
+        std::thread::spawn(move || scan_walkdir_index(&files, &started));
+    }
+
+    /// 第 2 级：Windows Search（SystemIndex）。
+    ///
+    /// 只是**降级项**：它的覆盖范围由系统索引配置决定（实测本机只有 C:\Users\ 与开始菜单），
+    /// 且 CONTAINS 只支持词前缀（搜「报告」搜不到「季度报告.docx」）。
+    fn query_files_winsearch(&self, query: &str, limit: usize) -> Vec<SearchItem> {
+        self.winsearch
+            .query(query, limit)
+            .into_iter()
+            .map(|(name, path, is_dir)| SearchItem {
+                id: path.clone(),
+                title: name,
+                subtitle: path.clone(),
+                kind: if is_dir { "folder" } else { "file" }.to_string(),
+                target: path,
+                icon: None,
+                action: "open".to_string(),
+            })
+            .collect()
+    }
+
+    /// 第 3 级：walkdir 内存索引模糊匹配。范围只有桌面/文档/下载/图片（见 `files::scan_files`），
+    /// 但不依赖任何系统服务或提权，是真正的最后兜底。
+    fn query_files_walkdir(&self, query: &str, limit: usize) -> Vec<SearchItem> {
         let matcher = SkimMatcherV2::default();
         let mut scored: Vec<(i64, SearchItem)> = Vec::new();
         if let Ok(files) = self.files.read() {
@@ -216,6 +271,68 @@ impl SearchIndex {
         }
     }
 }
+
+/// `/f` 这一次查询实际用哪个后端。抽成独立类型是为了能单测降级判定
+/// （见 `tests::file_backend_fallback_semantics`），生产路径与测试走的是同一份判定代码。
+#[derive(Debug, PartialEq, Eq)]
+enum FileBackend {
+    /// 用 MFT 的结果——**包括「零条命中」**：索引可用时「没匹配」就是最终结论
+    Mft,
+    /// MFT 用不上，退到 Windows Search
+    WinSearch,
+    /// 前两级都用不上，退到 walkdir 内存索引
+    Walkdir,
+}
+
+/// 扫描用户常用目录，填充 walkdir 兜底索引。`started` 是这份索引的一次性闸门：
+/// 用 `swap` 而不是「先读后写」，保证并发按键时最多只有一次扫描在跑
+/// （`files::scan_files` 要遍历四个用户目录，重复做纯属浪费）。
+fn scan_walkdir_index(files: &RwLock<Vec<files::FileEntry>>, started: &AtomicBool) {
+    if started.swap(true, Ordering::SeqCst) {
+        return; // 已经扫过或正在扫
+    }
+    let scanned = files::scan_files();
+    if let Ok(mut guard) = files.write() {
+        *guard = scanned;
+    }
+}
+
+/// 降级判定。参数是两条「这一级能不能用」的事实，不是「有没有结果」。
+///
+/// 关键语义：`mft_usable` 来自 `MftSearch::query(..).is_some()`。
+/// `Some(vec![])` 表示**索引可用但确实没有匹配**，此时绝不能继续降级——
+/// 再降下去只会拿回一批覆盖更窄、只支持词前缀的结果，反倒让用户以为「全盘索引不准」。
+/// 只有 `None`（守护没起 / 超时，后端用不了）才往下走。
+fn pick_file_backend(mft_usable: bool, winsearch_available: bool) -> FileBackend {
+    if mft_usable {
+        FileBackend::Mft
+    } else if winsearch_available {
+        FileBackend::WinSearch
+    } else {
+        FileBackend::Walkdir
+    }
+}
+
+/// 顺手把 MFT 守护拉起来：用户第一次用 `/f` 就被引导开启全盘索引。
+///
+/// 两点刻意的设计：
+/// 1. **放后台线程**——`ensure_running` 内部是 `ShellExecuteW("runas")`，它会阻塞到用户在
+///    UAC 对话框上作答；直接在查询线程里调，等于把搜索框卡在那儿等用户点按钮。
+/// 2. **本次查询不等它**——索引要几十秒才建好，这次仍旧走降级后端返回结果。
+///
+/// 不会骚扰用户：`ensure_running(false)` 内部有 60s 冷却，且「用户在 UAC 上点过否」之后
+/// 本次运行不再自动弹（改由设置里手动开启）。
+#[cfg(not(test))]
+fn spawn_mft_bootstrap() {
+    std::thread::spawn(|| {
+        mft::MftSearch::ensure_running(false);
+    });
+}
+
+/// 测试构建里不做引导：`cargo test` 跑到 `/f` 用例时不该弹 UAC，
+/// 更不该在测试机上真的起一个全盘索引守护。降级链本身照常被测到。
+#[cfg(test)]
+fn spawn_mft_bootstrap() {}
 
 /// 应用扫描（本地化名需 COM + 数百次 shell 调用，较重）与图标预热
 /// 串行放同一后台线程，不阻塞窗口启动/设置保存
@@ -391,6 +508,130 @@ mod tests {
         assert!(ns > ds, "卸载类条目应被降权");
     }
 
+    /// 降级链的判定语义（第 1 级返回值怎么解读）：
+    /// `Some(vec![])` = 索引可用但确实没匹配 → **不许降级**；`None` = 后端用不了 → 才降级。
+    /// 这两者一旦合并，用户就会在「MFT 索引里真没这个文件」时拿到一批覆盖更窄的结果。
+    #[test]
+    fn file_backend_fallback_semantics() {
+        let sample = SearchItem {
+            id: r"D:\x\季度报告.docx".to_string(),
+            title: "季度报告.docx".to_string(),
+            subtitle: r"D:\x\季度报告.docx".to_string(),
+            kind: "file".to_string(),
+            target: r"D:\x\季度报告.docx".to_string(),
+            icon: None,
+            action: "open".to_string(),
+        };
+
+        // 有命中：显然用第 1 级
+        let hit: Option<Vec<SearchItem>> = Some(vec![sample]);
+        assert_eq!(pick_file_backend(hit.is_some(), true), FileBackend::Mft);
+
+        // 零命中但索引可用：最容易写错的一格
+        let empty: Option<Vec<SearchItem>> = Some(Vec::new());
+        assert_eq!(
+            pick_file_backend(empty.is_some(), true),
+            FileBackend::Mft,
+            "Some(vec![]) 是「索引可用但确实没匹配」，不该降级"
+        );
+        assert_eq!(
+            pick_file_backend(empty.is_some(), false),
+            FileBackend::Mft,
+            "第 2/3 级可用与否都不影响：第 1 级已经给出了结论"
+        );
+
+        // 后端用不了才降级，降到哪一级看 Windows Search 在不在
+        let unusable: Option<Vec<SearchItem>> = None;
+        assert_eq!(
+            pick_file_backend(unusable.is_some(), true),
+            FileBackend::WinSearch,
+            "MFT 用不了、Windows Search 可用 → 第 2 级"
+        );
+        assert_eq!(
+            pick_file_backend(unusable.is_some(), false),
+            FileBackend::Walkdir,
+            "前两级都用不了 → walkdir 兜底"
+        );
+    }
+
+    /// 只要 MFT 守护没在跑，walkdir 兜底索引就必须建起来。
+    /// 老代码是「Windows Search 可用就不建」，而本机 SystemIndex 只覆盖 C:\Users\，
+    /// 于是第 3 级降级成了空壳——这条用例守着那个坑。
+    #[test]
+    fn walkdir_fallback_index_is_built() {
+        // 守护真在跑时按设计就不该建 walkdir 索引，如实跳过。
+        //
+        // 曾经这里还会被同进程的 `mft::ipc::tests::server_client_end_to_end` 误触发
+        //（它起的服务端占着生产管道名，导致本用例随执行顺序时跑时跳）。那个用例现在
+        // 监听的是独立管道名（见 `ipc::serve_on` 的文档），所以下面这一支只在**本机
+        // 真有提权守护**时才成立。
+        if mft::MftSearch::is_running() {
+            println!("MFT 守护在跑，按设计不建 walkdir 索引，跳过该用例");
+            return;
+        }
+        // 先直接扫一遍：这台机器的用户目录里确实有东西可索引，断言才有意义
+        if files::scan_files().is_empty() {
+            println!("用户目录（桌面/文档/下载/图片）为空，无法断言索引非空，跳过");
+            return;
+        }
+
+        let index = SearchIndex::new(Vec::new());
+        println!("winsearch available: {}", index.winsearch.available);
+        let mut built = 0usize;
+        for _ in 0..600 {
+            built = index.files.read().map(|f| f.len()).unwrap_or(0);
+            if built > 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(
+            built > 0,
+            "walkdir 兜底索引 30s 内没建起来（winsearch available={}）",
+            index.winsearch.available
+        );
+        println!("walkdir 索引条目数 = {built}");
+
+        // 拿索引里真实存在的一个名字，验证第 3 级真的能出结果（不是建了个不被查的索引）
+        let sample = index
+            .files
+            .read()
+            .ok()
+            .and_then(|f| f.first().map(|e| e.name.clone()));
+        let name = sample.expect("索引非空时必能取到一条");
+        let hits = index.query_files_walkdir(&name, 32);
+        assert!(
+            hits.iter().any(|h| h.title == name),
+            "walkdir 兜底应能搜到索引里的「{name}」，实得 {} 条",
+            hits.len()
+        );
+    }
+
+    /// walkdir 索引的一次性闸门：第一次真扫，之后不再重复遍历用户目录。
+    /// （降级到第 3 级发现索引为空时会补建一次，靠这个闸门不至于每次按键都扫盘。）
+    #[test]
+    fn walkdir_scan_gate_runs_once() {
+        let files = RwLock::new(Vec::new());
+        let started = AtomicBool::new(false);
+        scan_walkdir_index(&files, &started);
+        let first = files.read().map(|f| f.len()).unwrap_or(0);
+        println!("首次扫描 {first} 条");
+        if !files::scan_files().is_empty() {
+            assert!(first > 0, "用户目录里有东西，首次调用就该真的把索引填上");
+        }
+
+        // 清空后再调一次：被闸门挡住 → 内容不会被重新填上
+        if let Ok(mut g) = files.write() {
+            g.clear();
+        }
+        scan_walkdir_index(&files, &started);
+        assert_eq!(
+            files.read().map(|f| f.len()).unwrap_or(0),
+            0,
+            "第二次调用应被闸门挡住，不该重复扫盘"
+        );
+    }
+
     /// 默认只搜应用；"/f xxx" 才搜文件
     #[test]
     fn file_prefix_smoke() {
@@ -400,6 +641,15 @@ mod tests {
         assert!(
             default_results.iter().all(|r| r.kind == "app" || r.kind == "command"),
             "默认模式不应出现文件结果"
+        );
+
+        // 三级降级里哪一级会服务这次查询（测试环境一般没有提权守护 → 第 2/3 级）
+        println!(
+            "/f 走的后端: {:?}",
+            pick_file_backend(
+                mft::MftSearch::query("png", 1).is_some(),
+                index.winsearch.available
+            )
         );
 
         let file_results = index.query("/f png", 8);

@@ -141,6 +141,20 @@
     "source",
     "userValue"
   ],
+  "FileIndexEnableResult": [
+    "message",
+    "outcome",
+    "running"
+  ],
+  "FileIndexStatus": [
+    "entries",
+    "excluded",
+    "failed_drives",
+    "memory_mb",
+    "ready_drives",
+    "running",
+    "state"
+  ],
   "GitSource": [
     "domain",
     "host",

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use serde::Serialize;
@@ -11,6 +12,7 @@ use crate::account::{AccountState, AccountStore};
 use crate::launch;
 use crate::logging::ilog;
 use crate::profile::{ProfileStore, ProfileView};
+use crate::search::mft::MftSearch;
 use crate::search::{icon, SearchIndex, SearchItem};
 use crate::settings::{AppSettings, LaunchItem, SettingsStore};
 use crate::store::UsageStore;
@@ -641,4 +643,249 @@ pub async fn load_icons(
     .await
     .unwrap_or_default();
     Ok(map)
+}
+
+// ---------- 全盘文件名索引（NTFS MFT 直读，见 search/mft/mod.rs） ----------
+//
+// 这三个命令是那套「提权守护进程 + 命名管道」的**唯一**前端入口。守护是不是活着、
+// 索引建到哪一步、哪个盘失败了——一律来自向守护实发一次 IPC 拿到的回包，
+// 拿不到就如实说拿不到（`running=false` / `state="off"`），绝不用零值冒充「就绪」。
+//
+// ⚠ 三个命令都标了 `#[tauri::command(async)]`。不带 async 的命令走
+// `ExecutionContext::Blocking`，函数体被内联进 IPC handler，而 Windows 上 IPC handler
+// 由 WebView2 controller 所属的**主 UI 线程**调用——这里每个命令都要么等一次命名管道往返
+// （最长 1.5 s，见 `mft::ipc::CLIENT_TIMEOUT`）、要么轮询等 UAC 授权结果（最长
+// [`ENABLE_WAIT`]），同步执行会把托盘、全局热键和所有窗口一起卡住。
+
+/// 等待「守护上线 / 用户拒绝授权」的上限。
+///
+/// UAC 对话框弹出后用户通常两三秒内就做出选择，同意后守护建好命名管道也在 1 s 内
+/// （`daemon::run` 是先 `ipc::serve` 应答、建索引放后台线程，所以「能应答」远早于「索引建好」）。
+/// 8 s 足以把绝大多数情况定性；超了也**不猜**，如实回 `pending`。
+const ENABLE_WAIT: Duration = Duration::from_secs(8);
+/// 轮询间隔。守护缺席时一次 `is_running()` 是「打开管道即失败」立刻返回，开销可忽略。
+const ENABLE_POLL: Duration = Duration::from_millis(200);
+
+/// 全盘文件名索引的**真实**状态快照，`file_index_status` 的返回值。
+///
+/// 字段与 `mft::ipc::StatusDto` 一一对应（两侧都**没有** `#[serde(rename_all)]`，
+/// 序列化后原样 snake_case），只在外面多加一个 `running`——因为「守护在不在」与
+/// 「索引建成什么样」是两件事，混成一个字段前端就没法把「未启用」和「建索引中」分开说。
+#[derive(Serialize)]
+pub struct FileIndexStatus {
+    /// 提权守护是否**真的在应答**（`MftSearch::status()` 拿到了回包）。
+    ///
+    /// 「正在等用户点 UAC」「刚拉起、管道还没建好」这些中间态一律是 false——
+    /// 这里只报证据，不猜进程状态。
+    pub running: bool,
+    /// `off` = 守护没在应答（本命令给的值，`StatusDto` 里**不存在**这个取值）；
+    /// 其余 `building`（首次建 / 重建中）、`ready`（全部盘就绪）、`partial`（部分盘失败）、
+    /// `error`（守护内部状态锁中毒）都由守护如实上报，前端必须把 `building` 与 `ready` 分开呈现
+    /// ——建索引期间 `/f` 的结果本来就不全，显示成「已就绪」就是骗人。
+    pub state: String,
+    /// 已建好索引的盘符，如 `["C","D"]`。它**不等于**机器上的全部盘：
+    /// 没出现在这里、也没出现在 `failed_drives` 里的盘（非 NTFS / 可移动盘）压根没被枚举。
+    pub ready_drives: Vec<String>,
+    /// 建索引失败的盘及**原因原文**，如 `("E","拒绝访问（读取磁盘索引需要管理员权限）")`。
+    /// 原样展示——只说一句「部分磁盘不可用」等于把用户蒙在鼓里。
+    pub failed_drives: Vec<(String, String)>,
+    /// 可搜索条目总数（真实计数，不是估算）
+    pub entries: usize,
+    /// 索引真实占用内存（MB）
+    pub memory_mb: usize,
+    /// 因噪音目录排除规则跳过的条目数（node_modules、缓存目录等）
+    pub excluded: usize,
+}
+
+impl FileIndexStatus {
+    /// 守护没在应答时唯一诚实的答案：全零 + `state="off"`。
+    fn off() -> Self {
+        Self {
+            running: false,
+            state: "off".to_string(),
+            ready_drives: Vec::new(),
+            failed_drives: Vec::new(),
+            entries: 0,
+            memory_mb: 0,
+            excluded: 0,
+        }
+    }
+}
+
+/// 全盘索引状态：主面板 `/f` 的状态条与管理中心的索引面板都读它。
+///
+/// 守护没起来（未开启 / 用户拒过提权 / 刚被关掉）时返回 [`FileIndexStatus::off`]，
+/// 前端据此显示「未启用全盘索引，`/f` 只能搜到 Windows Search 已索引的位置」。
+#[tauri::command(async)]
+pub fn file_index_status() -> FileIndexStatus {
+    match MftSearch::status() {
+        Some(s) => FileIndexStatus {
+            running: true,
+            state: s.state,
+            ready_drives: s.ready_drives,
+            failed_drives: s.failed_drives,
+            entries: s.entries,
+            memory_mb: s.memory_mb,
+            excluded: s.excluded,
+        },
+        None => FileIndexStatus::off(),
+    }
+}
+
+/// `file_index_enable` 的结果。**必须**能让前端区分下面几种结局，否则它只能瞎猜，
+/// 就会做出一个「点了看不出发生了什么」的按钮。
+#[derive(Serialize)]
+pub struct FileIndexEnableResult {
+    /// 本次的真实结局，四取一：
+    ///
+    /// - `already_running`：守护本来就在跑，这次什么都没做（没弹 UAC）；
+    /// - `starting`：已拿到管理员授权、守护已上线，正在建索引（几十秒，期间 `state="building"`）；
+    /// - `declined`：**确证**用户在 UAC 对话框上点了「否」；
+    /// - `pending`：提权请求已发出，但在 [`ENABLE_WAIT`] 内既没等到守护上线、也没确证被拒
+    ///   （UAC 对话框可能还开着，也可能是 `ShellExecuteW` 因别的原因失败了）。
+    ///
+    /// ⚠ `declined` 判据的局限（如实写在这里，不要在前端替它补语义）：mft 侧那个
+    /// 「被拒绝过」的标记是**粘性全局量**，且用户主动关闭索引（`MftSearch::shutdown`）也会置位。
+    /// 所以本命令只把它**在本次调用期间由 false 变 true** 当作证据；若之前已经拒过 / 关过一次，
+    /// 这次再被拒就只会得到 `pending`——宁可回「不确定」，也不编一个可能不成立的「被拒绝」。
+    pub outcome: String,
+    /// 本命令返回时守护是否已在应答（`already_running` / `starting` 为 true）。
+    /// 为 true 只代表「服务活着」，索引可能还在建——具体进度看 `file_index_status`。
+    pub running: bool,
+    /// 给用户看的中文说明，与 `outcome` 一一对应，前端可直接显示（不必自己拼文案）。
+    pub message: String,
+}
+
+/// 用户主动开启全盘索引（管理中心的「开启」按钮）。会触发一次 UAC 提权。
+///
+/// `ensure_running(true)` 的 `user_initiated=true` 会忽略冷却与「上次被拒」的记忆
+/// ——用户明确要开，就该把对话框弹给他，而不是被我们自己的防抖挡住。它内部把
+/// `ShellExecuteW("runas")` 放在后台线程，所以返回 `true` **只代表守护本来就在跑**，
+/// 返回 false 时结局还没定；本命令随后限时轮询把结局定下来，见
+/// [`FileIndexEnableResult::outcome`]。
+#[tauri::command(async)]
+pub fn file_index_enable() -> FileIndexEnableResult {
+    // 先记下调用前的「被拒绝过」标记：它是粘性的，只有**本次由 false 变 true**
+    // 才能当作「用户刚刚拒绝了这一次」的证据（理由见 outcome 的文档）。
+    let declined_before = MftSearch::spawn_declined();
+
+    if MftSearch::ensure_running(true) {
+        return FileIndexEnableResult {
+            outcome: "already_running".to_string(),
+            running: true,
+            message: "全盘索引服务已在运行".to_string(),
+        };
+    }
+
+    // 提权请求已经发出去了，此刻 UAC 对话框可能还开着。这里等一会儿而不是立刻返回，
+    // 是为了让「授权成功，正在建索引」与「授权被取消」当场分开——否则前端拿到的只是
+    // 一个「不知道」，用户点完按钮看不出任何变化。
+    let deadline = Instant::now() + ENABLE_WAIT;
+    loop {
+        if MftSearch::is_running() {
+            return FileIndexEnableResult {
+                outcome: "starting".to_string(),
+                running: true,
+                message: "已获得管理员授权，正在建立全盘索引（约几十秒；建完前搜索结果可能不全）"
+                    .to_string(),
+            };
+        }
+        if !declined_before && MftSearch::spawn_declined() {
+            return FileIndexEnableResult {
+                outcome: "declined".to_string(),
+                running: false,
+                message: "管理员授权被取消，全盘索引没有开启（直接读取磁盘索引必须管理员权限）"
+                    .to_string(),
+            };
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(ENABLE_POLL);
+    }
+    FileIndexEnableResult {
+        outcome: "pending".to_string(),
+        running: false,
+        message: format!(
+            "已发起管理员授权请求，但 {} 秒内索引服务还没上线：UAC 对话框可能仍在等你确认，也可能是启动失败。确认后稍等片刻再看索引状态。",
+            ENABLE_WAIT.as_secs()
+        ),
+    }
+}
+
+/// 重建全盘索引（管理中心的「重建索引」按钮）。
+///
+/// 成功只以守护**确认收下请求**（`Response::Ok`）为准。守护没在跑时给出的是可操作的原因，
+/// 而不是笼统的「重建失败」——「服务没开」和「请求没被受理」要用户做的动作完全不同。
+///
+/// 注意重建本身是**异步**的：守护收下请求后把状态改回 `building` 并在后台重建，
+/// 所以返回 `Ok` 只表示「请求已受理」，界面要靠轮询 `file_index_status` 看进度。
+#[tauri::command(async)]
+pub fn file_index_rebuild() -> Result<(), String> {
+    if !MftSearch::is_running() {
+        return Err("全盘索引服务没有在运行，请先开启全盘索引".to_string());
+    }
+    if MftSearch::rebuild() {
+        Ok(())
+    } else {
+        Err("索引服务没有确认这次重建请求（可能刚刚退出或正忙），请稍后重试".to_string())
+    }
+}
+
+/// 关闭全盘索引，让守护进程退出并交还它占的内存。
+///
+/// # 为什么这条命令必须存在
+///
+/// 索引守护是**常驻**进程：主程序退出后它继续活着（这样下次开机 `/f` 立刻可用），
+/// 而它实测占 370 MB。只提供「开启」不提供「关闭」，等于背着用户常驻一个几百 MB 的进程
+/// ——那正是项目红线里的「让用户误以为可用/不知情」。
+///
+/// 关闭后本次运行内不会再自动拉起（`MftSearch::shutdown` 会置上「用户已拒绝」标记），
+/// 否则下一次按 `/f` 又给他弹一个 UAC。要重新开启得由用户再点一次「开启全盘索引」。
+#[tauri::command(async)]
+pub fn file_index_disable() -> Result<(), String> {
+    if MftSearch::shutdown() {
+        Ok(())
+    } else {
+        Err("索引服务没有确认这次关闭请求，可稍后重试；若一直如此，可在任务管理器结束 iTools 的索引进程".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 守护没在跑时，状态必须如实回 `running=false` / `state="off"` / 全零，
+    /// **不能**因为「拿不到状态」就退化成一个看着正常的 ready（那正是诚信红线要禁的）。
+    #[test]
+    fn file_index_status_is_honest_without_daemon() {
+        let s = file_index_status();
+        if MftSearch::is_running() {
+            // 本机真的开着全盘索引：那就反过来校验「在跑时不许报 off」
+            println!("本机守护在跑，state={} entries={}", s.state, s.entries);
+            assert!(s.running);
+            assert_ne!(s.state, "off");
+            return;
+        }
+        assert!(!s.running, "守护缺席时 running 必须是 false");
+        assert_eq!(s.state, "off", "守护缺席时 state 必须是 off，不许编 ready");
+        assert_eq!(s.entries, 0);
+        assert_eq!(s.memory_mb, 0);
+        assert!(s.ready_drives.is_empty());
+        assert!(s.failed_drives.is_empty());
+    }
+
+    /// 守护没在跑时点「重建」必须拿到**说明原因**的错误，而不是一个静默的失败
+    #[test]
+    fn file_index_rebuild_reports_reason_without_daemon() {
+        if MftSearch::is_running() {
+            println!("本机守护在跑，跳过该用例");
+            return;
+        }
+        let err = file_index_rebuild().expect_err("守护缺席时必须返回 Err");
+        assert!(
+            err.contains("没有在运行"),
+            "错误文案要告诉用户该先开启索引，实得：{err}"
+        );
+    }
 }

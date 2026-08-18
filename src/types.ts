@@ -9,6 +9,48 @@ export interface SearchItem {
   action: "open" | "copy" | "plugin";
 }
 
+/** 全盘文件索引（直读 NTFS MFT 的提权守护进程）的状态快照，与 Rust 命令
+ *  `file_index_status` 的返回**逐字段**一致。
+ *
+ *  ⚠ 这些字段是 `/f` 覆盖范围的唯一真相来源：`running=false` 说明全盘索引没开，
+ *  此时 `/f` 走的是覆盖面很窄的降级后端（大致只有用户目录），界面**必须**如实说出来。 */
+export interface FileIndexStatus {
+  /** 提权索引守护进程是否在跑。false 时其余字段没有意义（没有守护可问），不得据此显示任何数字 */
+  running: boolean;
+  /** "building"=首次/重建中；"ready"=全部盘就绪；"partial"=部分盘失败；"error"=守护内部异常 */
+  state: string;
+  /** 已就绪的盘符，如 ["C","D"]（只含本机固定 NTFS 磁盘） */
+  ready_drives: string[];
+  /** [盘符, 失败原因]；原因是后端翻好的中文（如「拒绝访问」），原样展示给用户 */
+  failed_drives: [string, string][];
+  /** 可搜索条目总数。
+   *  ⚠ `state="building"` 期间这个值是**上一轮**建索引的旧值（首次建索引时为 0）——
+   *  守护只在一轮建完时才写回它，所以建索引期间绝不能拿它当进度显示。 */
+  entries: number;
+  /** 索引真实占用（MB） */
+  memory_mb: number;
+  /** 因排除规则跳过的条目数 */
+  excluded: number;
+}
+
+/** `file_index_enable`（用户主动开启全盘索引，会弹一次 UAC）的返回，
+ *  与 Rust 侧 `FileIndexEnableResult` **逐字段**一致。 */
+export interface FileIndexEnableResult {
+  /** 本次的真实结局，四取一（判定逻辑在 Rust 侧 `commands::file_index_enable`）：
+   *  - `already_running`：守护本来就在跑，这次没弹 UAC；
+   *  - `starting`：已获授权、守护已上线，正在建索引（期间 `state="building"`）；
+   *  - `declined`：**确证**用户在 UAC 上点了「否」；
+   *  - `pending`：等待窗口内既没等到守护上线、也没确证被拒（UAC 可能还开着）。
+   *
+   *  ⚠ 别在前端替 `pending` 补成「被拒绝」——后端已经说明它判不出来了，
+   *  再往前推一步就是替用户编结论。 */
+  outcome: string;
+  /** 返回时守护是否已在应答。为 true 只代表服务活着，索引可能还在建（进度看 `file_index_status`） */
+  running: boolean;
+  /** 后端给好的中文说明，与 `outcome` 一一对应，**原样**显示即可，不要在前端另拼文案 */
+  message: string;
+}
+
 /** 主题取值 */
 export type Theme = "system" | "light" | "dark";
 

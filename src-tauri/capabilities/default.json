@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "iTools 主窗口所需的核心权限",
+  "description": "iTools 主窗口（label=main）与管理中心（label=admin）共用的核心权限——两者都是随包发布的第一方页面，信任级别相同。**不可信的远程源窗口一律走各自的白名单 capability**：插件页 plugin.json、插件调试页 plugin-dev.json、截图覆盖层 overlay.json、贴图浮窗 pin.json、更新窗口 update.json，它们都拿不到这里的任何一条。file_index_*（全盘文件名索引）三条同时授予 main 与 admin：main 的 /f 状态条要读状态，admin 里有「开启 / 重建」按钮；插件窗口绝不能有——那等于把全盘文件名索引开放给远程代码。",
   "windows": ["main", "admin"],
   "permissions": [
     "core:default",
@@ -24,6 +24,10 @@
     "allow-load-icons",
     "allow-home-data",
     "allow-toggle-pin",
+    "allow-file-index-status",
+    "allow-file-index-enable",
+    "allow-file-index-rebuild",
+    "allow-file-index-disable",
     "allow-get-settings",
     "allow-save-settings",
     "allow-pick-image",

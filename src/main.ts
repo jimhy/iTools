@@ -3,7 +3,13 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { LogicalSize, LogicalPosition } from "@tauri-apps/api/dpi";
 import { listen } from "@tauri-apps/api/event";
-import type { AppSettings, HomeData, SearchItem, UpdateInfo } from "./types";
+import type {
+  AppSettings,
+  FileIndexStatus,
+  HomeData,
+  SearchItem,
+  UpdateInfo,
+} from "./types";
 import { AUTO_CLEAR_NEVER } from "./types";
 import { TOOL_ICONS } from "./tool-icons";
 import { SYSTEM_ICONS } from "./system-icons";
@@ -57,13 +63,26 @@ let menuEl: HTMLDivElement | null = null;
 
 // ---------- 内置工具磁贴 ----------
 
-const BUILTIN_TILES: { title: string; fill: string; icon: string }[] = [
+const BUILTIN_TILES: {
+  title: string;
+  fill: string;
+  icon: string;
+  /** 悬停说明。磁贴只有一行标题、放不下解释，覆盖范围又只能靠文字说清时才加。 */
+  hint?: string;
+}[] = [
   { title: "计算器", fill: "1+2*3", icon: "calc" },
   { title: "时间戳", fill: "now", icon: "clock" },
   { title: "颜色转换", fill: "#ff8800", icon: "color" },
   { title: "进制转换", fill: "0xFF", icon: "hex" },
   { title: "打开网址", fill: "github.com", icon: "globe" },
-  { title: "文件搜索", fill: "/f ", icon: "fsearch" },
+  {
+    title: "文件搜索",
+    fill: "/f ",
+    icon: "fsearch",
+    // 只写「文件搜索」会让人以为它一直搜全盘，而覆盖范围其实取决于全盘索引开没开
+    // （没开时大致只有用户目录）。这里先给一句实话，进 /f 后由状态条给出当前真实状态。
+    hint: "按文件名搜索：/f 关键词。\n开启全盘索引后覆盖本机各固定 NTFS 磁盘；未开启时只能搜到 Windows 系统索引已收录的位置（通常只有用户目录）。当前状态在 /f 界面顶部有显示。",
+  },
 ];
 
 // ---------- 通用 ----------
@@ -104,6 +123,8 @@ async function hideKeepState(): Promise<void> {
 function setMode(next: Mode): void {
   mode = next;
   panel.classList.toggle("pane-grid", next !== "list");
+  // 全盘索引状态条只属于 /f 列表模式：切走就藏起来并停掉轮询（timer 不能在后台空转）
+  if (next !== "list") hideFsStatus();
 }
 
 function svgIcon(paths: string): string {
@@ -149,9 +170,12 @@ async function resizeToContent(): Promise<void> {
   const cap = maxContentHeight();
   let height = SEARCH_ROW_HEIGHT;
   if (mode === "list") {
-    if (items.length > 0) {
-      height += Math.min(list.scrollHeight + 2, cap);
-    }
+    // 索引状态条常驻在结果列表之上，它的高度必须计入，否则会被窗口边缘裁掉
+    // （「/f」还没打关键词时列表是空的，此时窗口高度就只由这条状态条决定）
+    const barHeight =
+      fsStatusEl && !fsStatusEl.hidden ? fsStatusEl.offsetHeight : 0;
+    const listHeight = items.length > 0 ? list.scrollHeight + 2 : 0;
+    height += Math.min(barHeight + listHeight, cap);
   } else {
     // +2 补 #home 的 1px 上边框与亚像素取整，否则折叠态也会冒出滚动条
     height += Math.min(pane.scrollHeight + 2, cap);
@@ -258,9 +282,12 @@ function createCell(opts: {
   title?: string;
   /** 直接指定的图标（完整 data URL，如内置工具的彩色 PNG） */
   iconUrl?: string;
+  /** 悬停说明（原生 tooltip）：一行标题说不清能力边界时用 */
+  hint?: string;
 }): HTMLDivElement {
   const el = document.createElement("div");
   el.className = "cell";
+  if (opts.hint) el.title = opts.hint;
   const index = gridCells.length;
 
   const icon = document.createElement("div");
@@ -524,6 +551,7 @@ function renderBuiltinSection(): HTMLDivElement {
         pinnable: false,
         title: tile.title,
         iconUrl: TOOL_ICONS[tile.icon],
+        hint: tile.hint,
       }),
     );
   }
@@ -589,6 +617,9 @@ async function runSearch(): Promise<void> {
       pane.innerHTML = "";
       renderResults(found);
       void loadIcons(token);
+      // /f 的覆盖范围取决于全盘索引状态，必须一并如实呈现（内部按 FS_POLL_MS 节流，
+      // 逐键输入不会把命名管道打满）
+      void refreshFsStatus();
     } else {
       // 默认：应用/命令网格形式；每次新查询重置展开状态
       delete sectionExpanded["pl"];
@@ -601,6 +632,435 @@ async function runSearch(): Promise<void> {
     }
   } catch (err) {
     console.error("search failed", err);
+  }
+}
+
+// ---------- /f 全盘索引状态条 ----------
+
+/**
+ * `/f` 到底能搜到哪些文件，**取决于运行期状态**，所以必须把状态如实摊在用户眼前：
+ *
+ * - 全盘索引（提权守护 + 直读 NTFS MFT）没开 → `/f` 走降级后端，覆盖面大致只有用户目录，
+ *   其它磁盘一条都搜不到（这就是「/f 只能搜到 C 盘」那个反馈的成因）；
+ * - 正在建索引 → 结果尚不完整，且这期间数字会变，得能自己刷新；
+ * - 部分盘失败 → 得让用户看见是哪个盘、为什么失败。
+ *
+ * 面板上只写「文件搜索」而不说覆盖范围，就是让用户误以为搜的是全盘——这条状态条不是装饰。
+ */
+
+/** 建索引期间的刷新间隔：2 秒足够肉眼跟上，也不至于把命名管道打满 */
+const FS_POLL_MS = 2000;
+/** 点了「开启全盘索引」/「重建索引」之后最多等多久。
+ *  守护要先过 UAC 再建索引；若用户拒了授权，状态永远不会变，轮询不能一直转下去。 */
+const FS_WAIT_MS = 120_000;
+
+let fsStatusEl: HTMLDivElement | null = null;
+/** 最近一次拿到的真实状态；null = 没拿到（原因在 fsStatusError 里） */
+let fsStatus: FileIndexStatus | null = null;
+/** 取状态失败的真实原因（空串 = 没失败）。拿不到就说拿不到，不猜、不装作正常 */
+let fsStatusError = "";
+/** 动作反馈：开启 / 重建的真实结论（含「用户拒绝了提权」），单独一行显示 */
+let fsNotice = "";
+let fsPollTimer: number | undefined;
+let fsFetching = false;
+let fsLastFetchMs = 0;
+/** 在此时刻前保持轮询（等守护提权起来 / 等重建开始），见 FS_WAIT_MS */
+let fsWaitUntil = 0;
+/** 上一次观察到的「全盘索引已在服务」；null = 还没观察过（首次不触发重跑搜索） */
+let fsCovered: boolean | null = null;
+/** 开启/重建的调用在途：按钮禁用，避免连点弹出两次 UAC */
+let fsActionBusy = false;
+
+/** 状态条元素懒建。位置：搜索栏之下、结果列表之上（.panel 的子节点顺序） */
+function ensureFsStatusEl(): HTMLDivElement {
+  if (!fsStatusEl) {
+    fsStatusEl = document.createElement("div");
+    fsStatusEl.className = "fs-status";
+    fsStatusEl.hidden = true;
+    panel.insertBefore(fsStatusEl, list);
+  }
+  return fsStatusEl;
+}
+
+/** 切出 /f 模式：藏起状态条、停轮询、清掉一次性动作反馈 */
+function hideFsStatus(): void {
+  stopFsPoll();
+  fsNotice = "";
+  if (fsStatusEl) fsStatusEl.hidden = true;
+}
+
+function stopFsPoll(): void {
+  window.clearTimeout(fsPollTimer);
+  fsPollTimer = undefined;
+}
+
+/** 只在「状态还会变」时排下一轮。已就绪 / 已 partial / 取不到状态就不轮询——
+ *  状态不会自己变，每 2 秒问一次纯属浪费。轮询在切出 /f、面板失焦时都会停。 */
+function scheduleFsPoll(): void {
+  stopFsPoll();
+  if (mode !== "list") return;
+  const running = fsStatus?.running === true;
+  const building = running && fsStatus?.state === "building";
+  // 未开启也要盯着：`/f` 的查询本身会顺手请求提权拉起守护
+  //（search/mod.rs 的 spawn_mft_bootstrap），用户在**那个** UAC 上点了「是」之后，
+  // 这条状态条得自己变成「正在建索引」，而不是一直挂着「未开启」骗人。
+  const off = fsStatus !== null && !running;
+  // 「等守护起来」：点过开启/重建后，直到守护给出 building 之外的结论，或等待窗口到期
+  const waiting = Date.now() < fsWaitUntil && !(running && !building);
+  if (!building && !off && !waiting) return;
+  fsPollTimer = window.setTimeout(() => void refreshFsStatus(true), FS_POLL_MS);
+}
+
+/** 取一次状态并重绘。`force=false` 时按 FS_POLL_MS 节流——/f 每敲一个字都会走到这里。 */
+async function refreshFsStatus(force = false): Promise<void> {
+  if (mode !== "list") return;
+  renderFsStatus(); // 先把已有状态显示出来（可能只是重新进了 /f）
+  if (fsFetching) return;
+  if (!force && Date.now() - fsLastFetchMs < FS_POLL_MS) return;
+  fsFetching = true;
+  try {
+    const raw = await invoke<unknown>("file_index_status");
+    fsStatus = normalizeFsStatus(raw);
+    fsStatusError = fsStatus
+      ? ""
+      : "索引状态的返回结构不认识（后端与界面版本不一致？）";
+  } catch (err) {
+    fsStatus = null;
+    fsStatusError = `查询索引状态失败：${errText(err)}`;
+  } finally {
+    fsFetching = false;
+    fsLastFetchMs = Date.now();
+  }
+  if (mode !== "list") return; // 期间用户切走了：不渲染也不排下一轮
+  // 已就绪就把动作反馈收掉，别让「正在请求授权…」一直挂在一条已就绪的状态上
+  if (fsStatus?.running && fsStatus.state === "ready") fsNotice = "";
+  // 覆盖范围刚刚变大（守护上线 / 索引建完）：屏幕上那批结果还是降级后端给的，
+  // 不重跑一次的话，状态条说着「全盘索引」，列表里却还是只有用户目录那几条。
+  const covered = fsStatus?.running === true && fsStatus.state !== "building";
+  if (covered && fsCovered === false && input.value.trim().length > 2) {
+    void runSearch();
+  }
+  fsCovered = covered;
+  renderFsStatus();
+  scheduleFsPoll();
+}
+
+/** 后端字段的运行期校验：缺字段就当「拿不到状态」，绝不让 undefined 渲染成一个数字。 */
+function normalizeFsStatus(raw: unknown): FileIndexStatus | null {
+  if (!raw || typeof raw !== "object") return null;
+  const o = raw as Record<string, unknown>;
+  const running = o.running;
+  if (typeof running !== "boolean") return null; // 契约的核心字段都没有，别硬撑
+  const num = (v: unknown): number =>
+    typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : 0;
+  const readyRaw = pick(o, "ready_drives", "readyDrives");
+  const failedRaw = pick(o, "failed_drives", "failedDrives");
+  return {
+    running,
+    state: typeof o.state === "string" ? o.state : "",
+    ready_drives: Array.isArray(readyRaw)
+      ? readyRaw.filter((d): d is string => typeof d === "string")
+      : [],
+    failed_drives: Array.isArray(failedRaw)
+      ? failedRaw
+          .filter(
+            (f): f is [string, string] =>
+              Array.isArray(f) && typeof f[0] === "string" && typeof f[1] === "string",
+          )
+          .map(([d, why]) => [d, why] as [string, string])
+      : [],
+    entries: num(o.entries),
+    memory_mb: num(pick(o, "memory_mb", "memoryMb")),
+    excluded: num(o.excluded),
+  };
+}
+
+/** 取字段：约定是 snake_case（后端 StatusDto 两侧都没加 rename_all），
+ *  但序列化风格万一被改成 camelCase，这里也不至于把状态渲染成空白。 */
+function pick(o: Record<string, unknown>, snake: string, camel: string): unknown {
+  return o[snake] !== undefined ? o[snake] : o[camel];
+}
+
+/** "C" → "C:"；不是单个盘符字母就原样显示（后端把异常盘记成 "?"） */
+function driveLabel(d: string): string {
+  return /^[a-zA-Z]$/.test(d) ? `${d.toUpperCase()}:` : d;
+}
+
+function driveList(drives: string[]): string {
+  return drives.map(driveLabel).join(" ");
+}
+
+/** 大数按中文习惯压缩：4640000 → "464 万"、12345 → "1.2 万" */
+function formatCount(n: number): string {
+  if (n < 10_000) return String(n);
+  const wan = n / 10_000;
+  return `${wan >= 100 ? Math.round(wan) : wan.toFixed(1)} 万`;
+}
+
+/** 把 invoke 的拒绝值变成一句能给用户看的话。后端多是 `Err(String)`，
+ *  但也可能是结构化对象——取不出人话就说「未知错误」，不显示 undefined。 */
+function errText(err: unknown): string {
+  let raw = "";
+  if (typeof err === "string") raw = err;
+  else if (err instanceof Error) raw = err.message;
+  else if (err !== null && err !== undefined) {
+    raw = pickMessage(err) || JSON.stringify(err) || "";
+  }
+  const s = raw.trim() || "未知错误";
+  return s.length > 160 ? `${s.slice(0, 160)}…` : s;
+}
+
+/** 从命令返回里取给用户看的 message（`file_index_enable` 的结论就在这个字段里）。
+ *  不是字符串就返回空串——绝不把 undefined 当成文案显示出去。 */
+function pickMessage(res: unknown): string {
+  if (typeof res === "string") return res.trim();
+  if (res && typeof res === "object") {
+    const m = (res as { message?: unknown }).message;
+    if (typeof m === "string") return m.trim();
+  }
+  return "";
+}
+
+interface FsView {
+  variant: "info" | "busy" | "warn" | "err";
+  main: string;
+  details: string[];
+  /** 悬停补充（条目数、占用、覆盖范围的细则），不占版面 */
+  tip?: string;
+  action?: { label: string; run: () => void; primary?: boolean; tip?: string };
+}
+
+/** 由真实状态推出要显示什么。每一句都只依赖已拿到的字段，没有的项就不显示。 */
+function fsStatusView(): FsView {
+  const s = fsStatus;
+  if (!s) {
+    return {
+      variant: "err",
+      main: "拿不到全盘索引状态",
+      details: [
+        fsStatusError,
+        "现在无法确认 /f 的覆盖范围，结果可能只有用户目录一带的文件。",
+      ],
+      action: { label: "重试", run: () => void refreshFsStatus(true) },
+    };
+  }
+  if (!s.running) {
+    return {
+      variant: "warn",
+      main: "未开启全盘索引",
+      details: [
+        // 措辞上的分寸：降级后端是 Windows Search（覆盖范围由系统索引配置决定，
+        // 本机实测只有 C:\Users\）或 walkdir 兜底（桌面/文档/下载/图片）。两者都在用户目录一带，
+        // 但「其它盘一定搜不到」得留余地——用户若把 D: 加进了系统索引，那就能搜到。
+        "当前 /f 只能搜到 Windows 系统索引已收录的位置（通常只有用户目录），其它磁盘一般搜不到。",
+      ],
+      action: {
+        label: "开启全盘索引",
+        primary: true,
+        tip: "需要一次管理员授权（UAC）；授权后由一个独立的索引进程读取各磁盘的文件名",
+        run: () => void enableFileIndex(),
+      },
+    };
+  }
+  if (s.state === "building") {
+    return {
+      variant: "busy",
+      main: "正在建立全盘索引…",
+      // 这里**故意不显示条目数**：守护只在一轮建完时才写回 entries，建索引期间那个值是
+      // 上一轮的旧数（首次为 0），显示出来就是假进度。见 types.ts 里 entries 的说明。
+      details: ["首次约需 40 秒，此刻的结果尚不完整。"],
+    };
+  }
+  if (s.state === "ready") {
+    // 就绪态只留很轻的一行，不抢结果列表的视觉
+    const parts = ["全盘索引"];
+    const drives = driveList(s.ready_drives);
+    if (drives) parts.push(drives);
+    if (s.entries > 0) parts.push(`${formatCount(s.entries)}条`);
+    return {
+      variant: "info",
+      main: parts.join(" · "),
+      details: [],
+      tip: fsReadyTip(s),
+      // 守护常驻并占着几百 MB，用户必须有地方关掉它（见 disableFileIndex）
+      action: {
+        label: "关闭",
+        run: () => void disableFileIndex(),
+        tip: `关闭全盘索引并释放约 ${s.memory_mb || "数百"} MB 内存；关闭后其它磁盘将搜不到`,
+      },
+    };
+  }
+  if (s.state === "partial") {
+    const details = s.failed_drives.map(
+      ([d, why]) => `${driveLabel(d)} 未索引：${why}`,
+    );
+    const ok = driveList(s.ready_drives);
+    if (ok) {
+      const count = s.entries > 0 ? ` · ${formatCount(s.entries)}条` : "";
+      details.push(`已就绪：${ok}${count}`);
+    }
+    return {
+      variant: "err",
+      main: "部分磁盘未能索引，这些盘里的文件搜不到",
+      details,
+      action: { label: "重建索引", run: () => void rebuildFileIndex() },
+    };
+  }
+  // "error" 与任何没见过的状态：把守护报的原文摊出来，不装作正常
+  const details = s.failed_drives.map(([d, why]) => `${driveLabel(d)}：${why}`);
+  details.unshift(`索引进程报告的状态：${s.state || "（空）"}`);
+  return {
+    variant: "err",
+    main: "全盘索引状态异常",
+    details,
+    action: { label: "重建索引", run: () => void rebuildFileIndex() },
+  };
+}
+
+function fsReadyTip(s: FileIndexStatus): string {
+  const lines: string[] = [];
+  const drives = driveList(s.ready_drives);
+  if (drives) lines.push(`已索引磁盘：${drives}`);
+  if (s.entries > 0) lines.push(`可搜条目：${s.entries.toLocaleString("zh-CN")}`);
+  if (s.memory_mb > 0) lines.push(`索引占用：${s.memory_mb} MB`);
+  if (s.excluded > 0) {
+    lines.push(`按排除规则跳过：${s.excluded.toLocaleString("zh-CN")} 条`);
+  }
+  lines.push("只索引本机固定 NTFS 磁盘；U 盘 / 网络盘 / 非 NTFS 卷不在其中。");
+  return lines.join("\n");
+}
+
+/** 渲染状态条（全量重建内容，纯 textContent，不拼 HTML） */
+function renderFsStatus(): void {
+  const el = ensureFsStatusEl();
+  // 首次状态还没回来（既没成功也没失败）先不占位，免得闪一条空条
+  if (mode !== "list" || (!fsStatus && !fsStatusError)) {
+    el.hidden = true;
+    return;
+  }
+  const view = fsStatusView();
+  el.className = `fs-status fs-status--${view.variant}`;
+  el.title = view.tip ?? "";
+  el.textContent = "";
+  el.hidden = false;
+
+  const dot = document.createElement("span");
+  dot.className = "fs-dot";
+
+  const body = document.createElement("div");
+  body.className = "fs-body";
+  const main = document.createElement("div");
+  main.className = "fs-main";
+  main.textContent = view.main;
+  body.appendChild(main);
+  for (const line of view.details) {
+    if (!line) continue;
+    const d = document.createElement("div");
+    d.className = "fs-detail";
+    d.textContent = line;
+    body.appendChild(d);
+  }
+  if (fsNotice) {
+    const note = document.createElement("div");
+    note.className = "fs-note";
+    note.textContent = fsNotice;
+    body.appendChild(note);
+  }
+  el.append(dot, body);
+
+  if (view.action) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = view.action.primary
+      ? "fs-action fs-action-primary"
+      : "fs-action";
+    btn.textContent = fsActionBusy ? "处理中…" : view.action.label;
+    btn.disabled = fsActionBusy;
+    if (view.action.tip) btn.title = view.action.tip;
+    // tabIndex=-1：本窗口的 Enter 被全局键盘处理占用（执行选中结果），若这个按钮能被 Tab
+    // 聚焦，聚焦后按 Enter 却触发不了它——那正是「看着能用、按了不生效」的控件。只走点击。
+    btn.tabIndex = -1;
+    btn.addEventListener("click", view.action.run);
+    el.appendChild(btn);
+  }
+  void resizeToContent();
+}
+
+/** 用户主动开启全盘索引：会弹一次 UAC，结果（含被拒绝）如实回显 */
+async function enableFileIndex(): Promise<void> {
+  if (fsActionBusy) return;
+  fsActionBusy = true;
+  fsNotice = "正在请求管理员授权…";
+  renderFsStatus();
+  // UAC 对话框会抢走焦点，而本窗口「失焦即隐藏」——不抑制的话点下按钮面板就没了，
+  // 用户根本看不到授权结果。上限 FS_WAIT_MS 兜底：万一命令迟迟不返回，抑制也会自己到期。
+  const prevSuppress = suppressHideUntil;
+  suppressHideUntil = Date.now() + FS_WAIT_MS;
+  try {
+    const res = await invoke<unknown>("file_index_enable");
+    // 后端把「已在运行 / 正在建索引 / 授权被取消 / 还没定」都写进了 message
+    //（见 commands.rs 的 FileIndexEnableResult），原样转达，不在这里改写结论
+    fsNotice = pickMessage(res) || "已请求开启（后端未给出说明）";
+    // outcome=starting/pending 时守护可能还在起（UAC 对话框也可能还开着），
+    // 这段时间持续刷新，让「建索引中 → 已就绪」自己变出来
+    fsWaitUntil = Date.now() + FS_WAIT_MS;
+  } catch (err) {
+    fsNotice = `开启失败：${errText(err)}`;
+  } finally {
+    fsActionBusy = false;
+    // 恢复失焦隐藏，留 400ms 缓冲：UAC 关闭后焦点要回到本窗口，别在这一瞬被判失焦
+    suppressHideUntil = Math.max(prevSuppress, Date.now() + 400);
+    renderFsStatus();
+    void refreshFsStatus(true);
+  }
+}
+
+/**
+ * 关闭全盘索引：让守护退出、交还它占的内存。
+ *
+ * 这个入口必须存在——守护是常驻进程（主程序退出后它继续活着，好让下次开机即搜），
+ * 实测占 370 MB。只给「开启」不给「关闭」就是背着用户常驻几百 MB。
+ * 关掉后本次运行不会再自动拉起（后端会记住），要用得再点一次「开启全盘索引」。
+ */
+async function disableFileIndex(): Promise<void> {
+  if (fsActionBusy) return;
+  fsActionBusy = true;
+  fsNotice = "正在关闭全盘索引…";
+  renderFsStatus();
+  try {
+    const res = await invoke<unknown>("file_index_disable");
+    fsNotice =
+      pickMessage(res) ||
+      "已关闭全盘索引并释放内存；/f 将回落到系统索引范围（其它磁盘一般搜不到）";
+    // 关闭后状态会变成 running:false，让轮询把状态条切到「未开启」
+    fsWaitUntil = Date.now() + 3000;
+  } catch (err) {
+    fsNotice = `关闭失败：${errText(err)}`;
+  } finally {
+    fsActionBusy = false;
+    renderFsStatus();
+    void refreshFsStatus(true);
+  }
+}
+
+/** 重建索引（部分盘失败 / 状态异常时的恢复手段） */
+async function rebuildFileIndex(): Promise<void> {
+  if (fsActionBusy) return;
+  fsActionBusy = true;
+  fsNotice = "正在请求重建索引…";
+  renderFsStatus();
+  try {
+    const res = await invoke<unknown>("file_index_rebuild");
+    // 后端签名是 Result<(), String>：resolve（即 null）只代表**守护确认收下了请求**，
+    // 重建本身是异步的，所以措辞只能说「已受理」，进度交给轮询。
+    fsNotice = pickMessage(res) || "已受理重建请求，正在后台重建（期间结果可能不全）";
+    fsWaitUntil = Date.now() + FS_WAIT_MS;
+  } catch (err) {
+    fsNotice = `重建失败：${errText(err)}`;
+  } finally {
+    fsActionBusy = false;
+    renderFsStatus();
+    void refreshFsStatus(true);
   }
 }
 
@@ -818,11 +1278,14 @@ appWindow.onFocusChanged(({ payload: focused }) => {
     input.focus();
     input.select(); // 全选：呼出后直接打字即开始新搜索，不打字则保留原界面
     void applySettings(); // 兜底刷新外观（事件可能在窗口隐藏期丢失）
+    // 停留在 /f 界面被再次呼出：索引状态可能已经变了（隐藏期不轮询），补取一次
+    if (mode === "list") void refreshFsStatus(true);
   } else {
     // 拖动窗口引起的短暂失焦不隐藏（否则一按住拖动/点边缘就把面板隐藏掉）
     if (Date.now() < suppressHideUntil) return;
     void hideKeepState();
     justHidden = true;
+    stopFsPoll(); // 窗口已隐藏：别让索引状态的轮询在后台空转
     scheduleAutoClear(); // 失焦按设置定时清除搜索内容
   }
 });

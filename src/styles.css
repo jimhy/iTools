@@ -15,6 +15,13 @@
   --scrollbar: rgba(60, 60, 67, 0.28);
   --menu-bg: rgba(250, 250, 252, 0.96);
   --bg-tint: rgba(246, 246, 248, 0.42);
+
+  /* 状态语义色（提示 / 警告 / 错误）：浅色底上要压暗，否则纯 #ff9500 之类在白底几乎读不出 */
+  --ok: #2ba34a;
+  --warn-fg: #a35a00;
+  --warn-bg: rgba(255, 149, 0, 0.13);
+  --danger-fg: #c4362b;
+  --danger-bg: rgba(255, 59, 48, 0.1);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -30,6 +37,12 @@
     --scrollbar: rgba(235, 235, 245, 0.28);
     --menu-bg: rgba(44, 44, 48, 0.96);
     --bg-tint: rgba(28, 28, 30, 0.5);
+
+    --ok: #34c759;
+    --warn-fg: #ffb340;
+    --warn-bg: rgba(255, 159, 10, 0.16);
+    --danger-fg: #ff6b60;
+    --danger-bg: rgba(255, 69, 58, 0.16);
   }
 }
 
@@ -230,6 +243,150 @@ body,
   font-size: 12px;
   line-height: 1;
   opacity: 0.85;
+}
+
+/* ---------- /f 全盘索引状态条 ---------- */
+/* 位置在搜索栏与结果列表之间，独立成一条窄带：/f 的覆盖范围随索引状态而变，
+   这里如实说明当前能搜到什么（未开启 / 建索引中 / 部分盘失败 / 已就绪）。 */
+.fs-status {
+  flex: none;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  /* 左右 16px 与 #home 的内边距对齐，视觉上是同一条竖线 */
+  padding: 8px 16px;
+  border-top: 1px solid var(--hairline);
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--fg-secondary);
+}
+
+/* display:flex 会盖掉 [hidden] 自带的 display:none，必须显式补回来 */
+.fs-status[hidden] {
+  display: none;
+}
+
+/* 已就绪：不加底色，只留一行淡字，不抢结果列表的视觉 */
+.fs-status--warn {
+  background: var(--warn-bg);
+}
+
+.fs-status--err {
+  background: var(--danger-bg);
+}
+
+/* 左侧状态点：颜色即语义，比图标省地方 */
+.fs-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: var(--fg-tertiary);
+}
+
+.fs-status--info .fs-dot {
+  background: var(--ok);
+}
+
+.fs-status--busy .fs-dot {
+  background: var(--accent);
+  /* 呼吸提示「还在建、数字会变」，比转圈省资源 */
+  animation: fs-pulse 1.2s ease-in-out infinite;
+}
+
+.fs-status--warn .fs-dot {
+  background: var(--warn-fg);
+}
+
+.fs-status--err .fs-dot {
+  background: var(--danger-fg);
+}
+
+@keyframes fs-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}
+
+.fs-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.fs-main {
+  font-weight: 500;
+  color: var(--fg);
+}
+
+/* 就绪态那一行只是背景信息：不加粗、压到二级灰。
+   ⚠ 不要再压到 --fg-tertiary（0.32 的灰）——11.5px 的字那样就真的看不清了，
+   「轻」不等于「读不出来」。 */
+.fs-status--info .fs-main {
+  font-weight: 400;
+  color: var(--fg-secondary);
+}
+
+.fs-status--warn .fs-main {
+  color: var(--warn-fg);
+}
+
+.fs-status--err .fs-main {
+  color: var(--danger-fg);
+}
+
+.fs-detail {
+  color: var(--fg-secondary);
+  /* 失败原因里可能有长盘符/长路径，折行而不是撑破面板 */
+  word-break: break-word;
+}
+
+/* 动作反馈（提权被拒、正在建索引…）：与描述文案区分开 */
+.fs-note {
+  margin-top: 3px;
+  color: var(--fg);
+  opacity: 0.75;
+  word-break: break-word;
+}
+
+.fs-action {
+  flex: none;
+  align-self: center;
+  padding: 4px 10px;
+  border-radius: 7px;
+  border: 1px solid var(--hairline);
+  background: transparent;
+  color: var(--fg);
+  font-family: var(--font-ui);
+  font-size: 11.5px;
+  cursor: pointer;
+  transition:
+    background-color 0.12s ease,
+    filter 0.12s ease;
+}
+
+.fs-action:hover {
+  background: var(--icon-bg);
+}
+
+.fs-action:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.fs-action-primary {
+  background: var(--accent);
+  border-color: transparent;
+  color: #fff;
+}
+
+.fs-action-primary:hover {
+  background: var(--accent);
+  filter: brightness(1.08);
 }
 
 /* 自定义背景图（设置里选择后由 JS 注入 background-image） */

@@ -11,6 +11,13 @@ const COMMANDS: &[&str] = &[
         "load_icons",
         "home_data",
         "toggle_pin",
+        // 全盘文件名索引（NTFS MFT 直读）：查状态 / 用户主动开启（会弹一次 UAC）/ 重建索引。
+        // **不得**授予插件窗口——那等于把全盘文件名开放给不可信的远程代码。
+        "file_index_status",
+        "file_index_enable",
+        "file_index_rebuild",
+        // 关闭全盘索引（让提权守护退出、交还其占用的内存）
+        "file_index_disable",
         "get_settings",
         "save_settings",
         "pick_image",
