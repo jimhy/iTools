@@ -165,6 +165,31 @@ function maxContentHeight(): number {
   return Math.max(320, avail - top - 48 - SEARCH_ROW_HEIGHT);
 }
 
+/**
+ * 量一个内容容器的**真实内容高度**。
+ *
+ * # 为什么不能直接读 scrollHeight（2026-08-18 的「窗口缩不回去」就是它）
+ *
+ * `#home` 与 `.results` 都是 `flex: 1` + `overflow-y: auto`，作为 `.panel`
+ * （`height: 100%`）的 flex 子项，它们会被 **flex-grow 撑满剩余空间**。于是
+ * `scrollHeight` 返回的是「被撑开后的高度」，而不是内容自己的高度——
+ * 一旦窗口被撑高过（比如 `/f` 出了一屏结果），回到主面板时量到的仍是那个大值，
+ * 于是算出的新高度 ≈ 当前高度，窗口**再也缩不回去**，主面板下方留一大片空白。
+ *
+ * 解法是量之前先把 flex-grow 摘掉、高度交还给内容，量完立刻还原。
+ * 两次同步 reflow 都在同一帧内完成，不会被绘制出来，用户看不到闪烁。
+ */
+function contentHeight(el: HTMLElement): number {
+  const prevFlex = el.style.flex;
+  const prevHeight = el.style.height;
+  el.style.flex = "0 0 auto";
+  el.style.height = "auto";
+  const measured = el.scrollHeight;
+  el.style.flex = prevFlex;
+  el.style.height = prevHeight;
+  return measured;
+}
+
 /** 窗口高度随内容伸缩（宽度固定）；内容超过屏幕可用高度才在内部滚动 */
 async function resizeToContent(): Promise<void> {
   const cap = maxContentHeight();
@@ -174,11 +199,11 @@ async function resizeToContent(): Promise<void> {
     // （「/f」还没打关键词时列表是空的，此时窗口高度就只由这条状态条决定）
     const barHeight =
       fsStatusEl && !fsStatusEl.hidden ? fsStatusEl.offsetHeight : 0;
-    const listHeight = items.length > 0 ? list.scrollHeight + 2 : 0;
+    const listHeight = items.length > 0 ? contentHeight(list) + 2 : 0;
     height += Math.min(barHeight + listHeight, cap);
   } else {
     // +2 补 #home 的 1px 上边框与亚像素取整，否则折叠态也会冒出滚动条
-    height += Math.min(pane.scrollHeight + 2, cap);
+    height += Math.min(contentHeight(pane) + 2, cap);
   }
   await appWindow.setSize(new LogicalSize(WINDOW_WIDTH, Math.round(height)));
 }
