@@ -39,6 +39,13 @@ iTools 主进程内置一个 MCP 服务器，把「开发者中心」的能力�
 传输是 **Streamable HTTP**（`POST /mcp`，JSON-RPC 2.0），**不是 stdio、也没有 SSE 推送**。
 配置时选错传输形态是连不上的常见原因之一。
 
+> **上面那个 server 名 `itools` 是给正式版用的**，照抄即可。
+> 只有一种例外：iTools 的 **debug 构建**（开发者自己 `cargo run` / 打 debug 包跑起来的那个）
+> 刻意占用另一个名字 **`itools-dev`** —— 它和正式版是两个不同端口的服务器，同名的话
+> 一份配置只能存下一个端口，两边会来回抢。所以给 debug 版配置时把 `itools` 换成 `itools-dev`，
+> **别去动已有的 `itools` 那一项**。（同理，它装的 skill 目录也叫 `itools-plugin-dev-dev`。）
+> 用管理中心「开发者中心 → AI 助手接入」的一键安装就不用记这些：它按当前构建自动写对。
+
 填完**重启 AI 客户端**，工具列表里会出现 `read_docs` / `list_plugins` / `run_plugin` 等 8 个工具。
 
 ---

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-log-file-path"
+description = "Enables the log_file_path command without any pre-configured scope."
+commands.allow = ["log_file_path"]
+
+[[permission]]
+identifier = "deny-log-file-path"
+description = "Denies the log_file_path command without any pre-configured scope."
+commands.deny = ["log_file_path"]

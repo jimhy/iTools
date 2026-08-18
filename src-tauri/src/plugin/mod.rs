@@ -777,7 +777,7 @@ pub struct PluginInfo {
 /// 解析插件根目录（可写）：
 /// 1) 环境变量 `ITOOLS_PLUGINS_DIR`；
 /// 2) dev：从 exe 上溯到含 `src-tauri` 的项目根，用其 `plugins/`（可写、git 管理）；
-/// 3) 打包：可写的 `%LOCALAPPDATA%\itools\plugins`，**首启**从随包 `resource_dir/plugins` 播种内置示例。
+/// 3) 打包：可写的 `<数据根>\plugins`（见 [`packaged_plugins_root`]），**首启**从随包 `resource_dir/plugins` 播种内置示例。
 pub fn resolve_plugins_root(app: &tauri::AppHandle) -> PathBuf {
     use tauri::Manager;
     if let Ok(p) = std::env::var("ITOOLS_PLUGINS_DIR") {
@@ -829,16 +829,13 @@ fn seed_skip_names(root: &Path) -> std::collections::HashSet<String> {
         .collect()
 }
 
-/// 「打包分支」的可写插件根：`%LOCALAPPDATA%\itools\plugins`。
+/// 「打包分支」的可写插件根：`<数据根>\plugins`（数据根见 [`crate::paths::data_root`]）。
 ///
 /// 单独抽出来是因为 [`install::init_builtins`] 要靠它判断「本次运行的插件根是不是**会被
 /// 资源目录播种**的那个」——只有那种情况下同名插件才会被内置版本覆盖回来，
 /// 才该被判为「内置、不可 Git 安装覆盖」。两处必须用同一份定义，否则会判反（见 init_builtins）。
 pub fn packaged_plugins_root() -> PathBuf {
-    dirs::data_local_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join("itools")
-        .join("plugins")
+    crate::paths::data_root().join("plugins")
 }
 
 /// `root` 是否就是「会被随包资源播种的那个可写插件根」。

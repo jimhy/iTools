@@ -95,7 +95,8 @@ const ERROR_BACKOFF: std::time::Duration = std::time::Duration::from_millis(200)
 /// ⚠ 这个数字是**实测**定的，别随手调小：`acquire()` 在 Builder 之前就返回，
 /// 而 `serve_activation()` 要等 setup 收尾，两者实测差 **874ms**（热机 + SSD + debug；
 /// 冷启动 WebView2 首次初始化还要更久）。原先 6 次 × 250ms = 1.25s 只剩 375ms 余量，
-/// 冷启动连点两下就会「第二次完全没反应」。
+/// 冷启动连点两下就会「第二次完全没反应」。24 次 = 6s，留足冗余；代价仅仅是极端情况下
+/// 第二个进程在后台多活几秒（无窗口无托盘，用户完全无感）。
 ///
 /// 放到模块级是为了让测试能引用它算期望值——写死在测试里的话，改这个常量就会失配
 ///（2026-08-18 从 6 调到 24 时就撞了一次）。
@@ -325,16 +326,8 @@ fn notify_on(name: &str) -> bool {
 
     const ERROR_FILE_NOT_FOUND: i32 = 2;
     const ERROR_PIPE_BUSY: i32 = 231;
-    /// 重试上限。覆盖两种真实会撞上的时序：
-    /// 1. 已有实例的 acceptor 正好都在忙（ERROR_PIPE_BUSY）；
-    /// 2. 已有实例还卡在 `setup()` 里，管道**还没建**（ERROR_FILE_NOT_FOUND）
-    ///    ——用户开机后连点两下快捷方式就是这个场景。
-    ///
-    /// ⚠ 这个数字是**实测**定的，别随手调小：`acquire()` 在 Builder 之前就返回，
-    /// 而 `serve_activation()` 要等 setup 收尾，两者实测差 **874ms**（热机 + SSD + debug；
-    /// 冷启动 WebView2 首次初始化还要更久）。原先 6 次 × 250ms = 1.25s 只剩 375ms 余量，
-    /// 冷启动连点两下就会「第二次完全没反应」。24 次 = 6s，留足冗余；代价仅仅是极端情况下
-    /// 第二个进程在后台多活几秒（无窗口无托盘，用户完全无感）。
+
+    // 重试次数 / 间隔见模块级的 RETRIES、RETRY_GAP（那里写了为什么是 24 次）。
     let mut last = String::from("未尝试");
     for i in 0..RETRIES {
         // 只写不读：服务端是 PIPE_ACCESS_INBOUND 单向管道（见 accept_one）

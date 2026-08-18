@@ -95,10 +95,28 @@ pub fn dev_add_dir(
     }
     s.dev_plugin_dirs.push(path.clone());
     settings.set(s);
-    dev.rescan(&settings.get().dev_plugin_dirs);
+    let dirs = settings.get().dev_plugin_dirs;
+    let n = dev.rescan(&dirs);
     super::refresh_search(&app);
-    ilog!("[iTools] 新增调试目录：{path}");
+    // 日志里**只留目录名，不留完整路径**：这是用户在目录选择器里自选的目录，完整路径含
+    // Windows 用户名与私人目录结构；release 现在会把日志长期写在 %LOCALAPPDATA%\itools\itools.log
+    // 里，用户报障时整份发给我们（见 `crate::logging` 的「隐私」段）。而这条日志真正要回答的是
+    // 「加完之后一共几个目录、扫出几个调试插件」——最常见的报障就是「加了目录却扫不出插件」。
+    ilog!(
+        "[iTools] 新增调试目录「{}」：共 {} 个调试目录，扫出 {n} 个调试插件",
+        dir_label(&path),
+        dirs.len()
+    );
     Ok(config_of(&dev, &settings))
+}
+
+/// 取目录的末级名字用于日志（取不到就给 `?`）。理由见 [`dev_add_dir`] 里那段注释：
+/// 完整路径不能进日志，但末级目录名是开发者自己的插件工程名，足够把日志和列表里的条目对上号。
+fn dir_label(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "?".to_string())
 }
 
 /// 移除一个调试目录（固定根不可移除）。
@@ -515,5 +533,18 @@ mod tests {
         assert!(same_path("C:\\Dev\\Plugins", "c:/dev/plugins/"));
         assert!(same_path(" C:\\a\\b\\ ", "C:\\a\\b"));
         assert!(!same_path("C:\\a\\b", "C:\\a\\c"));
+    }
+
+    /// 调试目录写进日志时只能留末级目录名：上层路径（Windows 用户名、私人目录结构）一律不带出。
+    ///
+    /// 挡板用例，理由同 `dev_add_dir` 里那段注释：release 的日志长期留在用户磁盘上，报障时整份发来。
+    #[test]
+    fn dir_label_keeps_only_leaf() {
+        let p = r"C:\Users\张三\Documents\私人项目\my-plugin";
+        assert_eq!(dir_label(p), "my-plugin");
+        let label = dir_label(p);
+        for leak in ["Users", "张三", "Documents", "私人项目", "\\"] {
+            assert!(!label.contains(leak), "日志标签泄漏了「{leak}」：{label}");
+        }
     }
 }

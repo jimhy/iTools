@@ -79,7 +79,7 @@ const RACE_CONCURRENCY: usize = 3;
 const HEAD_START: Duration = Duration::from_millis(400);
 /// 赢家缓存有效期：TTL 内直接用上次的赢家，不重复竞速。
 const WINNER_TTL: Duration = Duration::from_secs(30 * 60);
-/// 本地缓存文件名，落在 `%LOCALAPPDATA%\itools\`（**不放插件根**，免得污染插件扫描）。
+/// 本地缓存文件名，落在数据根下（**不放插件根**，免得污染插件扫描；数据根见 [`crate::paths::data_root`]）。
 const CACHE_FILE: &str = "mirrors.json";
 /// 镜像条目数上限（服务端返回超量时截断，防配置被塞爆）。
 const MAX_MIRRORS: usize = 16;
@@ -955,9 +955,12 @@ fn fetch_lock() -> &'static Mutex<()> {
     L.get_or_init(|| Mutex::new(()))
 }
 
-/// 本地缓存文件路径：`%LOCALAPPDATA%\itools\mirrors.json`。
+/// 本地缓存文件路径：`<数据根>\mirrors.json`（数据根见 [`crate::paths::data_root`]）。
+///
+/// 仍返回 `Option` 是为了不动调用方的「拿不到路径就当没缓存」那条分支；实际上
+/// `data_root()` 自带临时目录兜底，所以现在恒为 `Some`（那条分支退化成纯防御）。
 fn cache_path() -> Option<PathBuf> {
-    dirs::data_local_dir().map(|d| d.join("itools").join(CACHE_FILE))
+    Some(crate::paths::data_root().join(CACHE_FILE))
 }
 
 /// 兜底链最后一层：编译进客户端的内置列表。

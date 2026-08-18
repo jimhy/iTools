@@ -629,10 +629,32 @@ pub fn plugin_open_path(path: String) -> Result<(), String> {
     launch::open_detached(normalized)
 }
 
+/// 弹一条系统通知。正文由插件经 `window.itools.notify` 传入。
+///
+/// `webview` / `registry` 只用来查「是哪个插件在弹」，不参与通知本身——所以查不到会话也照弹，
+/// 不给这条命令加新的失败路径。
 #[tauri::command]
-pub fn plugin_notify(app: AppHandle, body: String) {
+pub fn plugin_notify(
+    app: AppHandle,
+    body: String,
+    webview: tauri::Webview,
+    registry: State<'_, PluginRegistry>,
+) {
     use tauri_plugin_notification::NotificationExt;
-    ilog!("[iTools][plugin] notify: {body}");
+    // 日志里**只记「谁弹的 + 多长」，绝不记正文**：body 是插件传进来的任意字符串，翻译 /
+    // 剪贴板 / 待办 / 密码类插件的通知正文本身就是用户的剪贴板内容、查询词、账号名。
+    // release 现在会把日志长期写在 %LOCALAPPDATA%\itools\itools.log 里，用户报障时还会
+    // 整份发给我们——原样落盘等于把这些内容永久留在磁盘上（见 `crate::logging` 的「隐私」段）。
+    // 插件 id + 字数已足够定位「哪个插件在弹通知 / 到底弹没弹 / 是不是弹了空正文」。
+    let who = registry
+        .session_for(webview.label())
+        .map(|s| if s.dev { format!("dev:{}", s.id) } else { s.id })
+        // 查不到会话就退化成窗口 label：至少还能分清是插件窗还是调试窗
+        .unwrap_or_else(|| webview.label().to_string());
+    ilog!(
+        "[iTools][plugin] notify: 来自 {who}，正文 {} 字（正文含用户内容，不入日志）",
+        body.chars().count()
+    );
     // 真·系统通知（失败不影响插件，已落日志兜底）
     let _ = app
         .notification()
@@ -964,12 +986,9 @@ pub(crate) fn caller_session(
         .ok_or_else(|| "没有正在运行的插件".to_string())
 }
 
+/// 正式插件的数据目录：`<数据根>\plugin-data\<id>`（数据根见 [`crate::paths::data_root`]）。
 fn plugin_data_dir(id: &str) -> PathBuf {
-    dirs::data_local_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join("itools")
-        .join("plugin-data")
-        .join(id)
+    crate::paths::data_root().join("plugin-data").join(id)
 }
 
 /// 某会话的沙盒文件根：正式会话在 `plugin-data/<id>/files`，**调试会话在 `dev/plugin-data/<id>/files`**。

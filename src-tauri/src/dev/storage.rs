@@ -387,13 +387,17 @@ mod tests {
     }
 
     /// 调试沙盒根与正式沙盒根**不同**（隔离的第三条腿）。
+    ///
+    /// 这里的「正式」指的是**同一个构建里的正式插件环境**（`<数据根>\plugin-data\<id>\files`），
+    /// 不是「release 版的数据」——本测试只比路径、不读任何文件。所以它必须跟着
+    /// [`crate::paths::data_root`] 走：测试跑在 debug 下，正式插件沙盒此时就在 `itools-dev`
+    /// 里，若这里还写死 `itools`，断言会因为「两个根本不相干的目录当然不相等」而**假通过**，
+    /// 隔离到底有没有真做到就再也测不出来了。
     #[test]
     fn dev_sandbox_is_not_the_production_one() {
         let rt = runtime("sandbox");
         let dev_files = sandbox_root(&rt, "demo");
-        let prod_files = dirs::data_local_dir()
-            .unwrap_or_else(std::env::temp_dir)
-            .join("itools")
+        let prod_files = crate::paths::data_root()
             .join("plugin-data")
             .join("demo")
             .join("files");

@@ -109,6 +109,16 @@ export const downloadUpdate = (url: string) =>
 export const launchInstaller = (path: string) =>
   invoke<void>("launch_installer_and_quit", { path });
 
+// ---------- 运行日志（用户报障时要把它发给我们） ----------
+
+/** 本次构建的日志文件完整路径。
+ *  **一定要从后端取**：debug 与 release 的落点不同（前者在 exe 同目录、后者在
+ *  `%LOCALAPPDATA%\itools`），数据根还可能因取不到 LOCALAPPDATA 而回退到临时目录，
+ *  前端写死一份必然有对不上的那天。 */
+export const logFilePath = () => invoke<string>("log_file_path");
+/** 用资源管理器打开日志文件所在的目录。目录不存在时后端会如实报错（不会假装打开）。 */
+export const openLogDir = () => invoke<void>("open_log_dir");
+
 // ---------- 网络：代理 & 生效中的同步服务器地址 ----------
 
 /** 用**给定地址**发起一次真实的代理连通性探测（与 `proxy_enabled` 开关无关：
@@ -276,7 +286,8 @@ export const aiClientsStatus = () => invoke<AiClientsStatus>("ai_clients_status"
  *  UI 必须把这条原文显示出来，不能笼统报「失败」。 */
 export const aiClientInstall = (target: string) =>
   invoke<AiClientsStatus>("ai_client_install", { target });
-/** 断开接入：删 skill（只删带 iTools 标记的）+ 移除 MCP 配置（只删 itools 那一项）。 */
+/** 断开接入：删 skill（只删带 iTools 标记的）+ 移除 MCP 配置（只删本构建自己那一项：
+ *  正式版是 `itools`、debug 版是 `itools-dev`，两者互不影响）。 */
 export const aiClientUninstall = (target: string) =>
   invoke<AiClientsStatus>("ai_client_uninstall", { target });
 

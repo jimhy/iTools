@@ -2,7 +2,7 @@
 //!
 //! 设计（详见 `skills/itools-plugin-dev/references/plugin-settings-spec.md`）：
 //! - **schema**：插件目录放 `settings.json`（声明配置项，只读，随插件走）。
-//! - **用户值**：存 `%LOCALAPPDATA%\itools\plugin-data\<id>\settings.json`（与业务 `kv.json` 分开、
+//! - **用户值**：存 `<数据根>\plugin-data\<id>\settings.json`（数据根见 [`crate::paths`]，与业务 `kv.json` 分开、
 //!   保留原始 JSON 类型）。首版纯本地；此存储层可后续切到可同步的 `DataStore` 而不改契约。
 //! - **管理中心**（main/admin 窗口）按 `name` 显式读写：`plugin_settings_schema/values/set/reset`。
 //! - **插件运行时**（plugin / plugin-dev 窗口）按**调用窗口的插件会话**隔离、**只读**合并值：
@@ -139,11 +139,10 @@ fn read_schema(dir: &std::path::Path) -> Result<Option<RawSchema>, String> {
 
 // ==================== 用户值存储 ====================
 
-/// 用户设定值文件：`plugin-data/<id>/settings.json`（与业务 kv.json 同目录、分开存）。
+/// 用户设定值文件：`<数据根>\plugin-data\<id>\settings.json`（与业务 kv.json 同目录、分开存；
+/// 数据根见 [`crate::paths::data_root`]）。
 fn values_path(id: &str) -> PathBuf {
-    dirs::data_local_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join("itools")
+    crate::paths::data_root()
         .join("plugin-data")
         .join(id)
         .join("settings.json")

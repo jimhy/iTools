@@ -21,8 +21,10 @@
 //! 代价是本机任意进程都能调这些工具，其中包括「提交审核」这类会改变线上状态的操作。
 //! 这一点在文档里如实写明，不靠「大概没人会」蒙混。
 //!
-//! **端口会自动避让**：默认 7345，被占用（最常见的情形是 debug 版与 release 版同时开着，
-//! 这是允许的）就顺序往上找一个空的，见 [`PORT_SCAN`]。无论落在哪个端口，
+//! **端口按构建固定**：release 恒为 7345、debug 恒为 7346（见 [`default_port`]）。
+//! 两个构建各有各的窝，并存时谁也不抢谁，启动顺序怎么变都拿到同一个端口——
+//! 这样写进 AI 客户端配置里的地址才不会隔三差五地失效。
+//! 只有端口被**别的程序**占住时才顺序往上避让，见 [`PORT_SCAN`]。无论落在哪个端口，
 //! `mcp_status` / 开发者中心面板显示的都是**实际**绑到的那一个。
 //! 用户用 `ITOOLS_MCP_PORT` 显式指定端口时**不**避让——绑不上就如实报错。
 //!
@@ -47,27 +49,88 @@ use tauri::AppHandle;
 
 use crate::logging::ilog;
 
-/// 默认监听端口。选一个不常见的高位端口，降低与其它开发服务撞车的概率。
-/// 可用环境变量 `ITOOLS_MCP_PORT` 覆盖（0 = 让系统分配空闲端口）。
-const DEFAULT_PORT: u16 = 7345;
-const PORT_ENV: &str = "ITOOLS_MCP_PORT";
-
-/// 用默认端口时，被占用就从 [`DEFAULT_PORT`] 起**顺序往上**再试这么多个（7345..=7354）。
+/// release 的默认监听端口。选一个不常见的高位端口，降低与其它开发服务撞车的概率。
 ///
-/// # 为什么要有这个回退
+/// **冻结值**：已装用户的 AI 客户端配置文件（`mcpServers.itools.url`）与随包文档里写的
+/// 都是它，改一下等于让所有人的「AI 助手接入」一夜之间集体变成过期条目。
+/// 可用环境变量 `ITOOLS_MCP_PORT` 覆盖（0 = 让系统分配空闲端口）。
+const RELEASE_PORT: u16 = 7345;
+
+/// debug 的默认监听端口：与 [`RELEASE_PORT`] 错开一格。
+///
+/// # 为什么两个构建不能共用同一个默认端口
 ///
 /// 单实例机制只保证「同一构建不重复启动」，debug 版与 release 版是**允许并存**的
-/// （开发时的常态）。两边都想绑 7345，后起的那个必然拿到 `os error 10048`，
-/// 它的「AI 助手接入 / 开发者中心 MCP」整条链路就废了——而这跟 iTools 本身没关系，
-/// 纯粹是端口撞车，没道理让用户去手动设环境变量。
+/// （开发时的常态）。共用 7345 时是「谁先起谁拿到」，后起的那个被迫回退到 7346——
+/// 于是「今天先起 release、明天先起 debug」就让两个构建的端口对调一次。
+/// 而 `ai_clients.rs` 判 `mcpStale` 的依据正是「配置文件里的地址 vs 当前实际端口」：
+/// 端口一对调，两个面板**同时**报「MCP 地址已过期，请重新安装」，各点一次才安生，
+/// 下次启动顺序再变又来一遍。
+///
+/// 上一轮把 MCP server 名按构建分开（`itools` / `itools-dev`）只保证了「点『重新安装』
+/// 不会覆盖掉对方那一项」，并没有解决「过期」本身。按构建固定端口才是根治：
+/// 同一构建每次都落在同一个端口上，写进配置里的地址永远对得上。
+const DEBUG_PORT: u16 = 7346;
+const PORT_ENV: &str = "ITOOLS_MCP_PORT";
+
+/// 本次构建的默认端口。
+///
+/// 用运行期的 `cfg!` 而不是 `#[cfg]`：两条分支都参与编译，改坏哪一边都会当场报错，
+/// 与 [`crate::paths`]、[`crate::single_instance::mutex_name`] 的写法保持一致。
+fn default_port() -> u16 {
+    if cfg!(debug_assertions) {
+        DEBUG_PORT
+    } else {
+        RELEASE_PORT
+    }
+}
+
+/// **另一个**构建的默认端口——回退时要绕开它，见 [`default_candidates`]。
+fn other_build_default_port() -> u16 {
+    if cfg!(debug_assertions) {
+        RELEASE_PORT
+    } else {
+        DEBUG_PORT
+    }
+}
+
+/// 用默认端口时，被占用就从 [`default_port`] 起**顺序往上**再试这么多个
+/// （release：7345..=7354；debug：7346..=7355）。
+///
+/// # 什么时候才会用到这个回退
+///
+/// 正常情况下用不到：两个构建各有各的默认端口，并存也不互相抢。
+/// 它是给「**别的程序**占了这个端口」准备的——那跟 iTools 本身没关系，
+/// 没道理因为一次端口撞车就让用户的「AI 助手接入 / 开发者中心 MCP」整条链路废掉，
+/// 更没道理让他去手动设环境变量。
 ///
 /// # 为什么是顺序小范围，而不是直接绑 0 让系统分配
 ///
 /// 端口 0 拿到的是**每次启动都不同**的临时端口。而 `ai_clients.rs` 会把这个地址写进
 /// AI 客户端（Claude Code / Codex / Cursor）的配置文件里——地址天天变，等于每次开机
-/// 都得去「重新安装」一遍。顺序试则是可预测的：常态下只有一个实例，永远落在 7345；
-/// 并存时后起的落在 7346，换个启动顺序也就在这两个数之间摆动。
+/// 都得去「重新安装」一遍。顺序试则是可预测的，而且只在真撞车时才动一格。
 const PORT_SCAN: u16 = 10;
+
+/// 默认端口的候选序列：本构建的默认端口打头、随后顺序往上，
+/// **另一个构建的默认端口排到队尾**。
+///
+/// # 为什么要把对方的默认端口挪到最后
+///
+/// 设想有个无关程序占住了 7345：release 若老实按顺序回退就会落到 7346——那正是 debug 的窝，
+/// 等 debug 起来时又被迫再往上挪一格，「按构建固定端口」的效果被这一次撞车带崩。
+/// 排到队尾则是：只有本构建的整段窗口都绑不上时才去碰对方的端口（那时对方多半根本没在跑、
+/// 端口是空的）。既不轻易踩对方的窝，也不至于为了「不肯碰」而白白起不来。
+fn default_candidates() -> Vec<u16> {
+    let own = default_port();
+    let other = other_build_default_port();
+    // checked_add 只是防呆：默认端口若被改到接近 65535，溢出会在 debug 下直接 panic
+    let mut ports: Vec<u16> = (0..PORT_SCAN)
+        .filter_map(|i| own.checked_add(i))
+        .filter(|p| *p != other)
+        .collect();
+    ports.push(other);
+    ports
+}
 /// 关掉 MCP 服务器的环境变量（`ITOOLS_MCP=off`）。默认开启。
 const ENABLE_ENV: &str = "ITOOLS_MCP";
 
@@ -150,10 +213,7 @@ fn parse_port_env(raw: Option<&str>) -> PortChoice {
 fn bind(choice: PortChoice) -> Result<TcpListener, String> {
     let candidates: Vec<u16> = match choice {
         PortChoice::Fixed(p) => vec![p],
-        // checked_add 只是防呆：DEFAULT_PORT 若被改到接近 65535，溢出会在 debug 下直接 panic
-        PortChoice::Default => (0..PORT_SCAN)
-            .filter_map(|i| DEFAULT_PORT.checked_add(i))
-            .collect(),
+        PortChoice::Default => default_candidates(),
     };
 
     let mut first_err: Option<std::io::Error> = None;
@@ -164,9 +224,12 @@ fn bind(choice: PortChoice) -> Result<TcpListener, String> {
                     // 换了端口必须留痕：面板上显示的是真实地址（见 status()），
                     // 但已经写进 AI 客户端配置里的旧地址会失效，
                     // `ai_clients.rs` 会把它标成 mcpStale 并提示「重新安装」。
+                    // 端口按构建固定之后，走到这里就说明是**别的程序**占了端口
+                    //（另一个构建的 iTools 用的是另一个默认端口，不会来抢）。
+                    let want = candidates[0];
                     ilog!(
-                        "[iTools] MCP 默认端口 {DEFAULT_PORT} 被占用（多半是另一个构建的 iTools 在跑），\
-                         已改用 {p}；AI 客户端里配的旧地址需要在「AI 助手接入」里重新安装一次"
+                        "[iTools] MCP 默认端口 {want} 被别的程序占用，已改用 {p}；\
+                         AI 客户端里配的旧地址需要在「AI 助手接入」里重新安装一次"
                     );
                 }
                 return Ok(l);
@@ -190,12 +253,16 @@ fn bind(choice: PortChoice) -> Result<TcpListener, String> {
              该端口是你用环境变量 {PORT_ENV} 指定的，故不会自动改用别的端口——\
              请腾出这个端口，或把 {PORT_ENV} 改成别的（设 0 由系统分配）。"
         ),
-        PortChoice::Default => format!(
-            "MCP 服务器启动失败：127.0.0.1 上 {DEFAULT_PORT}~{} 这 {PORT_SCAN} 个端口都绑不上\
-             （{DEFAULT_PORT} 的原因是：{e}）。可用环境变量 {PORT_ENV} 指定一个空闲端口\
-             （设 0 由系统分配）。",
-            DEFAULT_PORT.saturating_add(PORT_SCAN - 1)
-        ),
+        PortChoice::Default => {
+            let own = default_port();
+            let other = other_build_default_port();
+            format!(
+                "MCP 服务器启动失败：127.0.0.1 上 {own}~{}（以及另一个构建的默认端口 {other}）\
+                 都绑不上（{own} 的原因是：{e}）。可用环境变量 {PORT_ENV} 指定一个空闲端口\
+                 （设 0 由系统分配）。",
+                own.saturating_add(PORT_SCAN - 1)
+            )
+        }
     })
 }
 
@@ -413,23 +480,64 @@ mod tests {
         assert_eq!(parse_port_env(Some("0")), PortChoice::Fixed(0));
     }
 
-    /// 默认端口被占用时必须**自动换一个**，而不是让 MCP 整条链路废掉。
-    /// 这正是 debug 版与 release 版并存时后起的那个所处的处境。
+    /// release 的默认端口是**冻结值**：已装用户的 AI 客户端配置里写死的就是它，
+    /// 改了 = 所有人的「AI 助手接入」集体过期。这条断言就是那道闸门。
+    /// 同时守住「两个构建不共用一个默认端口」——共用就会重新出现「启动顺序一变，
+    /// 两个面板同时报 MCP 过期」的老毛病。
+    #[test]
+    fn build_default_ports_are_frozen_and_distinct() {
+        assert_eq!(
+            RELEASE_PORT, 7345,
+            "release 的 MCP 默认端口不可更改：已装用户的客户端配置与随包文档里都是 7345"
+        );
+        assert_ne!(
+            DEBUG_PORT, RELEASE_PORT,
+            "两个构建必须用不同的默认端口，否则并存时端口会随启动顺序对调、双方同时报过期"
+        );
+        assert_eq!(default_port(), if cfg!(debug_assertions) { DEBUG_PORT } else { RELEASE_PORT });
+        assert_ne!(
+            default_port(),
+            other_build_default_port(),
+            "本构建与另一构建的默认端口不能是同一个"
+        );
+    }
+
+    /// 候选序列：本构建的默认端口打头（这才叫「按构建固定」），
+    /// 对方的默认端口只作最后兜底（避免一次撞车把对方也顶走）。
+    #[test]
+    fn candidates_start_at_own_port_and_defer_the_other_build() {
+        let c = default_candidates();
+        let other = other_build_default_port();
+        assert_eq!(c[0], default_port(), "第一候选必须是本构建的默认端口");
+        assert_eq!(c.last().copied(), Some(other), "对方的默认端口只能排在最后兜底");
+        assert_eq!(
+            c.iter().filter(|p| **p == other).count(),
+            1,
+            "对方的默认端口只应作为兜底出现一次，不能在中途被顺手试掉"
+        );
+        let mut uniq = c.clone();
+        uniq.sort_unstable();
+        uniq.dedup();
+        assert_eq!(uniq.len(), c.len(), "候选端口不该重复（重复 = 白试一次）");
+    }
+
+    /// 默认端口被**别的程序**占用时必须自动换一个，而不是让 MCP 整条链路废掉。
     #[test]
     fn default_port_falls_back_when_occupied() {
-        // 自己占住默认端口，模拟「另一个构建已经在跑」。
-        // 若本机真有 iTools 在跑，这一步会失败——不影响结论，下面按实际情况断言。
-        let occupied = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, DEFAULT_PORT));
+        // 自己占住本构建的默认端口，模拟「被别的程序占了」。
+        // 若本机真有同构建的 iTools 在跑，这一步会失败——不影响结论，下面按实际情况断言。
+        let own = default_port();
+        let occupied = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, own));
         let l = bind(PortChoice::Default).expect("默认端口被占用时必须回退到别的端口");
         let port = l.local_addr().expect("回读实际端口").port();
         println!("默认端口被占用后落到 {port}（自占默认端口成功={}）", occupied.is_ok());
         if occupied.is_ok() {
-            assert_ne!(port, DEFAULT_PORT, "默认端口已被占住，不可能又绑到它");
+            assert_ne!(port, own, "默认端口已被占住，不可能又绑到它");
         }
         assert!(
-            (DEFAULT_PORT..DEFAULT_PORT + PORT_SCAN).contains(&port),
-            "回退端口应落在 {DEFAULT_PORT}~{} 内，实得 {port}",
-            DEFAULT_PORT + PORT_SCAN - 1
+            default_candidates().contains(&port),
+            "回退端口应落在候选序列 {:?} 内，实得 {port}",
+            default_candidates()
         );
         // occupied / l 在此之前不能被回收，否则上面的「被占用」前提就不成立
         drop(occupied);

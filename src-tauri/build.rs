@@ -45,6 +45,11 @@ const COMMANDS: &[&str] = &[
         "open_update_window",
         "close_admin_window",
         "set_settings_persist",
+        // 运行日志的位置（「关于」页显示路径 + 打开所在目录）。
+        // **不得**授予插件窗口：那是把用户数据目录的真实路径、以及一个「随便开个目录」的
+        // 出口交给不可信的远程代码。
+        "log_file_path",
+        "open_log_dir",
         // 网络：代理连通性实测 + 当前实际生效的同步服务器地址（仅管理中心用）
         "test_proxy",
         "sync_endpoint_info",

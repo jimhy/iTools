@@ -260,7 +260,7 @@ submit(id) → publish_status  → 提审、查结论；被驳回时里面是模
 2. 在 iTools **托盘图标 → 「重新加载插件」**（无需重启）。
 3. 主搜索栏输入你的关键词 → 出现插件磁贴 → 回车打开面板。
 4. 若声明了高危能力：到「插件管理」页把对应授权开关打开。
-5. 搜不到就看 iTools exe 同目录的 `itools.log`（搜「插件」有加载/告警日志）。
+5. 搜不到就看 `itools.log`（搜「插件」有加载/告警日志）。**位置随构建走**：装好的正式版在 `%LOCALAPPDATA%\itools\itools.log`（安装目录通常在 Program Files，普通用户写不进去，所以**不在 exe 旁边**）；自己 `cargo run` / 打 debug 包跑的才在 exe 同目录（`src-tauri\target\debug\itools.log`）。单文件超 2 MiB 会轮转成 `itools.log.1`（只留一代），想找的那段翻不到就去 `.1` 里看。
 
 ## 八点五、复杂插件：React + Vite 脚手架（进阶）
 

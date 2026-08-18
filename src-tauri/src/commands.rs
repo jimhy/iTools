@@ -264,13 +264,30 @@ pub async fn pick_app() -> Option<String> {
     picked
 }
 
+/// 取路径的扩展名（小写、带点）用于日志；没有扩展名时给「无扩展名」。
+///
+/// **为什么日志里只留扩展名、不留完整路径**：这里的 path 是用户在系统文件对话框里自选的
+/// 图片，完整路径含 Windows 用户名和私人目录结构，文件名本身也可能就是隐私
+/// （「护照扫描.jpg」之类）。release 现在会把日志长期写在 %LOCALAPPDATA%\itools\itools.log 里，
+/// 用户报障时整份发给我们——那就把用户的目录结构一并交出去了。
+/// 而定位「图片读不出来」真正需要的是「什么格式 + 什么错」，扩展名就够了。
+fn log_ext(path: &str) -> String {
+    Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| format!(".{}", e.to_ascii_lowercase()))
+        .unwrap_or_else(|| "无扩展名".to_string())
+}
+
 /// 读本地图片为 data URL（背景图/头像显示用，免开 asset 协议）。
 /// 任意尺寸的原图在 Rust 侧解码并缩放到需要的尺寸后编码为 JPEG——4K 壁纸也只产出几十 KB。
 #[tauri::command]
 pub async fn read_image(path: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        // 先算好脱敏标签，后面两条日志都只用它（理由见 [`log_ext`]）
+        let ext = log_ext(&path);
         let img = image::open(Path::new(&path)).map_err(|e| {
-            ilog!("[iTools] 图片解码失败 {path}: {e}");
+            ilog!("[iTools] 图片解码失败（{ext}）: {e}");
             format!("图片解码失败: {e}")
         })?;
         // 面板 680 宽、最高约 520，取 2x
@@ -280,7 +297,7 @@ pub async fn read_image(path: String) -> Result<String, String> {
         let mut cursor = std::io::Cursor::new(&mut jpeg);
         let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, 85);
         rgb.write_with_encoder(encoder).map_err(|e| {
-            ilog!("[iTools] 图片编码失败 {path}: {e}");
+            ilog!("[iTools] 图片编码失败（源 {ext}）: {e}");
             format!("图片编码失败: {e}")
         })?;
         Ok(format!(
@@ -350,13 +367,12 @@ pub fn set_avatar(
     Ok(profile.view())
 }
 
-/// 解码任意图片，居中裁剪到 256²，存为 `%LOCALAPPDATA%\itools\avatar.jpg`，返回该受控路径。
+/// 解码任意图片，居中裁剪到 256²，存为 `<数据根>\avatar.jpg`（数据根见 [`crate::paths::data_root`]），
+/// 返回该受控路径。
 fn save_avatar_copy(src: &str) -> Result<String, String> {
     let img = image::open(Path::new(src)).map_err(|e| format!("头像解码失败: {e}"))?;
     let square = img.resize_to_fill(256, 256, image::imageops::FilterType::Lanczos3);
-    let dir = dirs::data_local_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join("itools");
+    let dir = crate::paths::data_root();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let dest = dir.join("avatar.jpg");
     let rgb = square.to_rgb8();
@@ -609,6 +625,107 @@ pub fn open_admin_window(app: AppHandle) {
 #[tauri::command]
 pub fn open_update_window(app: AppHandle) {
     crate::open_update(&app);
+}
+
+// ==================== 运行日志的位置 ====================
+//
+// release 从本版起会把运行日志长期写在 `%LOCALAPPDATA%\itools\itools.log`（带 2MB 轮转），
+// 目的是「出问题时我们拿得到证据」。但**没有任何界面告诉用户它在哪**，这个目的就没闭环：
+// 用户想反馈问题时不知道该发什么给我们。管理中心「关于」页的「打开日志目录」按钮就是这个出口。
+
+/// 日志文件名。⚠ 与 `logging` 模块里的 `LOG_NAME` 是同一个值的**第二份**，理由见
+/// [`resolve_log_file`]；改名时两处必须一起改。
+const LOG_FILE_NAME: &str = "itools.log";
+
+/// 本次构建的日志文件完整路径。
+///
+/// ⚠ **这里重算了一遍 `logging` 模块的落点规则**（debug = exe 同目录、
+/// release = `paths::data_root()`），因为 `logging::log_path()` 目前是模块私有的，
+/// 外部拿不到。两处必须保持一致：改了 `logging` 的落点却漏了这里，这个按钮就会把用户
+/// 领到一个空目录，比没有按钮更误导人。哪天 `logging` 把路径函数公开出来，
+/// 这里应当立刻改成直接调用它，并把这份复制删掉。
+///
+/// 只算路径、**不建目录**：目录该不该存在是 `logging` 说了算，这里凭空建一个空目录
+/// 只会让「日志根本没写成」这件事更难被发现。
+fn resolve_log_file() -> Result<std::path::PathBuf, String> {
+    if cfg!(debug_assertions) {
+        // debug：日志就在 target/debug/ 里，与 exe 同目录（开发时手边即取）
+        let exe = std::env::current_exe().map_err(|e| format!("取不到程序自身路径：{e}"))?;
+        let dir = exe
+            .parent()
+            .ok_or_else(|| "程序自身路径没有上级目录，无法定位日志".to_string())?;
+        Ok(dir.join(LOG_FILE_NAME))
+    } else {
+        // release：装在 Program Files 之类没有写权限的地方，日志只能落在用户数据根下
+        Ok(crate::paths::data_root().join(LOG_FILE_NAME))
+    }
+}
+
+/// 命令：日志文件的完整路径（管理中心「关于」页显示，用户可照着去找/发给我们）。
+///
+/// 前端**不许**自己拼这个路径：debug 与 release 的落点本来就不同，数据根还可能因为
+/// 取不到 `%LOCALAPPDATA%` 而回退到临时目录——前端写死一份，必然有对不上的那天。
+#[tauri::command]
+pub fn log_file_path() -> Result<String, String> {
+    Ok(resolve_log_file()?.to_string_lossy().into_owned())
+}
+
+/// 命令：在资源管理器里打开日志文件所在的目录。
+///
+/// 目录不存在时**如实报错**，绝不硬着头皮去调 explorer：explorer 拿到一个不存在的路径
+/// 会自作主张打开「文档」之类的默认位置，用户看见窗口弹出来就以为找对了地方，
+/// 翻半天也找不到日志——那就成了「看着生效、其实没生效」的控件。
+#[tauri::command]
+pub fn open_log_dir() -> Result<(), String> {
+    let file = resolve_log_file()?;
+    let dir = file
+        .parent()
+        .ok_or_else(|| format!("日志路径没有上级目录：{}", file.display()))?;
+    if !dir.is_dir() {
+        return Err(format!(
+            "日志目录不存在：{}（说明这次运行连日志文件都没能建出来，多半是没有写入权限）",
+            dir.display()
+        ));
+    }
+    // 与「打开插件目录」走同一条出口：explorer 中转、spawn 即返回，不阻塞命令线程；
+    // explorer 不可用时它内部会退回 opener::open。
+    launch::open_detached(&dir.to_string_lossy()).map_err(|e| format!("打开日志目录失败：{e}"))
+}
+
+#[cfg(test)]
+mod log_location_tests {
+    use super::*;
+
+    /// 定位结果必须真的指向日志文件本身，且落在一个具体目录里
+    /// ——「打开日志目录」按钮开的就是它的父目录。
+    #[test]
+    fn log_file_is_named_and_placed_sanely() {
+        let p = resolve_log_file().expect("测试进程里必定能定出日志路径");
+        assert_eq!(
+            p.file_name().and_then(|s| s.to_str()),
+            Some(LOG_FILE_NAME),
+            "文件名要与 logging 模块写出来的那个一致，实得：{}",
+            p.display()
+        );
+        let dir = p.parent().expect("日志路径必须有上级目录");
+        assert!(!dir.as_os_str().is_empty(), "上级目录不能是空路径");
+        println!("本构建的日志路径：{}", p.display());
+    }
+
+    /// debug 构建的日志与 exe 同目录（`cargo test` 就是 debug）：
+    /// 这条同时守住「debug 不会把用户领到 release 的数据目录去」。
+    #[cfg(debug_assertions)]
+    #[test]
+    fn debug_log_sits_next_to_the_exe() {
+        let p = resolve_log_file().expect("定位日志路径");
+        let exe = std::env::current_exe().expect("取 exe 路径");
+        assert_eq!(p.parent(), exe.parent(), "debug 日志应与 exe 同目录");
+        assert_ne!(
+            p.parent().map(std::path::Path::to_path_buf),
+            Some(crate::paths::data_root()),
+            "debug 不该把用户指到数据根目录"
+        );
+    }
 }
 
 /// 按需提取给定路径的系统图标（仅前端可见项调用），返回 路径 → base64(PNG)。
@@ -887,5 +1004,21 @@ mod tests {
             err.contains("没有在运行"),
             "错误文案要告诉用户该先开启索引，实得：{err}"
         );
+    }
+
+    /// 图片日志标签只能是扩展名：**一个字符都不能带出目录、用户名或文件名**。
+    ///
+    /// 这条用例是给「后来者想把完整路径加回日志里图省事」准备的挡板——
+    /// release 的日志会长期躺在用户磁盘上，报障时整份发给我们（见 `crate::logging` 的「隐私」段）。
+    #[test]
+    fn log_ext_leaks_nothing_but_extension() {
+        let p = r"C:\Users\张三\Pictures\私人相册\护照扫描.PNG";
+        assert_eq!(log_ext(p), ".png", "扩展名要归一成小写");
+        let label = log_ext(p);
+        for leak in ["Users", "张三", "Pictures", "私人相册", "护照扫描", "\\"] {
+            assert!(!label.contains(leak), "日志标签泄漏了「{leak}」：{label}");
+        }
+        // 没有扩展名时给个可读占位，而不是空串（空串会让日志读起来像少了一段）
+        assert_eq!(log_ext(r"C:\Users\张三\无扩展的图"), "无扩展名");
     }
 }

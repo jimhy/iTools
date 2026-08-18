@@ -1,4 +1,5 @@
-//! 统一本地存储：单个 SQLite 库 `%LOCALAPPDATA%\itools\itools.db`。
+//! 统一本地存储：单个 SQLite 库 `<数据根>\itools.db`
+//! （数据根 = release `%LOCALAPPDATA%\itools` / debug `%LOCALAPPDATA%\itools-dev`，见 [`crate::paths`]）。
 //!
 //! 取代原先散落的 JSON：
 //! - `usage.json` / `settings.json` / `account.json` / `profile.json` → `app_kv` 表（单行 JSON blob，整体读写）
@@ -22,11 +23,13 @@ pub struct Db {
 }
 
 impl Db {
-    /// 默认位置：`%LOCALAPPDATA%\itools\itools.db`，并从同目录旧 JSON 惰性迁移。
+    /// 默认位置：`<数据根>\itools.db`，并从**同目录**旧 JSON 惰性迁移。
+    ///
+    /// 数据根由 [`crate::paths::data_root`] 统一给出（release `itools` / debug `itools-dev`），
+    /// 这也正是 debug 与 release 能同时跑而不并发写同一个 SQLite 的地方。
+    /// 迁移只看同目录的旧 JSON，所以 debug 那份空目录里什么都不会被迁进来（预期行为）。
     pub fn open_default() -> Self {
-        let root = dirs::data_local_dir()
-            .unwrap_or_else(std::env::temp_dir)
-            .join("itools");
+        let root = crate::paths::data_root();
         let _ = std::fs::create_dir_all(&root);
         let db = Self::open(&root.join("itools.db"));
         db.migrate_legacy(&root);

@@ -660,7 +660,7 @@ fn check_manifest(m: &PluginManifest, dir_name: &str, logo_ok: bool, issues: &mu
 /// 解析固定调试根：
 /// 1) 环境变量 `ITOOLS_DEV_PLUGINS_DIR`（测试 / 特殊布局用）；
 /// 2) dev 构建：从 exe 上溯到含 `src-tauri` 的项目根，用其 `dev-plugins/`；
-/// 3) 打包：`%LOCALAPPDATA%\itools\dev-plugins`。
+/// 3) 打包：`<数据根>\dev\dev-plugins`（即 [`dev_home`] 之下；数据根见 [`crate::paths::data_root`]）。
 ///
 /// 与正式插件根**永不重合**——否则「调试插件」会被正式环境一并加载，隔离就白做了。
 pub fn resolve_fixed_root() -> PathBuf {
@@ -679,12 +679,14 @@ pub fn resolve_fixed_root() -> PathBuf {
     dev_home().join("dev-plugins")
 }
 
-/// 调试环境的数据家目录：`%LOCALAPPDATA%\itools\dev`（测试库 + 调试沙盒都在这里）。
+/// 调试环境的数据家目录：`<数据根>\dev`（测试库 + 调试沙盒都在这里）。
+///
+/// 挂在 [`crate::paths::data_root`] 之下而不是自己拼路径：数据根本身按构建类型分家
+/// （release `itools` / debug `itools-dev`），调试家目录必须跟着一起分，
+/// 否则 debug 与 release 的开发者中心又会共用同一个测试库。
+/// 与「正式插件数据」的隔离靠的是这一层 `dev` 子目录，两边都成立。
 pub fn dev_home() -> PathBuf {
-    dirs::data_local_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join("itools")
-        .join("dev")
+    crate::paths::data_root().join("dev")
 }
 
 // ==================== 搜索索引接入 ====================

@@ -52,7 +52,7 @@ use sha2::{Digest, Sha256};
 
 use crate::logging::ilog;
 
-/// 索引缓存文件名（放在 `%LOCALAPPDATA%\itools\` 下，与镜像配置缓存同级）。
+/// 索引缓存文件名（放在数据根下，与镜像配置缓存同级；数据根见 [`crate::paths::data_root`]）。
 const CACHE_FILE: &str = "market-index.json";
 /// 索引缓存的新鲜期：**1 小时**。
 ///
@@ -191,8 +191,12 @@ fn endpoint() -> Result<String, String> {
     })
 }
 
+/// 缓存文件路径：`<数据根>\market-index.json`（数据根见 [`crate::paths::data_root`]）。
+///
+/// 仍返回 `Option` 是为了不动调用方的「拿不到路径就当没缓存」那条分支；实际上
+/// `data_root()` 自带临时目录兜底，所以现在恒为 `Some`（那条分支退化成纯防御）。
 fn cache_path() -> Option<PathBuf> {
-    dirs::data_local_dir().map(|d| d.join("itools").join(CACHE_FILE))
+    Some(crate::paths::data_root().join(CACHE_FILE))
 }
 
 /// 缓存文件的外层结构：索引本体 + **这份数据是什么时候拿到的**。
