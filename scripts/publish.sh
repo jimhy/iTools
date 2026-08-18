@@ -122,7 +122,13 @@ publish_app() {
   [ -f "$SETUP_SRC" ] || { echo "✗ 没找到安装包 $SETUP_SRC" >&2; exit 1; }
 
   echo "==> [app] 校验地址真的注入了"
-  # 见文件头注意事项 2：不校验的话，发出去的包连不上服务器且外观完全正常
+  # 见文件头注意事项 2：不校验的话，发出去的包连不上服务器且外观完全正常。
+  #
+  # ⚠ 校验的是**裸 exe**（$EXE_SRC）而不是 NSIS 安装包——别改成校验安装包：
+  #    NSIS 把内容 LZMA 压缩了，对安装包 grep 任何字符串都搜不到，于是无论注入
+  #    成没成都会得出「不含」的结论。2026-08-18 就靠这个差点误判过一次：当时对
+  #    自建版安装包 grep 不到地址，险些当成注入失败——实际是裸 exe 里明明有。
+  #    真要验安装包，得先 7z 解开再 grep 里面的 itools.exe。
   if grep -a -q -F "$ITOOLS_DEFAULT_ENDPOINT" "$EXE_SRC"; then
     echo "    ✓ 二进制内含 $ITOOLS_DEFAULT_ENDPOINT"
   else
