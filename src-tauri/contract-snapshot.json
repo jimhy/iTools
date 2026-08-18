@@ -403,8 +403,8 @@
   "UpdateInfo": [
     "currentVersion",
     "hasUpdate",
+    "installerUrl",
     "latestVersion",
-    "msiUrl",
     "releaseNotes",
     "releaseUrl"
   ],

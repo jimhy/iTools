@@ -57,7 +57,7 @@ pub struct AppSettings {
     pub auto_clear_seconds: u32,
 
     // ---------- 网络代理（**真实生效**：全部出站请求经 `crate::http` 走它） ----------
-    /// 是否启用出站代理。开启后**所有**出站 HTTP 都经代理：插件下载 / 更新检查 / 下载 msi /
+    /// 是否启用出站代理。开启后**所有**出站 HTTP 都经代理：插件下载 / 更新检查 / 下载安装包 /
     /// 云同步 / 登录登出注销 / 插件的 `itools.fetch`。
     ///
     /// **本机与内网地址永远直连**（`crate::http::is_bypass_host`：`localhost`、`127.0.0.0/8`、

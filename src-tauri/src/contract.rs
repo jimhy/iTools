@@ -630,13 +630,14 @@ mod tests {
                 has_update: false,
                 release_url: String::new(),
                 release_notes: String::new(),
-                msi_url: None,
+                installer_url: None,
             },
             &[
                 "latestVersion", "currentVersion", "hasUpdate", "releaseUrl", "releaseNotes",
-                "msiUrl",
+                "installerUrl",
             ],
-            "msiUrl 为 null 时前端不该提供「立即更新」（只能去 release 页手动下）。",
+            "installerUrl 为 null 时前端不该提供「立即更新」（只能去 release 页手动下）。\
+             它是 NSIS 的 `-setup.exe` 直链——本项目只发这一种安装包，见 updater.rs 模块注释。",
         );
 
         // ---------- 插件设置 schema ----------

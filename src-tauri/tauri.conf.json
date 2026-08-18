@@ -70,7 +70,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["nsis"],
     "resources": {
       "../plugins": "plugins",
       "../skills": "skills"
@@ -81,6 +81,12 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "installerHooks": "windows/hooks.nsh"
+      }
+    }
   }
 }

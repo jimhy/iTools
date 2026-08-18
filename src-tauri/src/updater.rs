@@ -1,16 +1,36 @@
-//! 版本更新检查与安装：**GitHub Releases 单一源**。
+//! 版本更新检查与安装。
+//!
+//! # 更新源按发行线分成两条（别再合回一条）
+//!
+//! - **自建服务版**（官网线，`scripts/publish.sh` 构建时注入了 `ITOOLS_DEFAULT_ENDPOINT`）
+//!   → 查自己的服务器 `<endpoint>/api/download/latest`，装 `<endpoint>/download/…-setup.exe`。
+//! - **开源版**（GitHub Release 线，刻意不注入端点）→ 查 `releases/latest`。
+//!
+//! 合成一条的后果实测过：自建版用户每点一次「立即更新」，装上的都是 GitHub 的开源包，
+//! 编译期注入的服务端地址随之消失，表现为某天起「云端未接入」而用户自己什么都没改。
+//! 判据只看**编译期常量**、不看用户填的同步地址——理由见 [`selfhost_endpoint`]。
 //!
 //! ⚠ 可达性（部署前必读）：GitHub API 在国内网络下可能超时或被重置。本模块的请求走
 //! [`crate::http`]，会遵循用户配置的代理；没配代理时检查更新可能失败——失败是**静默降级**
 //! （只返回 Err，前端不打扰用户），不会影响任何其它功能。原实现用的是 Gitee（中国区可达性
 //! 更好），2026-08-13 按维护者要求统一到 GitHub。若日后国内用户反馈收不到更新提示，
-//! 优先考虑给 msi 直链套一层镜像（[`crate::plugin::mirror`] 已有现成的镜像竞速能力），
+//! 优先考虑给安装包直链套一层镜像（[`crate::plugin::mirror`] 已有现成的镜像竞速能力），
 //! 而不是把源改回去——两个源并存会让「哪个才是最新版」变得没人说得清。
 //!
+//! # 安装包只认 NSIS `-setup.exe`（**别再加回 msi**）
+//!
+//! 早先这里挑的是 release 附件里的 `.msi`，而官网下载线（`scripts/publish.sh`）发的
+//! 一直是 NSIS 的 `iTools_<版本>_x64-setup.exe`——**同一个应用被两种安装器各装了一份**。
+//! 两者互不认识对方的卸载记录（NSIS 写 HKCU\\…\\Uninstall\\iTools，MSI 写 HKLM 的
+//! ProductCode 键），各自建各自的桌面快捷方式（NSIS 落当前用户桌面、MSI 因 `ALLUSERS=1`
+//! 落公共桌面），于是**桌面上出现两个同名 iTools 图标**，两套文件还往同一个目录里灌。
+//! 2026-08-18 定位到这个根因后统一到 NSIS：`tauri.conf.json` 不再产出 msi，这里也只认
+//! `-setup.exe`。要是哪天又在 release 里看到 msi 附件，那是打包配置被改回去了，先修那边。
+//!
 //! 设计：
-//! - 检查更新：读 `releases/latest`，semver 比对，返回是否有新版 + 下载页 + msi 直链。
-//! - 半自动安装：`download_update` 下载 msi 到临时目录，`launch_installer_and_quit`
-//!   调起 `msiexec /i`（交互式向导）并退出当前 app，让安装程序替换正在运行的 exe。
+//! - 检查更新：读 `releases/latest`，semver 比对，返回是否有新版 + 下载页 + 安装包直链。
+//! - 半自动安装：`download_update` 下载 setup.exe 到临时目录，`launch_installer_and_quit`
+//!   直接运行它（NSIS 交互式向导）并退出当前 app，让安装程序替换正在运行的 exe。
 //! - 版本号按语义化比较（semver），忽略 tag 前缀 `v`（发版 tag 形如 `v0.1.0`）。
 //! - 网络失败静默降级：失败仅返回 Err，由前端决定是否打扰用户。
 //!
@@ -69,6 +89,13 @@ const DOWNLOAD_TIMEOUT_SECS: u64 = 600;
 /// 请求 User-Agent。
 const USER_AGENT: &str = "itools-updater";
 
+/// 安装包附件的文件名后缀。
+///
+/// NSIS 产物固定形如 `iTools_1.5.2_x64-setup.exe`（权威出处：`scripts/publish.sh`
+/// 里的 `SETUP_SRC`）。**刻意匹配 `-setup.exe` 而不是裸 `.exe`**：release 里可能
+/// 还挂着别的 exe 附件（调试符号、便携版…），裸后缀会把它们误当安装包下下来运行。
+const INSTALLER_SUFFIX: &str = "-setup.exe";
+
 /// 远端最新版本信息（归一化后返回给前端）。字段以 camelCase 序列化，方便前端使用。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -83,9 +110,9 @@ pub struct UpdateInfo {
     pub release_url: String,
     /// release 说明正文（markdown）。
     pub release_notes: String,
-    /// msi 安装包直链（release 附件里第一个 `.msi` 结尾者），无则 None。
+    /// 安装包直链（release 附件里第一个 [`INSTALLER_SUFFIX`] 结尾者），无则 None。
     /// 前端据此决定是否提供「立即更新」（自动下载 + 调起安装）。
-    pub msi_url: Option<String>,
+    pub installer_url: Option<String>,
 }
 
 /// 最近一次更新检查的结果快照（供「上次检查了什么」展示）。
@@ -151,6 +178,102 @@ pub fn update_status() -> UpdateStatus {
             current_version,
         },
     }
+}
+
+/// 自建服务版的更新源：编译期注入过 `ITOOLS_DEFAULT_ENDPOINT` 时启用，否则为 None。
+///
+/// # 为什么两条发行线必须各更各的
+///
+/// 官网（`scripts/publish.sh`）发的是**注入了服务端地址**的自建服务版，GitHub Release
+/// 发的是**刻意不注入**的开源版。而这个模块原先无条件从 GitHub 取更新——于是自建版用户
+/// 每点一次「立即更新」，装上的都是开源包，编译期常量随之变成空：表现为某天起「云端未接入」，
+/// 而用户自己什么都没改，排查方向会完全跑偏。2026-08-18 在维护者本机实测到了这个现场
+/// （安装目录里的 exe 已不含端点）。
+///
+/// # 刻意用**编译期常量**，不是用户填的同步地址
+///
+/// 更新源是「这个包从哪条线发出来的」这一发行渠道属性，不是用户偏好。若跟着
+/// `AppSettings.sync_endpoint` 走，任何人把同步地址指到自己的服务器，就能让这台机器
+/// 下载并执行他提供的 exe——那是一条不该存在的攻击面。用户换同步服务器是换数据存放处，
+/// 不该连带换掉「从哪里拿安装包」。
+fn selfhost_endpoint() -> Option<String> {
+    crate::account::builtin_default_endpoint().map(|s| s.trim_end_matches('/').to_string())
+}
+
+/// 自建服务端 `GET /api/download/latest` 的响应（见 `server/src/routes.rs::latest_download`）。
+/// 免认证端点——官网未登录时就在读它。
+#[derive(Debug, Deserialize)]
+struct SelfhostLatest {
+    /// 扫下载目录得出的最新版本号；扫不出时服务端给 null 并附 `reason`。
+    #[serde(default)]
+    version: Option<String>,
+    /// 官网固定链的文件名，正常是 `iTools-latest-setup.exe`。
+    #[serde(default)]
+    file: Option<String>,
+    /// version 为 null 时服务端给出的原因。
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+/// 官网下载按钮固定链接的文件名；服务端给不出可信文件名时回落到它。
+const FALLBACK_INSTALLER_FILE: &str = "iTools-latest-setup.exe";
+
+/// 把服务端返回的文件名收敛成一个**可以安全拼进下载 URL** 的纯文件名。
+///
+/// 这个值最终会决定「下载哪个文件并执行它」，所以按白名单收：必须是不含任何路径
+/// 分隔符、不含 `..`、且以 [`INSTALLER_SUFFIX`] 结尾的纯文件名；凡不满足的一律
+/// 回落到 [`FALLBACK_INSTALLER_FILE`]（官网下载按钮链的就是它，是安全且正确的默认）。
+///
+/// 服务端是我们自己的没错，但「自己的服务器返回的字符串」不该直接拿去拼路径——
+/// 它可能被改配置、被中间人替换，而这条路径的终点是 `Command::new(path).spawn()`。
+fn safe_installer_filename(from_server: Option<&str>) -> String {
+    from_server
+        .map(str::trim)
+        .filter(|f| {
+            !f.is_empty()
+                && !f.contains('/')
+                && !f.contains('\\')
+                && !f.contains("..")
+                && f.to_ascii_lowercase().ends_with(INSTALLER_SUFFIX)
+        })
+        .unwrap_or(FALLBACK_INSTALLER_FILE)
+        .to_string()
+}
+
+/// 从自建服务端取最新版信息。
+fn fetch_selfhost(ep: &str) -> Result<UpdateInfo, String> {
+    let current = env!("CARGO_PKG_VERSION").to_string();
+    let url = format!("{ep}/api/download/latest");
+    let resp = crate::http::get(&url)
+        .set("User-Agent", USER_AGENT)
+        .timeout(Duration::from_secs(TIMEOUT_SECS))
+        .call()
+        .map_err(|e| redact_token(format!("更新检查请求失败: {e}")))?;
+    let latest: SelfhostLatest = resp
+        .into_json()
+        .map_err(|e| redact_token(format!("更新检查解析失败: {e}")))?;
+
+    let Some(version) = latest.version.filter(|v| !v.trim().is_empty()) else {
+        // 服务端明确说不出版本号就如实报错，绝不静默当成「已是最新」
+        return Err(format!(
+            "更新源没有可用的安装包：{}",
+            latest.reason.as_deref().unwrap_or("服务端未说明原因")
+        ));
+    };
+
+    let file = safe_installer_filename(latest.file.as_deref());
+    let version = version.trim().trim_start_matches('v').to_string();
+    Ok(UpdateInfo {
+        has_update: version_gt(&version, &current),
+        latest_version: version,
+        current_version: current,
+        // 自建线没有 release 页，指向官网首页——那里就有下载按钮
+        release_url: format!("{ep}/"),
+        // 服务端这个端点只扫文件名，没有更新说明字段。留空，前端会如实显示
+        // 「这个版本没有提供更新说明」，而不是编一段出来。
+        release_notes: String::new(),
+        installer_url: Some(format!("{ep}/download/{file}")),
+    })
 }
 
 /// 单个 release 的最小化字段（GitHub REST v3；Gitee v5 的同名字段完全一致）。
@@ -237,37 +360,52 @@ pub async fn check_update() -> Result<UpdateInfo, String> {
 /// 连开发者都无法判断自动检查到底跑没跑——本轮就为此绕了一圈。
 fn check_blocking() -> Result<UpdateInfo, String> {
     let current = env!("CARGO_PKG_VERSION").to_string();
-    let release = match fetch_release() {
-        Ok(r) => r,
+    // 分线：自建服务版查自己的服务器，开源版查 GitHub Release（见 selfhost_endpoint 的长注释）
+    let (source, result) = match selfhost_endpoint() {
+        Some(ep) => ("自建服务", fetch_selfhost(&ep)),
+        None => ("GitHub", fetch_github(&current)),
+    };
+    let info = match result {
+        Ok(i) => i,
         Err(e) => {
-            ilog!("[iTools] 检查更新失败（当前 v{current}）：{e}");
+            ilog!("[iTools] 检查更新失败（源：{source}，当前 v{current}）：{e}");
             remember(Err(e.clone()));
             return Err(e);
         }
     };
-    let latest = release.tag_name.trim_start_matches('v').to_string();
-    let has_update = version_gt(&latest, &current);
-    if has_update {
-        ilog!("[iTools] 检查更新：发现新版本 v{latest}（当前 v{current}）");
+    if info.has_update {
+        ilog!(
+            "[iTools] 检查更新：发现新版本 v{}（源：{source}，当前 v{current}）",
+            info.latest_version
+        );
     } else {
-        ilog!("[iTools] 检查更新：已是最新（当前 v{current}，远端 v{latest}）");
+        ilog!(
+            "[iTools] 检查更新：已是最新（源：{source}，当前 v{current}，远端 v{}）",
+            info.latest_version
+        );
     }
-    // 从附件里挑第一个 .msi 直链
-    let msi_url = release
+    remember(Ok(info.clone()));
+    Ok(info)
+}
+
+/// 从 GitHub Release 取最新版信息（开源版走这条）。
+fn fetch_github(current: &str) -> Result<UpdateInfo, String> {
+    let release = fetch_release()?;
+    let latest = release.tag_name.trim_start_matches('v').to_string();
+    // 从附件里挑第一个 NSIS 安装包直链
+    let installer_url = release
         .assets
         .into_iter()
         .map(|a| a.browser_download_url)
-        .find(|u| u.to_ascii_lowercase().ends_with(".msi"));
-    let info = UpdateInfo {
+        .find(|u| u.to_ascii_lowercase().ends_with(INSTALLER_SUFFIX));
+    Ok(UpdateInfo {
+        has_update: version_gt(&latest, current),
         latest_version: latest,
-        current_version: current,
-        has_update,
+        current_version: current.to_string(),
         release_url: release.html_url,
         release_notes: release.body,
-        msi_url,
-    };
-    remember(Ok(info.clone()));
-    Ok(info)
+        installer_url,
+    })
 }
 
 /// 命令：在系统默认浏览器打开 release 下载页。
@@ -284,19 +422,34 @@ pub fn get_app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
-/// 校验文件头是否为合法 MSI（OLE2 / CFBF 复合文档魔数 `D0CF11E0A1B11AE1`）。
-/// 防止错误响应（HTML 错误页、截断包等）被当成安装包调起。
-fn is_valid_msi(path: &std::path::Path) -> bool {
-    use std::io::Read;
-    const MSI_MAGIC: [u8; 8] = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
-    let mut buf = [0u8; 8];
-    std::fs::File::open(path)
-        .and_then(|mut f| f.read_exact(&mut buf).map(|_| buf))
-        .map(|b| b == MSI_MAGIC)
-        .unwrap_or(false)
+/// 校验文件确为 Windows 可执行文件（PE）。
+/// 防止错误响应（HTML 错误页、截断包、代理返回的门户页等）被当成安装包**运行**。
+///
+/// 两段都查，不只看 `MZ`：`MZ` 只有两个字节，任何以这俩字符开头的文本都能蒙混过关，
+/// 而这个文件接下来是要被直接执行的。所以再顺着 DOS 头 `0x3C` 处的 `e_lfanew`
+/// 偏移跳过去，确认那里是 PE 签名 `PE\0\0`——这是「它真是个 exe」的最小充分证据。
+fn is_valid_installer(path: &std::path::Path) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    let check = |path: &std::path::Path| -> std::io::Result<bool> {
+        let mut f = std::fs::File::open(path)?;
+        let mut dos = [0u8; 2];
+        f.read_exact(&mut dos)?;
+        if &dos != b"MZ" {
+            return Ok(false);
+        }
+        // e_lfanew：PE 头相对文件起始的偏移，小端 u32，固定位于 0x3C
+        f.seek(SeekFrom::Start(0x3C))?;
+        let mut off = [0u8; 4];
+        f.read_exact(&mut off)?;
+        f.seek(SeekFrom::Start(u32::from_le_bytes(off) as u64))?;
+        let mut sig = [0u8; 4];
+        f.read_exact(&mut sig)?;
+        Ok(&sig == b"PE\0\0")
+    };
+    check(path).unwrap_or(false)
 }
 
-/// 命令：下载 msi 安装包到临时目录，返回本地绝对路径。
+/// 命令：下载安装包到临时目录，返回本地绝对路径。
 ///
 /// **必须异步**：同步命令的函数体被内联进 IPC handler，在 Windows 上就是主 UI 线程
 /// （见文件头「线程模型」）——本命令超时高达 600 秒，同步版等于「点了更新，整个 app
@@ -311,22 +464,25 @@ pub async fn download_update(url: String) -> Result<String, String> {
 
 /// [`download_update`] 的阻塞实现（跑在 `spawn_blocking` 线程上）。
 ///
-/// 仅接受 `.msi`（防止误下载/执行其他类型）；下载完校验非空且与 Content-Length 一致。
+/// 仅接受 [`INSTALLER_SUFFIX`]（防止误下载/执行其他类型）；下载完校验非空且与
+/// Content-Length 一致。这道后缀检查独立于 [`check_blocking`] 里的附件筛选——
+/// 本命令的 url 由前端传入，不能假定它一定来自我们自己挑出来的那一条。
 fn download_blocking(url: &str) -> Result<String, String> {
-    // 从 URL 末段取文件名，回退默认名
-    let filename = url
-        .rsplit('/')
-        .next()
-        .filter(|s| !s.is_empty())
-        .unwrap_or("itools_update.msi")
-        .to_string();
-    if !filename.to_ascii_lowercase().ends_with(".msi") {
-        return Err(format!("非预期的安装包类型：{filename}"));
+    // 后缀门禁只看 URL（剥掉 ?query / #fragment 之后），**不拿远端文件名落盘**。
+    //
+    // 曾经是 `url.rsplit('/').next()` 直接当文件名 join 到临时目录——那是错的：
+    // Windows 上 `\` 同样是路径分隔符，URL 末段里含字面 `\` 或 `..`
+    // （形如 `…/a\..\..\Startup\x-setup.exe`）就能把文件写到 itools_update 之外，
+    // 而紧接着 [`launch_installer_and_quit`] 会**执行**这个路径——可控落点叠加执行。
+    // 远端文件名对本地落盘没有任何信息价值，所以固定写死一个名字，问题从根上消失。
+    let path_part = url.split(['?', '#']).next().unwrap_or(url);
+    if !path_part.to_ascii_lowercase().ends_with(INSTALLER_SUFFIX) {
+        return Err(format!("非预期的安装包类型：{path_part}"));
     }
 
     let dir = std::env::temp_dir().join("itools_update");
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建临时目录失败: {e}"))?;
-    let dest = dir.join(&filename);
+    let dest = dir.join("itools-setup.exe");
 
     // 统一出口取 Agent；600 秒的超时**按请求**设置，代理只决定走哪条链路、不改超时语义
     let resp = crate::http::get(url)
@@ -352,36 +508,184 @@ fn download_blocking(url: &str) -> Result<String, String> {
             return Err(format!("下载不完整：{written}/{exp} 字节"));
         }
     }
-    // 校验文件头确为合法 MSI（OLE2 魔数）——防错误响应/HTML 错误页被当安装包调起。
-    if !is_valid_msi(&dest) {
+    // 校验确为 PE 可执行文件——防错误响应/HTML 错误页被当安装包直接运行。
+    if !is_valid_installer(&dest) {
         let _ = std::fs::remove_file(&dest);
-        return Err("下载的文件不是合法的 MSI 安装包".to_string());
+        return Err("下载的文件不是合法的安装程序".to_string());
     }
     Ok(dest.to_string_lossy().into_owned())
 }
 
-/// 命令：启动 msi 安装向导（交互式 `msiexec /i`）并退出当前 app。
+/// 起安装器之前，先请提权的全盘索引守护退出。
 ///
-/// 退出是必须的：msi 升级要替换正在运行的 `iTools.exe`，进程占用会导致文件锁。
+/// # 为什么非做不可
+///
+/// 守护是**同一个 `itools.exe`** 带 `--mft-daemon` 起的 High 完整性子进程
+/// （[`crate::search::mft`]），Windows 会对运行中的可执行文件加映像锁——它活着，
+/// 安装器就覆盖不了安装目录里的 `itools.exe`。而：
+///
+/// - [`MftSearch::shutdown`] 此前**只**接在「关闭全盘索引」那个按钮上，app 退出路径不调它，
+///   `app.exit(0)` 关掉的只是主进程，守护会留下来；
+/// - NSIS 没有 MSI 那套 Restart Manager 兜底（msiexec 遇到占用可以 `MoveFileEx`
+///   排到重启后替换，NSIS 的 `File` 写不进去就是失败）——切到 NSIS 之后这条退路没了；
+/// - NSIS 模板的 `CheckIfAppIsRunning` 按进程名杀，但 `installMode=currentUser` 的安装器
+///   是 Medium 完整性，**无权终止 High 完整性进程**，指望不上。
+///
+/// 所以只能由我们自己在退出前收掉它。收不掉就**如实拒绝启动安装器**，
+/// 而不是让用户眼睁睁看着安装失败——那时主程序已经退出，他连个能点的界面都没有。
+fn shutdown_mft_daemon_before_install() -> Result<(), String> {
+    use crate::search::mft::MftSearch;
+    if !MftSearch::is_running() {
+        return Ok(());
+    }
+    ilog!("[iTools] 更新前先关闭全盘索引守护，避免它占着 itools.exe 的映像锁");
+    let _ = MftSearch::shutdown();
+    // `shutdown()` 只代表 IPC 请求得到了 Ok，进程真正退出还要一点时间；
+    // 急着起安装器会正好撞上映像锁。最多等 3 秒，够了。
+    for _ in 0..30 {
+        if !MftSearch::is_running() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Err("全盘索引的提权守护进程仍在运行，它占用着安装目录里的程序文件，\
+         现在安装会失败。请先在 /f 面板关闭全盘索引，或重启电脑后再更新。"
+        .to_string())
+}
+
+/// 命令：启动 NSIS 安装向导（交互式）并退出当前 app。
+///
+/// 退出是必须的：升级要替换正在运行的 `itools.exe`，进程占用会导致文件锁。
 /// 安装程序为独立进程，不受本 app 退出影响。安装完由用户手动打开新版本。
+///
+/// 直接运行 setup.exe、**不带 `/S`**：静默安装会让用户在毫无反馈的情况下等着，
+/// 也剥夺了改安装目录的机会。交互式向导与用户从官网下载安装的体验完全一致。
+///
+/// `async fn` + `spawn_blocking`：本命令会等提权守护退出（最长 3 秒，见
+/// [`shutdown_mft_daemon_before_install`]），而同步命令的函数体是内联进 IPC handler
+/// 的——在 Windows 上那就是主 UI 线程（见文件头「线程模型」）。同步版等于让界面
+/// 白卡三秒。与本文件其余带阻塞的命令保持同一种写法。
 #[tauri::command]
-pub fn launch_installer_and_quit(path: String, app: tauri::AppHandle) -> Result<(), String> {
-    if !std::path::Path::new(&path).is_file() {
+pub async fn launch_installer_and_quit(path: String, app: tauri::AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || launch_blocking(&path))
+        .await
+        .map_err(|e| format!("启动安装任务异常终止: {e}"))??;
+    // 让出对旧 exe 的占用；安装程序已独立启动。
+    // 放在 spawn_blocking 之外：退出应用是主进程层面的事，且只有前面每一步
+    // （校验、收守护、起安装器）都成功了才该走到这里——失败时必须让 app 活着，
+    // 用户还要在界面上看到原因、点「前往下载页」。
+    app.exit(0);
+    Ok(())
+}
+
+/// [`launch_installer_and_quit`] 的阻塞实现（跑在 `spawn_blocking` 线程上）。
+fn launch_blocking(path: &str) -> Result<(), String> {
+    let p = std::path::Path::new(path);
+    if !p.is_file() {
         return Err(format!("安装包不存在：{path}"));
     }
-    std::process::Command::new("msiexec")
-        .arg("/i")
-        .arg(&path)
+    // 再校验一次 PE：下载与调起之间隔着用户点击，路径由前端回传，
+    // 这里不该盲信「下载时校验过了」就去执行它。
+    if !is_valid_installer(p) {
+        return Err(format!("不是合法的安装程序：{path}"));
+    }
+    shutdown_mft_daemon_before_install()?;
+    std::process::Command::new(path)
         .spawn()
         .map_err(|e| format!("启动安装程序失败: {e}"))?;
-    // 让出对旧 exe 的占用；安装程序已独立启动
-    app.exit(0);
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::version_gt;
+    use super::{is_valid_installer, safe_installer_filename, version_gt, FALLBACK_INSTALLER_FILE};
+
+    /// 服务端给的文件名最终会被拼进下载 URL、下下来、然后**被执行**。
+    /// 所以这里两个方向都钉住：正常名字要原样用，任何带路径意味的都必须退回固定名。
+    #[test]
+    fn server_supplied_filename_is_confined_to_a_plain_name() {
+        // 正常：原样采用
+        assert_eq!(
+            safe_installer_filename(Some("iTools_1.5.2_x64-setup.exe")),
+            "iTools_1.5.2_x64-setup.exe"
+        );
+        assert_eq!(
+            safe_installer_filename(Some("  iTools-latest-setup.exe  ")),
+            "iTools-latest-setup.exe",
+            "两侧空白要剥掉"
+        );
+
+        // 任何带路径意味或后缀不对的，一律退回固定名
+        for bad in [
+            "../../../Windows/System32/evil-setup.exe", // 相对路径穿越
+            "sub/dir/x-setup.exe",                      // 正斜杠
+            "sub\\dir\\x-setup.exe",                    // 反斜杠（Windows 同样是分隔符）
+            "..\\x-setup.exe",
+            "payload.exe",     // 后缀不是 -setup.exe
+            "readme.txt",      // 完全不相干
+            "",                // 空串
+            "   ",             // 全空白
+        ] {
+            assert_eq!(
+                safe_installer_filename(Some(bad)),
+                FALLBACK_INSTALLER_FILE,
+                "「{bad}」必须被拒绝并退回固定名"
+            );
+        }
+
+        // 服务端没给这个字段
+        assert_eq!(safe_installer_filename(None), FALLBACK_INSTALLER_FILE);
+    }
+
+    /// 造一个最小合法 PE 头：`MZ` + 0x3C 处放 PE 头偏移 + 该处放 `PE\0\0`。
+    /// 不必带真正的 exe，这个函数看的就只有这三处。
+    fn minimal_pe() -> Vec<u8> {
+        let mut v = vec![0u8; 0x40];
+        v[0] = b'M';
+        v[1] = b'Z';
+        v[0x3C..0x40].copy_from_slice(&0x40u32.to_le_bytes());
+        v.extend_from_slice(b"PE\0\0");
+        v
+    }
+
+    fn write_tmp(name: &str, bytes: &[u8]) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!("itools_updater_test_{name}"));
+        std::fs::write(&p, bytes).expect("写测试文件");
+        p
+    }
+
+    /// 这个判定是「下载的文件不是合法的安装程序」这条用户可见错误的唯一来源，
+    /// 而它两个方向都会伤人：过松 → 把 HTML 错误页当安装器**执行**；
+    /// 过严 → 每个用户都卡在这条错误上更不了新。所以两个方向都钉住。
+    #[test]
+    fn installer_validation_accepts_real_pe_and_rejects_impostors() {
+        let ok = write_tmp("ok.exe", &minimal_pe());
+        assert!(is_valid_installer(&ok), "最小合法 PE 必须通过");
+
+        // 只有 MZ、没有 PE 签名：光看前两个字节就放行是不够的
+        let mut only_mz = minimal_pe();
+        only_mz[0x40..0x44].copy_from_slice(b"XXXX");
+        let bad1 = write_tmp("only_mz.exe", &only_mz);
+        assert!(!is_valid_installer(&bad1), "缺 PE 签名必须拒绝");
+
+        // 代理门户 / 错误页：最典型的「下到了一坨 HTML」
+        let bad2 = write_tmp("page.html", b"<!DOCTYPE html><html>404 Not Found</html>");
+        assert!(!is_valid_installer(&bad2), "HTML 错误页必须拒绝");
+
+        // 截断到读不出 e_lfanew：不能 panic，必须老实返回 false
+        let bad3 = write_tmp("trunc.exe", b"MZ\x90\x00");
+        assert!(!is_valid_installer(&bad3), "截断文件必须拒绝且不 panic");
+
+        // e_lfanew 指到文件外：同样不能 panic
+        let mut wild = minimal_pe();
+        wild[0x3C..0x40].copy_from_slice(&0xFFFF_0000u32.to_le_bytes());
+        let bad4 = write_tmp("wild_offset.exe", &wild);
+        assert!(!is_valid_installer(&bad4), "越界偏移必须拒绝且不 panic");
+
+        for p in [ok, bad1, bad2, bad3, bad4] {
+            let _ = std::fs::remove_file(p);
+        }
+    }
 
     #[test]
     fn version_compare() {

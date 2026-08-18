@@ -77,7 +77,7 @@ export interface AppSettings {
   auto_clear_seconds: number;
   /** 是否让**所有出站请求**经过 `proxy_address` 配置的代理。
    *  真实生效范围（后端按此实现，UI 文案必须与之一致）：插件下载与安装 / 插件更新检查与下载 /
-   *  云同步与登录登出注销 / app 更新检查与 msi 下载 / 插件的 `itools.fetch`。
+   *  云同步与登录登出注销 / app 更新检查与安装包下载 / 插件的 `itools.fetch`。
    *  **本地地址恒直连**：localhost、整段 127.0.0.0/8、::1、私网段（10/8、172.16/12、192.168/16）
    *  与 *.local 不受本开关影响，IPv4-mapped 写法（`::ffff:127.0.0.1`）会折回 IPv4 后同样直连
    *  （否则本机同步服务端会被塞进代理，联调直接断掉）。 */
@@ -565,7 +565,7 @@ export interface UpdateInfo {
   hasUpdate: boolean;
   releaseUrl: string;
   releaseNotes: string;
-  msiUrl: string | null;
+  installerUrl: string | null;
 }
 
 // ---------- 开发者中心（插件调试环境） ----------

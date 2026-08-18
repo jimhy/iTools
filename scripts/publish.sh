@@ -121,6 +121,24 @@ publish_app() {
   EXE_SRC="$ROOT/src-tauri/target/release/itools.exe"
   [ -f "$SETUP_SRC" ] || { echo "✗ 没找到安装包 $SETUP_SRC" >&2; exit 1; }
 
+  echo "==> [app] 校验 NSIS 钩子真的编进去了"
+  # 钩子（src-tauri/windows/hooks.nsh）负责装新版前卸掉历史遗留的 MSI 安装——
+  # 它要是没编进去，安装器外观完全正常，用户那边却会留下两条卸载记录 + 两个桌面图标，
+  # 正是本次要修的那个 bug 原样复发。
+  #
+  # 校验对象是 bundler 生成的**明文中间脚本**，不是安装包：安装包被 LZMA 整体压缩，
+  # grep 任何字符串都搜不到（与上面「校验裸 exe 而非安装包」是同一个道理）。
+  # 这个中间脚本正好补上了那道防呆够不着的空档。
+  NSI_SRC="$ROOT/src-tauri/target/release/nsis/x64/installer.nsi"
+  [ -f "$NSI_SRC" ] || { echo "✗ 没找到中间脚本 $NSI_SRC" >&2; exit 1; }
+  if grep -q -F 'hooks.nsh' "$NSI_SRC"; then
+    echo "    ✓ installer.nsi 里 include 了 hooks.nsh"
+  else
+    echo "✗ 安装器没有 include windows/hooks.nsh——旧 MSI 清理逻辑没编进去，别发这个包" >&2
+    echo "  多半是 tauri.conf.json 的 bundle.windows.nsis.installerHooks 丢了，或该文件没进版本库" >&2
+    exit 1
+  fi
+
   echo "==> [app] 校验地址真的注入了"
   # 见文件头注意事项 2：不校验的话，发出去的包连不上服务器且外观完全正常。
   #

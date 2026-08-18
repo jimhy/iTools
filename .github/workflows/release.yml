@@ -58,6 +58,11 @@ jobs:
           releaseBody: |
             iTools —— macOS 风格的键盘驱动效率启动器（Windows）。
 
-            本 Release 由 GitHub Actions 自动构建，附件为 Windows 安装包（.msi / .exe 安装程序）。
+            本 Release 由 GitHub Actions 自动构建，附件为 Windows 安装程序（NSIS `-setup.exe`）。
+
+            **从 1.5.2 及更早版本升级**：那些版本是用 .msi 装的，与现在的安装程序互不识别，
+            同时装会在「应用和功能」里留下两条 iTools、桌面上出现两个图标。
+            新的安装程序会在安装前自动卸掉旧的 .msi 那份；若它提示清理失败，
+            请先到「应用和功能」手动卸载 iTools 后再安装。
           releaseDraft: false
           prerelease: false

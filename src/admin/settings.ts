@@ -292,7 +292,7 @@ export async function renderSettings(root: HTMLElement, ctx: AdminCtx): Promise<
   statusRow.style.display = "none";
 
   let latestUrl = "";
-  let latestMsi: string | null = null;
+  let latestInstaller: string | null = null;
 
   // 「前往下载」：在系统浏览器打开 release 页（手动下载，始终可用）。
   const downloadBtn = h("button", {
@@ -304,17 +304,17 @@ export async function renderSettings(root: HTMLElement, ctx: AdminCtx): Promise<
   });
   downloadBtn.style.display = "none";
 
-  // 「立即更新」：自动下载 msi 并调起安装（随后退出 app）。仅当 release 附带 msi 直链时出现。
+  // 「立即更新」：自动下载安装包并调起安装向导（随后退出 app）。仅当 release 附带安装包直链时出现。
   const installBtn = h("button", { class: "btn btn-primary", text: "立即更新" });
   installBtn.style.display = "none";
   installBtn.addEventListener("click", async () => {
-    if (!latestMsi) return;
+    if (!latestInstaller) return;
     installBtn.disabled = true;
     installBtn.textContent = "下载中…";
     try {
-      const path = await api.downloadUpdate(latestMsi);
+      const path = await api.downloadUpdate(latestInstaller);
       ctx.toast("下载完成，即将启动安装并退出 iTools");
-      await api.launchInstaller(path); // 调起 msi 安装向导并退出当前进程
+      await api.launchInstaller(path); // 调起 NSIS 安装向导并退出当前进程
     } catch (err) {
       console.error("update install failed", err);
       ctx.toast(typeof err === "string" ? err : "更新失败");
@@ -357,9 +357,9 @@ export async function renderSettings(root: HTMLElement, ctx: AdminCtx): Promise<
     if (info.hasUpdate) {
       updateStatus.textContent = `发现新版本 v${info.latestVersion}，建议更新`;
       latestUrl = info.releaseUrl;
-      latestMsi = info.msiUrl;
+      latestInstaller = info.installerUrl;
       downloadBtn.style.display = "";
-      if (latestMsi) installBtn.style.display = "";
+      if (latestInstaller) installBtn.style.display = "";
     } else {
       updateStatus.textContent = `已是最新版本（v${info.currentVersion}）`;
       downloadBtn.style.display = "none";
@@ -405,10 +405,54 @@ export async function renderSettings(root: HTMLElement, ctx: AdminCtx): Promise<
     })
     .catch((err) => console.error("update_status failed", err));
 
+  // ---------- 运行日志 ----------
+  // iTools 会把运行日志写成一个文件（release 在 %LOCALAPPDATA%\itools\itools.log，2MB 轮转），
+  // 但在此之前**界面上没有任何地方告诉用户它在哪**——「出问题我们拿得到证据」就没闭环：
+  // 用户想反馈问题时压根不知道该发什么给我们。这一行就是那个入口。
+  //
+  // 路径一律**从后端取**：debug 与 release 的落点本来就不同，数据根还可能因为取不到
+  // LOCALAPPDATA 而回退到临时目录，前端写死一份必然有对不上的那天。
+  const logPathDesc = h("div", { class: "set-row-desc", text: "正在定位日志文件…" });
+  const openLogBtn = h("button", { class: "btn", text: "打开日志目录" });
+  // 路径还没拿到之前先禁用：这时点了后端也定位不出目录，不做「看着能点、点了没反应」的控件
+  openLogBtn.disabled = true;
+  openLogBtn.addEventListener("click", async () => {
+    try {
+      await api.openLogDir();
+    } catch (err) {
+      console.error("open_log_dir failed", err);
+      // 后端会说清是「目录不存在」还是「打开失败」，原样透出比自造文案有用
+      ctx.toast(errText(err));
+    }
+  });
+  void api
+    .logFilePath()
+    .then((p) => {
+      logPathDesc.textContent = `遇到问题时，请把这个文件发给我们：${p}`;
+      openLogBtn.disabled = false;
+    })
+    .catch((err) => {
+      console.error("log_file_path failed", err);
+      // 定位不出来就如实说，并让按钮保持禁用——宁可少一个按钮，也不给一个点了没用的
+      logPathDesc.textContent = `定位日志文件失败：${errText(err)}`;
+    });
+  const logRow = h(
+    "div",
+    { class: "set-row" },
+    h(
+      "div",
+      { class: "set-row-text" },
+      h("div", { class: "set-row-label", text: "运行日志" }),
+      logPathDesc,
+    ),
+    h("div", { class: "set-row-control" }, openLogBtn),
+  );
+
   const about = group(
     "关于 iTools",
     row("当前版本", "每小时自动检查一次新版本；也可以随时手动检查", versionBadge, checkBtn, downloadBtn, installBtn),
     statusRow,
+    logRow,
   );
 
   root.appendChild(

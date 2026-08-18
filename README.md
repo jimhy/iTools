@@ -75,7 +75,7 @@ npm run tauri dev
 ## 打包
 
 ```bash
-npm run tauri build      # 生成 Windows 安装包（.msi / NSIS）
+npm run tauri build      # 生成 Windows 安装程序（NSIS -setup.exe）
 ```
 
 ## 交互速查
@@ -93,4 +93,4 @@ npm run tauri build      # 生成 Windows 安装包（.msi / NSIS）
 - 剪贴板历史
 - 更大尺寸图标（SHIL_JUMBO / GetImage 更大尺寸）以适配 HiDPI
 - 插件系统：配置驱动的轻量插件 → 可加载第三方 HTML 插件
-- 打包发布（`npm run tauri build` 出 .msi / NSIS 安装包）
+- 打包发布（`npm run tauri build` 出 NSIS `-setup.exe` 安装程序）

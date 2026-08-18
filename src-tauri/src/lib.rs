@@ -15,6 +15,8 @@ mod launch;
 mod logging;
 /// 插件开发 MCP 服务器：把开发者中心的能力（读规范/跑测试/看日志/提审）开放给 AI 编程助手。
 mod mcp;
+/// 本地数据根目录的唯一出口：release 恒为 `%LOCALAPPDATA%\itools`（冻结），debug 用 `itools-dev`。
+mod paths;
 mod plugin;
 mod profile;
 mod search;
@@ -85,6 +87,10 @@ pub fn run() {
         ilog!("[iTools] 已有同类实例在运行，本进程退出（已请求它唤起窗口）。");
         return;
     }
+    // debug 构建用的是独立数据目录（%LOCALAPPDATA%\itools-dev），首次启动一片空白。
+    // 这行日志就是为了让开发者别把「隔离目录」误当成「数据丢了」。release 不打（见 paths）。
+    // 放在单实例守卫之后：第二个实例马上就退，没必要给日志再添一行。
+    paths::log_startup_data_root();
     tauri::Builder::default()
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
@@ -170,7 +176,7 @@ pub fn run() {
             )
         })
         .setup(|app| {
-            // 统一本地存储：单个 SQLite 库（%LOCALAPPDATA%\itools\itools.db），取代散落的
+            // 统一本地存储：单个 SQLite 库（<数据根>\itools.db，数据根见 paths::data_root），取代散落的
             // usage/settings/account/profile.json 及插件 KV(kv.json)/本地优先数据(data/<ns>.json)；
             // 首启自动从旧 JSON 惰性迁移。插件沙盒文件（writeFile）仍在文件系统，不入库。
             let db = std::sync::Arc::new(db::Db::open_default());
@@ -348,13 +354,26 @@ pub fn run() {
                 });
             }
 
-            // 开机自启与设置对齐（仅在设置开启且系统未注册时补注册）
+            // 开机自启与设置对齐。
+            //
+            // ⚠ 不能只判断 `is_enabled()`：auto-launch 在 Windows 上只看 HKCU 的 Run 下
+            // **有没有同名值**，完全不比对路径。于是换过安装位置之后（典型场景：从早期
+            // 用 .msi 装的版本迁到现在的 NSIS 安装程序，安装目录从 `C:\Program Files\iTools`
+            // 变成 `%LOCALAPPDATA%\iTools`），Run 里留着的是指向**已被删掉的旧 exe** 的路径：
+            // `is_enabled()` 照样返回 true，设置页的开关照样显示「已开启」，而开机时
+            // 那条自启根本起不来——正是「看着能用、实际不生效」。
+            // 所以路径对不上时无条件重写一次（`enable()` 就是 set_value，幂等、不会弹窗）。
             if current.autostart {
                 use tauri_plugin_autostart::ManagerExt;
                 let autostart = app.autolaunch();
-                if !autostart.is_enabled().unwrap_or(false) {
+                // 值名与 auto-launch 写入时用的一致（= 应用名），不硬编码
+                let app_name = app.package_info().name.clone();
+                let registered = autostart.is_enabled().unwrap_or(false);
+                if !registered || autostart_path_is_stale(&app_name) {
                     if let Err(err) = autostart.enable() {
                         ilog!("[iTools] 开机自启注册失败: {err}");
+                    } else if registered {
+                        ilog!("[iTools] 开机自启原先指向旧的安装位置，已重新指到当前程序");
                     }
                 }
             }
@@ -414,6 +433,9 @@ pub fn run() {
             commands::open_update_window,
             commands::close_admin_window,
             commands::set_settings_persist,
+            // 运行日志：管理中心「关于」页显示真实路径 + 「打开日志目录」（用户报障时要拿它给我们）
+            commands::log_file_path,
+            commands::open_log_dir,
             // 全盘文件名索引（/f 直读 NTFS MFT，见 search/mft/）：
             // 查状态 / 用户主动开启（会弹一次 UAC 拉起提权守护）/ 重建索引
             commands::file_index_status,
@@ -638,6 +660,41 @@ pub fn open_update(app: &AppHandle) {
 }
 
 /// 构建常驻系统托盘：左键点击唤起，右键菜单 显示/管理中心/退出
+/// HKCU 的 Run 项里登记的自启路径，是不是已经指向别处（不是当前这个 exe）了。
+///
+/// 只在**读得出**且**确实对不上**时返回 true：读不到值、取不到当前 exe 路径，
+/// 一律返回 false 交给调用方原有的 `is_enabled()` 分支——宁可不动，也不要因为
+/// 读注册表失败就把用户的自启项反复重写一遍。
+///
+/// 值里可能带引号（auto-launch 写入时会给含空格的路径加引号），也可能有尾随空格，
+/// 比较前都剥掉；Windows 路径不区分大小写，所以按小写比。
+#[cfg(windows)]
+fn autostart_path_is_stale(app_name: &str) -> bool {
+    use winreg::enums::HKEY_CURRENT_USER;
+    use winreg::RegKey;
+
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let Ok(run) = hkcu.open_subkey(r"Software\Microsoft\Windows\CurrentVersion\Run") else {
+        return false;
+    };
+    let Ok(value) = run.get_value::<String, _>(app_name) else {
+        return false;
+    };
+    let registered = value.trim().trim_matches('"').trim();
+    if registered.is_empty() {
+        return false;
+    }
+    !registered.eq_ignore_ascii_case(&exe.to_string_lossy())
+}
+
+#[cfg(not(windows))]
+fn autostart_path_is_stale(_app_name: &str) -> bool {
+    false
+}
+
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     let show_item = MenuItem::with_id(app, "show", "显示 iTools", true, None::<&str>)?;
     let admin_item = MenuItem::with_id(app, "admin", "管理中心", true, None::<&str>)?;

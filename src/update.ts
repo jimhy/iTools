@@ -67,15 +67,17 @@ function renderUpdate(info: UpdateInfo): void {
   const warn = el(
     "div",
     "up-warn",
-    info.msiUrl
-      ? "更新将下载安装包并启动系统安装程序，iTools 会先退出。安装需要管理员授权。"
+    info.installerUrl
+      ? // 别写死「需要管理员授权」：NSIS 按当前用户安装时并不弹 UAC，只有安装目录
+        // 落在受保护位置（如 C:\Program Files）才会提权。写死就成了假话。
+        "更新将下载安装包并启动安装向导，iTools 会先退出。若安装目录需要更高权限，系统会提示授权。"
       : "本次发布没有提供安装包直链，将为你打开下载页手动下载。",
   );
 
   const actions = el("div", "up-actions");
   const later = el("button", "up-btn", "稍后");
   later.addEventListener("click", hide);
-  const go = el("button", "up-btn up-btn-primary", info.msiUrl ? "立即更新" : "前往下载");
+  const go = el("button", "up-btn up-btn-primary", info.installerUrl ? "立即更新" : "前往下载");
   go.addEventListener("click", () => void runUpdate(info, go, warn));
   actions.append(later, go);
 
@@ -97,9 +99,9 @@ function renderPlain(title: string, detail: string): void {
   ok.focus();
 }
 
-/** 执行更新：下载 msi → 调起安装并退出；没有直链则打开下载页。 */
+/** 执行更新：下载 setup.exe → 调起安装向导并退出；没有直链则打开下载页。 */
 async function runUpdate(info: UpdateInfo, btn: HTMLButtonElement, warn: HTMLElement): Promise<void> {
-  if (!info.msiUrl) {
+  if (!info.installerUrl) {
     void invoke("open_release_page", { url: info.releaseUrl });
     hide();
     return;
@@ -108,7 +110,7 @@ async function runUpdate(info: UpdateInfo, btn: HTMLButtonElement, warn: HTMLEle
   btn.textContent = "正在下载…";
   warn.textContent = "正在下载安装包，请勿关闭窗口。";
   try {
-    const path = await invoke<string>("download_update", { url: info.msiUrl });
+    const path = await invoke<string>("download_update", { url: info.installerUrl });
     warn.textContent = "下载完成，正在启动安装程序…";
     await invoke("launch_installer_and_quit", { path });
   } catch (err) {
