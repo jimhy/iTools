@@ -20,6 +20,8 @@ mod profile;
 mod search;
 mod mcp_config;
 mod settings;
+/// 单实例守卫：同一构建（dev / release 各算一种）只允许跑一个进程，再启动就唤起已有窗口。
+mod single_instance;
 mod skills;
 mod store;
 mod sync;
@@ -62,6 +64,26 @@ pub fn run() {
     // skip(1) 跳过 argv[0]（exe 自身路径）。
     if std::env::args_os().skip(1).any(|a| a == search::mft::DAEMON_ARG) {
         run_mft_daemon(); // 内部一定 exit，永不返回
+    }
+    // 【单实例】同一种构建只允许跑一个 iTools：第二次启动改为唤起已有实例的窗口，然后自己退出。
+    //
+    // 为什么要管：iTools 是常驻托盘的启动器，全局热键、托盘图标、MCP 端口（127.0.0.1:7345）、
+    // itools.db 全是进程外的独占资源。开第二份不是「多一个窗口」，而是热键被先注册的那个抢走、
+    // 托盘多一个点不响的图标、MCP 端口报 10048、两个进程并发写同一个 SQLite。
+    //
+    // ⚠⚠ 位置必须在上面 `--mft-daemon` 拦截的**后面**，这行顺序不是随便排的：
+    // MFT 索引守护跑的是**同一个 itools.exe**，只是多带一个参数。如果把单实例检查提到
+    // 拦截之前，守护一启动就会看到「互斥体已存在」（主进程正拿着），于是判定自己是第二个
+    // 实例、给主进程发一个唤起信号然后**直接退出**——全盘文件名搜索从此静默失效。
+    // 更糟的是现象：用户看到的是「索引死活建不起来 / 一直卡在建索引」，而不是「有个进程没起来」，
+    // 排查时几乎不会有人想到是单实例把守护杀了。（守护自己已有单实例语义：它抢命名管道，
+    // 抢不到就退，不需要这里再管一遍。）
+    //
+    // dev 与 release 用的是**两套**锁名（见 single_instance::mutex_name），可以同时跑：
+    // 开发时一边用 release 干活、一边编 debug 调试是常态，不能互相顶掉。
+    if !single_instance::acquire() {
+        ilog!("[iTools] 已有同类实例在运行，本进程退出（已请求它唤起窗口）。");
+        return;
     }
     tauri::Builder::default()
         .plugin(tauri_plugin_autostart::init(
@@ -338,6 +360,12 @@ pub fn run() {
             }
 
             setup_tray(app.handle())?;
+
+            // 单实例的「唤起」通道：后续再启动的同类进程会往这条命名管道发一个信号，
+            // 收到就把主窗口显示出来（用户的直觉是「再点一次图标 = 把它叫出来」）。
+            // 放在 setup 收尾处：主窗口（tauri.conf.json 静态创建）此时早已存在，
+            // 各类 state 也都 manage 完了，唤起进来不会撞上半初始化的状态。
+            single_instance::serve_activation(app.handle().clone());
 
             // 【启动竞态】主窗口是 tauri.conf.json 静态创建的，它的 WebView 会在 setup 跑完之前
             // 就加载页面并执行 JS。而 UsageStore / PluginRegistry 等 State 要等插件扫描完才

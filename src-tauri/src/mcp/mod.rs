@@ -21,6 +21,11 @@
 //! 代价是本机任意进程都能调这些工具，其中包括「提交审核」这类会改变线上状态的操作。
 //! 这一点在文档里如实写明，不靠「大概没人会」蒙混。
 //!
+//! **端口会自动避让**：默认 7345，被占用（最常见的情形是 debug 版与 release 版同时开着，
+//! 这是允许的）就顺序往上找一个空的，见 [`PORT_SCAN`]。无论落在哪个端口，
+//! `mcp_status` / 开发者中心面板显示的都是**实际**绑到的那一个。
+//! 用户用 `ITOOLS_MCP_PORT` 显式指定端口时**不**避让——绑不上就如实报错。
+//!
 //! # 诚信约束（doc/开发准则.md）
 //!
 //! - 每个工具都真实调用开发者中心既有的实现体，**没有一个是桩**；
@@ -46,6 +51,23 @@ use crate::logging::ilog;
 /// 可用环境变量 `ITOOLS_MCP_PORT` 覆盖（0 = 让系统分配空闲端口）。
 const DEFAULT_PORT: u16 = 7345;
 const PORT_ENV: &str = "ITOOLS_MCP_PORT";
+
+/// 用默认端口时，被占用就从 [`DEFAULT_PORT`] 起**顺序往上**再试这么多个（7345..=7354）。
+///
+/// # 为什么要有这个回退
+///
+/// 单实例机制只保证「同一构建不重复启动」，debug 版与 release 版是**允许并存**的
+/// （开发时的常态）。两边都想绑 7345，后起的那个必然拿到 `os error 10048`，
+/// 它的「AI 助手接入 / 开发者中心 MCP」整条链路就废了——而这跟 iTools 本身没关系，
+/// 纯粹是端口撞车，没道理让用户去手动设环境变量。
+///
+/// # 为什么是顺序小范围，而不是直接绑 0 让系统分配
+///
+/// 端口 0 拿到的是**每次启动都不同**的临时端口。而 `ai_clients.rs` 会把这个地址写进
+/// AI 客户端（Claude Code / Codex / Cursor）的配置文件里——地址天天变，等于每次开机
+/// 都得去「重新安装」一遍。顺序试则是可预测的：常态下只有一个实例，永远落在 7345；
+/// 并存时后起的落在 7346，换个启动顺序也就在这两个数之间摆动。
+const PORT_SCAN: u16 = 10;
 /// 关掉 MCP 服务器的环境变量（`ITOOLS_MCP=off`）。默认开启。
 const ENABLE_ENV: &str = "ITOOLS_MCP";
 
@@ -93,6 +115,90 @@ fn set_start_error(msg: Option<String>) {
     }
 }
 
+/// 端口从哪来——决定「绑不上时能不能换一个」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PortChoice {
+    /// 用户用 `ITOOLS_MCP_PORT` **显式指定**。他指定了就按他说的来：绑不上如实报错，
+    /// **绝不擅自换一个**——他多半是照着这个端口配好了防火墙/客户端，
+    /// 悄悄换到别处比起不来更难查。
+    Fixed(u16),
+    /// 没指定，用默认端口；被占用时按 [`PORT_SCAN`] 顺序往上找一个空的。
+    Default,
+}
+
+/// 解析 `ITOOLS_MCP_PORT` 的**原始值**（提成参数是为了能单测，不必去动进程环境变量）。
+///
+/// 没设、空串、解析不出端口 → [`PortChoice::Default`]。注意 `Fixed(0)` 是有意义的：
+/// 用户显式要求「由系统分配」，此时同样不做回退（本来也不会失败）。
+fn parse_port_env(raw: Option<&str>) -> PortChoice {
+    match raw.map(str::trim) {
+        Some(s) if !s.is_empty() => match s.parse::<u16>() {
+            Ok(p) => PortChoice::Fixed(p),
+            Err(e) => {
+                // 不静默吞掉：用户以为自己指定了端口，实际用的是默认端口，得让他在日志里看得见
+                ilog!("[iTools] {PORT_ENV}=「{s}」不是合法端口（{e}），按默认端口处理");
+                PortChoice::Default
+            }
+        },
+        _ => PortChoice::Default,
+    }
+}
+
+/// 按 [`PortChoice`] 绑定监听端口，失败时返回**给用户看的**原因文案。
+///
+/// 只绑 `127.0.0.1`：MCP 客户端与 iTools 在同一台机器上，没有任何理由对外监听。
+fn bind(choice: PortChoice) -> Result<TcpListener, String> {
+    let candidates: Vec<u16> = match choice {
+        PortChoice::Fixed(p) => vec![p],
+        // checked_add 只是防呆：DEFAULT_PORT 若被改到接近 65535，溢出会在 debug 下直接 panic
+        PortChoice::Default => (0..PORT_SCAN)
+            .filter_map(|i| DEFAULT_PORT.checked_add(i))
+            .collect(),
+    };
+
+    let mut first_err: Option<std::io::Error> = None;
+    for &p in &candidates {
+        match TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, p)) {
+            Ok(l) => {
+                if p != candidates[0] {
+                    // 换了端口必须留痕：面板上显示的是真实地址（见 status()），
+                    // 但已经写进 AI 客户端配置里的旧地址会失效，
+                    // `ai_clients.rs` 会把它标成 mcpStale 并提示「重新安装」。
+                    ilog!(
+                        "[iTools] MCP 默认端口 {DEFAULT_PORT} 被占用（多半是另一个构建的 iTools 在跑），\
+                         已改用 {p}；AI 客户端里配的旧地址需要在「AI 助手接入」里重新安装一次"
+                    );
+                }
+                return Ok(l);
+            }
+            // 只留第一个错误：后面那些「7346 也被占了」对定位问题没有价值
+            Err(e) => {
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+            }
+        }
+    }
+
+    // 到这儿说明全试完了。错误文案里给的是**第一个候选**（用户最关心的那个）的真实原因。
+    let e = first_err
+        .map(|e| e.to_string())
+        .unwrap_or_else(|| "没有可用的候选端口".to_string());
+    Err(match choice {
+        PortChoice::Fixed(p) => format!(
+            "MCP 服务器启动失败（127.0.0.1:{p}）：{e}。\
+             该端口是你用环境变量 {PORT_ENV} 指定的，故不会自动改用别的端口——\
+             请腾出这个端口，或把 {PORT_ENV} 改成别的（设 0 由系统分配）。"
+        ),
+        PortChoice::Default => format!(
+            "MCP 服务器启动失败：127.0.0.1 上 {DEFAULT_PORT}~{} 这 {PORT_SCAN} 个端口都绑不上\
+             （{DEFAULT_PORT} 的原因是：{e}）。可用环境变量 {PORT_ENV} 指定一个空闲端口\
+             （设 0 由系统分配）。",
+            DEFAULT_PORT.saturating_add(PORT_SCAN - 1)
+        ),
+    })
+}
+
 /// 在后台线程启动 MCP 服务器。**默认开启**，`ITOOLS_MCP=off` 可关掉。
 ///
 /// 端口被占用等启动失败**不影响 iTools 本身**：如实记录原因、面板上照实显示，
@@ -106,27 +212,28 @@ pub fn start(app: AppHandle) {
         set_start_error(Some(format!("已被环境变量 {ENABLE_ENV} 关闭")));
         return;
     }
-    let port: u16 = std::env::var(PORT_ENV)
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(DEFAULT_PORT);
 
-    // 只绑回环：MCP 客户端与 iTools 在同一台机器上，没有任何理由对外监听。
-    let addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, port);
-    let listener = match TcpListener::bind(addr) {
+    let choice = parse_port_env(std::env::var(PORT_ENV).ok().as_deref());
+    let listener = match bind(choice) {
         Ok(l) => l,
-        Err(e) => {
-            let msg = format!(
-                "MCP 服务器启动失败（{addr}）：{e}。\
-                 端口被占用时可用环境变量 {PORT_ENV} 换一个（设 0 由系统分配）。"
-            );
+        Err(msg) => {
             ilog!("[iTools] {msg}");
             set_start_error(Some(msg));
             return;
         }
     };
-    // 端口设 0 时系统会分配一个，必须回读真实端口，否则面板上显示的地址是假的
-    let real_port = listener.local_addr().map(|a| a.port()).unwrap_or(port);
+    // 端口设 0 时系统会分配一个，且回退路径下绑到的也未必是默认端口：
+    // **必须回读**真实端口，否则面板上显示的地址是假的（诚信红线）。
+    let real_port = match listener.local_addr() {
+        Ok(a) => a.port(),
+        Err(e) => {
+            // 连自己监听在哪都问不出来，就不能对外宣称一个端口——宁可如实说没起来
+            let msg = format!("MCP 服务器已监听但读不到实际端口：{e}，无法给出连接地址");
+            ilog!("[iTools] {msg}");
+            set_start_error(Some(msg));
+            return;
+        }
+    };
     let server = match tiny_http::Server::from_listener(listener, None) {
         Ok(s) => s,
         Err(e) => {
@@ -292,6 +399,55 @@ mod tests {
         assert!(s.running);
         assert_eq!(s.url, "http://127.0.0.1:7345/mcp");
         ACTIVE_PORT.store(0, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn port_env_decides_whether_fallback_is_allowed() {
+        // 没设 / 空串 / 垃圾值 → 走默认端口（可回退）
+        assert_eq!(parse_port_env(None), PortChoice::Default);
+        assert_eq!(parse_port_env(Some("   ")), PortChoice::Default);
+        assert_eq!(parse_port_env(Some("abc")), PortChoice::Default);
+        assert_eq!(parse_port_env(Some("70000")), PortChoice::Default, "越界值不是端口");
+        // 显式指定 → 固定，绑不上也不换（含 0 = 用户要求由系统分配）
+        assert_eq!(parse_port_env(Some(" 8080 ")), PortChoice::Fixed(8080));
+        assert_eq!(parse_port_env(Some("0")), PortChoice::Fixed(0));
+    }
+
+    /// 默认端口被占用时必须**自动换一个**，而不是让 MCP 整条链路废掉。
+    /// 这正是 debug 版与 release 版并存时后起的那个所处的处境。
+    #[test]
+    fn default_port_falls_back_when_occupied() {
+        // 自己占住默认端口，模拟「另一个构建已经在跑」。
+        // 若本机真有 iTools 在跑，这一步会失败——不影响结论，下面按实际情况断言。
+        let occupied = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, DEFAULT_PORT));
+        let l = bind(PortChoice::Default).expect("默认端口被占用时必须回退到别的端口");
+        let port = l.local_addr().expect("回读实际端口").port();
+        println!("默认端口被占用后落到 {port}（自占默认端口成功={}）", occupied.is_ok());
+        if occupied.is_ok() {
+            assert_ne!(port, DEFAULT_PORT, "默认端口已被占住，不可能又绑到它");
+        }
+        assert!(
+            (DEFAULT_PORT..DEFAULT_PORT + PORT_SCAN).contains(&port),
+            "回退端口应落在 {DEFAULT_PORT}~{} 内，实得 {port}",
+            DEFAULT_PORT + PORT_SCAN - 1
+        );
+        // occupied / l 在此之前不能被回收，否则上面的「被占用」前提就不成立
+        drop(occupied);
+        drop(l);
+    }
+
+    /// 用户显式指定的端口**不许**擅自换：绑不上就如实失败，并说清是他指定的。
+    #[test]
+    fn explicit_port_never_falls_back() {
+        // 借一个系统分配的空闲端口再占住它，避免写死端口号与别的测试/软件撞车
+        let occupied =
+            TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).expect("借一个空闲端口");
+        let p = occupied.local_addr().expect("回读实际端口").port();
+        let err = bind(PortChoice::Fixed(p)).expect_err("显式指定的端口被占用时必须失败");
+        println!("显式端口失败文案：{err}");
+        assert!(err.contains(&p.to_string()), "错误里要有真实端口号，实得 {err}");
+        assert!(err.contains(PORT_ENV), "要点明是 {PORT_ENV} 指定的，实得 {err}");
+        drop(occupied);
     }
 
     #[test]

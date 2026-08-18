@@ -87,11 +87,42 @@ pub enum Response {
     Error(String),
 }
 
-/// 管道名按**用户 SID** 区分：同机多个账号各自一份索引，互不可见也互不冲突。
+/// 构建类型标记（`dev` / `release`），用来把 debug 版与 release 版的守护彻底隔开。
+///
+/// 守护进程是 `itools.exe --mft-daemon`，由主进程用 `current_exe()` 拉起
+/// （见 `mft/mod.rs` 的 `spawn_elevated_daemon`）——debug 主进程拉起的一定是 debug 守护，
+/// 两侧 `cfg!(debug_assertions)` 必然一致，名字不会对不上。
+const fn build_tag() -> &'static str {
+    if cfg!(debug_assertions) { "dev" } else { "release" }
+}
+
+/// 管道名按**用户 SID + 构建类型**两维区分。
+///
+/// - **用户 SID**：同机多个账号各自一份索引，互不可见也互不冲突
+///   （管道的 DACL 本来也只授给这个 SID，见 [`accept_one`]）；
+/// - **构建类型**（`dev` / `release`）：开发时 debug 版与已装的 release 版是**同时开着**的，
+///   两边各自会拉起一个提权守护。名字若不分构建类型，这两个守护就抢同一个管道名：
+///   先起的占住、后起的创建实例失败，而客户端连上的到底是哪一个**不确定**——
+///   于是「debug 里看到的索引状态、搜索结果」可能来自 release 那份守护，反之亦然。
+///   这种串扰没有任何报错，只表现为数字对不上，极难定位。分开命名后各连各的。
+///
+/// # 换名的代价：升级前拉起的旧守护会变成孤儿（已知，且刻意不自动处理）
+///
+/// 守护是**常驻**进程（主程序退出后它继续活着，好让下次开机即搜）。本版本之前的守护
+/// 监听的是不带构建类型段的旧名字 `\\.\pipe\itools-mft-{SID}`，升级后：
+///
+/// - 新版客户端只找新名字，连不上旧守护 → 首次用全盘搜索时会**重新拉起一个新守护**
+///   （要过一次 UAC），功能本身不受影响；
+/// - 旧守护没人再连，会一直白占几百 MB 内存，直到用户在任务管理器结束它或重启机器。
+///
+/// 这里刻意**不做**自动清理：杀一个提权进程本身就需要提权，而「按进程名找 itools.exe 杀掉」
+/// 极易误伤（主程序、另一个构建的守护都叫这个名字）。真要做，得先按旧名字连上去发
+/// [`Request::Shutdown`]（旧守护认这条），但那又要求新版本长期保留旧名字的知识——
+/// 收益（一次性回收内存）不值这份复杂度。
 pub fn pipe_name() -> String {
     let sid = current_user_sid().unwrap_or_else(|| "unknown".to_string());
-    // SID 字符串形如 S-1-5-21-...，字符集只有字母数字和连字符，可直接用作管道名
-    format!(r"\\.\pipe\itools-mft-{sid}")
+    // SID 字符串形如 S-1-5-21-...，字符集只有字母数字和连字符，与 tag 一样可直接用作管道名
+    format!(r"\\.\pipe\itools-mft-{}-{sid}", build_tag())
 }
 
 /// 从当前进程令牌取用户 SID 的字符串形式。
@@ -397,15 +428,39 @@ fn accept_one(name: &str) -> std::io::Result<std::fs::File> {
 mod tests {
     use super::*;
 
-    /// 管道名必须带上真实 SID——否则同机多账号会抢同一个管道
+    /// 管道名必须同时钉住两件事（少一件就会有一类串扰）：
+    /// 1. 带真实用户 SID——否则同机多账号抢同一个管道；
+    /// 2. 带构建类型段——否则 debug 版与 release 版的守护抢同一个管道，
+    ///    客户端连到哪一个不确定，索引状态与搜索结果会互相串（见 [`pipe_name`]）。
     #[test]
-    fn pipe_name_is_per_user() {
+    fn pipe_name_is_per_user_and_per_build() {
         let name = pipe_name();
         println!("管道名：{name}");
         assert!(name.starts_with(r"\\.\pipe\itools-mft-"));
         assert!(
             name.contains("S-1-"),
             "应含真实用户 SID，实得 {name}（取 SID 失败会退化成 unknown）"
+        );
+
+        // 两个 tag 必须真的不一样，否则「按构建类型区分」是句空话
+        let (mine, other) = if cfg!(debug_assertions) {
+            ("dev", "release")
+        } else {
+            ("release", "dev")
+        };
+        assert_eq!(build_tag(), mine, "构建标记与 cfg!(debug_assertions) 对不上");
+        assert!(
+            name.contains(&format!("-{mine}-")),
+            "应含构建类型段 -{mine}-，实得 {name}"
+        );
+        assert!(
+            !name.contains(&format!("-{other}-")),
+            "不该同时含另一种构建类型段 -{other}-，实得 {name}"
+        );
+        // 钉死完整格式：itools-mft-{tag}-{SID}，顺序反了或少一段都要红
+        assert!(
+            name.starts_with(&format!(r"\\.\pipe\itools-mft-{mine}-S-1-")),
+            "管道名格式应为 \\\\.\\pipe\\itools-mft-{{构建类型}}-{{SID}}，实得 {name}"
         );
     }
 
