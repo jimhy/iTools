@@ -390,13 +390,25 @@ fn cloud_delete(endpoint: &str, username: &str, password: &str) -> Result<(), St
     Ok(())
 }
 
-/// 把 ureq 错误翻译成用户可读信息；4xx 鉴权失败给出明确提示。
+/// 把 ureq 错误翻译成用户可读信息。
+///
+/// **优先原样透传服务端给的那句话**。服务端对 4xx 会说清具体原因，
+/// 例如账号被停用时是「该账号已被停用：<运营填的原因>」——把它折叠成本地写死的
+/// 「用户名或密码错误」，被停用的用户就会以为自己记错了密码，反复重试还不知道
+/// 为什么进不去。那是 `doc/开发准则.md` 点名的「二次误导」。
+///
+/// 只有在服务端没给（非 JSON / 无 `error` 字段 / 超长）时，才回落到按状态码的固定文案。
 fn map_auth_err(e: ureq::Error) -> String {
-    match e {
-        ureq::Error::Status(401, _) | ureq::Error::Status(403, _) => "用户名或密码错误".to_string(),
-        ureq::Error::Status(404, _) => "账号不存在".to_string(),
-        ureq::Error::Status(code, _) => format!("云端返回错误（HTTP {code}）"),
-        ureq::Error::Transport(t) => format!("无法连接云端服务: {t}"),
+    match crate::http::split_status_error(e) {
+        Ok((_, Some(msg))) => msg,
+        Ok((code, None)) => match code {
+            // 服务端没给具体原因时的兜底。401 与 403 在这里合并是可以的：
+            // 走到这一步说明服务端连一句话都没给，我们本来就无从区分。
+            401 | 403 => "用户名或密码错误".to_string(),
+            404 => "账号不存在".to_string(),
+            other => format!("云端返回错误（HTTP {other}）"),
+        },
+        Err(t) => format!("无法连接云端服务: {t}"),
     }
 }
 
@@ -494,5 +506,145 @@ mod tests {
             assert_eq!(info.effective, cloud_endpoint());
         }
         assert_eq!(info.user_value, "");
+    }
+
+    /// 服务端说了具体原因，就必须原样显示。
+    ///
+    /// 这是整条链路上最关键的一个断言：历史实现把 401 和 403 一起映射成
+    /// 「用户名或密码错误」，被停用的用户会以为自己记错了密码，反复重试还不知道
+    /// 为什么进不去——那是 `doc/开发准则.md` 点名的「二次误导」。
+    #[test]
+    fn auth_error_passes_server_reason_through() {
+        let resp = ureq::Response::new(403, "Forbidden", r#"{"error":"该账号已被停用：违反使用条款"}"#)
+            .expect("构造测试响应");
+        let msg = map_auth_err(ureq::Error::Status(403, resp));
+        assert_eq!(msg, "该账号已被停用：违反使用条款");
+        assert!(
+            !msg.contains("密码"),
+            "被停用时绝不能说成密码错误，那会让用户一直重试：{msg}"
+        );
+    }
+
+    /// 401 的口令错误同样来自服务端文案（服务端就是这么说的）。
+    #[test]
+    fn auth_error_uses_server_wording_for_bad_password() {
+        let resp = ureq::Response::new(401, "Unauthorized", r#"{"error":"用户名或密码错误"}"#)
+            .expect("构造测试响应");
+        assert_eq!(map_auth_err(ureq::Error::Status(401, resp)), "用户名或密码错误");
+    }
+
+    /// 服务端没给文案（非 JSON / 空体）时回落到按状态码的固定说法。
+    #[test]
+    fn auth_error_falls_back_when_server_says_nothing() {
+        let empty = ureq::Response::new(401, "Unauthorized", "").expect("构造测试响应");
+        assert_eq!(map_auth_err(ureq::Error::Status(401, empty)), "用户名或密码错误");
+
+        let html = ureq::Response::new(404, "Not Found", "<html>404</html>").expect("构造测试响应");
+        assert_eq!(map_auth_err(ureq::Error::Status(404, html)), "账号不存在");
+
+        let boom = ureq::Response::new(502, "Bad Gateway", "").expect("构造测试响应");
+        assert_eq!(
+            map_auth_err(ureq::Error::Status(502, boom)),
+            "云端返回错误（HTTP 502）"
+        );
+    }
+
+
+    /// 找到 HTTP 头部结束的位置（空行之后）。
+    ///
+    /// 用字节常量而不是转义字符串：分隔符就是 CR LF CR LF，
+    /// 写成数字一目了然，也不会在多层引号里被吃掉。
+    fn find_headers_end(buf: &[u8]) -> Option<usize> {
+        const SEP: [u8; 4] = [13, 10, 13, 10];
+        buf.windows(4).position(|w| w == SEP).map(|i| i + 4)
+    }
+
+    /// 从头部里取 `Content-Length`。
+    fn content_length(head: &[u8]) -> Option<usize> {
+        let text = String::from_utf8_lossy(head).to_ascii_lowercase();
+        let line = text.lines().find(|l| l.starts_with("content-length:"))?;
+        line.split(':').nth(1)?.trim().parse().ok()
+    }
+
+    /// 起一个只回一次固定响应的极小 HTTP 服务，返回它的 base URL。
+    ///
+    /// 不引 mock 框架：这里要验的就是「真发一次 HTTP、真读一次 body」，
+    /// 用假的 Response 构造反而绕开了 `into_string` 这一段。
+    fn one_shot_server(status: u16, reason: &str, body: &'static str) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("绑定测试端口");
+        let addr = listener.local_addr().expect("取测试端口");
+        let head = format!(
+            "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                // 必须**把请求收干净**再回。否则接收缓冲区里还剩着数据时关闭连接，
+                // Windows 会发 RST，客户端读响应体时拿到 ConnectionReset ——
+                // 表现就是「状态码收到了、body 读不到」，白白走进兜底文案。
+                let mut req = Vec::new();
+                let mut buf = [0u8; 512];
+                loop {
+                    match stream.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            req.extend_from_slice(&buf[..n]);
+                            // 读到头部结束后，按 Content-Length 判断 body 是否收全
+                            if let Some(pos) = find_headers_end(&req) {
+                                let need = content_length(&req[..pos]).unwrap_or(0);
+                                if req.len() >= pos + need {
+                                    break;
+                                }
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(body.as_bytes());
+                let _ = stream.flush();
+                // 只关写端：客户端读完响应后自己收尾，不会读到一半被 RST 打断
+                let _ = stream.shutdown(std::net::Shutdown::Write);
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// 端到端：服务端对停用账号回 403 + 原因 → 用户看到的就是那句原因。
+    ///
+    /// 这条链路上任何一环退化（不读 body / 按状态码硬编码文案 / 把 403 当密码错误），
+    /// 这个断言都会炸。它比单独测 `map_auth_err` 更强：真发了一次 HTTP，
+    /// 走的是 `crate::http` 的出站通道与 `into_string` 的解析路径。
+    #[test]
+    fn disabled_account_login_shows_the_real_reason() {
+        let base = one_shot_server(
+            403,
+            "Forbidden",
+            r#"{"error":"该账号已被停用：违反使用条款"}"#,
+        );
+        let err = cloud_login(&base, "someone", "pw").expect_err("停用账号登录必须失败");
+        assert_eq!(err, "该账号已被停用：违反使用条款");
+        assert!(
+            !err.contains("密码"),
+            "被停用说成密码错误的话，用户会一直重试还不知道原因：{err}"
+        );
+    }
+
+    /// 对照组：401 仍然是口令错误那句话。
+    #[test]
+    fn wrong_password_login_still_says_password() {
+        let base = one_shot_server(401, "Unauthorized", r#"{"error":"用户名或密码错误"}"#);
+        let err = cloud_login(&base, "someone", "bad").expect_err("错口令必须失败");
+        assert_eq!(err, "用户名或密码错误");
+    }
+
+    /// 服务端被中间网关截胡（返回 HTML）时回落到状态码文案，而不是把 HTML 甩给用户。
+    #[test]
+    fn gateway_html_falls_back_to_status_wording() {
+        let base = one_shot_server(502, "Bad Gateway", "<html>502 Bad Gateway</html>");
+        let err = cloud_login(&base, "someone", "pw").expect_err("502 必须失败");
+        assert_eq!(err, "云端返回错误（HTTP 502）");
+        assert!(!err.contains("<html>"), "不能把网关的 HTML 原样甩给用户：{err}");
     }
 }

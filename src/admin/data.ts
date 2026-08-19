@@ -33,10 +33,35 @@ function cloudReasonText(reason: string | undefined): string {
       return "无法连接云端";
     case "session_expired":
       return "会话已失效，请重新登录";
+    // 与 session_expired 分开：重新登录**也进不去**，说成「请重新登录」是把人往错路上引
+    case "account_disabled":
+      return "账号已被停用，请联系管理员";
     case "pending":
       return "查询中…";
     default:
       return "云端读取失败";
+  }
+}
+
+/**
+ * 云端不可用时那条提示的正文：**每种原因给出的下一步动作必须真的有用**。
+ *
+ * 原先除了「未登录」「未接入」之外一律说「可点右上角刷新重试」——
+ * 但会话失效要重新登录、账号被停用要联系管理员，刷新一万次都没用。
+ * 让人反复做一件注定无效的事，和「点了不生效的按钮」是同一类问题。
+ */
+function cloudNoticeText(reason: string | undefined): string {
+  switch (reason) {
+    case "not_logged_in":
+      return "登录云账号后可查看并同步云端数据；当前仅显示本地记录。";
+    case "cloud_not_configured":
+      return "尚未接入云端服务，数据仅保存在本地（可在「我的账号 → 数据同步」填写服务器地址接入）。";
+    case "session_expired":
+      return "云端会话已失效，下面仅为本地记录。请到「我的账号」重新登录后再试——刷新解决不了这个问题。";
+    case "account_disabled":
+      return "该账号已被停用，云端数据暂不可用，下面仅为本地记录。请联系管理员了解原因——重新登录同样会被拒绝。";
+    default:
+      return "暂时无法读取云端数据，下面仅为本地记录，可点右上角刷新重试。";
   }
 }
 
@@ -277,15 +302,7 @@ export async function renderData(root: HTMLElement, ctx: AdminCtx): Promise<void
 
     const notice =
       usage.cloud == null
-        ? h("div", {
-            class: "data-note",
-            text:
-              usage.cloudReason === "not_logged_in"
-                ? "登录云账号后可查看并同步云端数据；当前仅显示本地记录。"
-                : usage.cloudReason === "cloud_not_configured"
-                  ? "尚未接入云端服务，数据仅保存在本地（可在「我的账号 → 数据同步」填写服务器地址接入）。"
-                  : "暂时无法读取云端数据，下面仅为本地记录，可点右上角刷新重试。",
-          })
+        ? h("div", { class: "data-note", text: cloudNoticeText(usage.cloudReason) })
         : null;
 
     const intro = h("div", {

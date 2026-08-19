@@ -63,8 +63,12 @@ struct PullBody {
 pub struct SyncResult {
     /// 是否真正与云端完成了一次同步。
     pub synced: bool,
-    /// 未同步原因：`cloud_not_configured` / `not_logged_in` / `offline` / `session_expired` / `error`。
-    /// （`session_expired`：服务端判定会话无效 401/403，已自愈清本地登录态，需重新登录。）
+    /// 未同步原因：`cloud_not_configured` / `not_logged_in` / `offline` /
+    /// `session_expired` / `account_disabled` / `error`。
+    ///
+    /// - `session_expired`：服务端判定会话无效（401），已自愈清本地登录态，**重新登录即可**。
+    /// - `account_disabled`：账号已被停用（403），已自愈清本地登录态，**重新登录也没用**；
+    ///   `message` 里是服务端给的具体原因。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     /// 本次上行（推送到云端）的记录数。
@@ -74,6 +78,30 @@ pub struct SyncResult {
     /// 人类可读的补充信息（成功或失败）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+}
+
+/// 401 与 403 对应两种**完全不同**的处境，绝不能折叠成一个 reason：
+///
+/// - **401**：这个令牌不认了（过期 / 被踢下线）。重新登录就能解决。
+/// - **403**：这个账号被停用了。重新登录**也没用**，服务端连登录都会拒。
+///
+/// 都报成「会话已失效，请重新登录」的话，被停用的用户会一遍遍重登，
+/// 每次都被拒，而界面从头到尾没说过真正的原因。
+fn session_failure_reason(code: u16) -> &'static str {
+    if code == 403 {
+        "account_disabled"
+    } else {
+        "session_expired"
+    }
+}
+
+/// 服务端没给具体原因时的兜底文案。
+fn default_session_failure_message(code: u16) -> &'static str {
+    if code == 403 {
+        "该账号已被停用，请联系管理员"
+    } else {
+        "云端会话已失效，请重新登录"
+    }
 }
 
 impl SyncResult {
@@ -184,7 +212,8 @@ pub struct DataUsage {
     pub local_only_total: u64,
     /// 云端用量（不可用时为 None）。
     pub cloud: Option<CloudUsage>,
-    /// 云端不可用原因：`cloud_not_configured` / `not_logged_in` / `offline` / `session_expired` / `error`。
+    /// 云端不可用原因：`cloud_not_configured` / `not_logged_in` / `offline` /
+    /// `session_expired` / `account_disabled` / `error`。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cloud_reason: Option<String>,
 }
@@ -293,8 +322,11 @@ impl DataStore {
                 ok += 1;
                 pushed += r.pushed;
                 pulled += r.pulled;
-            } else if r.reason.as_deref() == Some("session_expired") {
-                return r; // 会话失效已自愈清登录态，硬停（后续 ns 也会失败）
+            } else if matches!(r.reason.as_deref(), Some("session_expired") | Some("account_disabled")) {
+                // 登录态已被自愈清掉，后续 ns 必然一样失败，硬停。
+                // 账号被停用与会话失效在这里的处置相同，但 reason 保持区分——
+                // 用户看到的那句话完全不同（一个重登能解决，另一个重登也没用）。
+                return r;
             } else {
                 fail += 1;
                 last_fail = Some(r);
@@ -327,9 +359,10 @@ impl DataStore {
 
     /// 「我的数据」用量汇总：本地条数**始终真实统计**；云端仅在已配置 + 已登录且请求成功时给出，
     /// 否则 `cloud=None` + `cloud_reason` 如实说明（`cloud_not_configured` / `not_logged_in` /
-    /// `offline` / `session_expired` / `error`）——绝不用本地数字冒充云端（诚信红线）。
+    /// `offline` / `session_expired` / `account_disabled` / `error`）——绝不用本地数字冒充云端（诚信红线）。
     ///
-    /// `account` 用于取 token；服务端判定会话无效（401/403）时**自愈清本地登录态**。
+    /// `account` 用于取 token；服务端判定令牌无效（401）或账号被停用（403）时
+    /// **自愈清本地登录态**，两者的 reason 不同（见 `SyncResult::reason`）。
     /// 用量统计。
     ///
     /// `include_cloud=false` 时**完全不碰网络**，只返回本地统计（毫秒级）。
@@ -446,14 +479,15 @@ impl DataStore {
             .call();
         let parsed: UsageResp = match resp {
             Ok(r) => r.into_json().map_err(|_| "error".to_string())?,
-            Err(ureq::Error::Status(code, _)) => {
-                if code == 401 || code == 403 {
+            Err(e) => match crate::http::split_status_error(e) {
+                Ok((code, _)) if code == 401 || code == 403 => {
+                    // 服务端判定这个账号现在用不了：自愈清本地登录态，避免停留在「僵尸已登录」。
                     account.invalidate_session();
-                    return Err("session_expired".to_string());
+                    return Err(session_failure_reason(code).to_string());
                 }
-                return Err("error".to_string());
-            }
-            Err(ureq::Error::Transport(_)) => return Err("offline".to_string()),
+                Ok(_) => return Err("error".to_string()),
+                Err(_) => return Err("offline".to_string()),
+            },
         };
         // 云端只回「每个命名空间有多少个键」，值不回传，因此这里给不出业务条目明细
         // （items 留空）——要按业务口径数就得把云端数据全拉回来，代价与收益不成比例。
@@ -479,7 +513,7 @@ impl DataStore {
     /// **HTTP 不持有存储锁**：先短锁读出 dirty 记录，网络请求在锁外进行，回来再短锁清 dirty +
     /// 合并远端。避免一次 30s 网络往返把整库读写全部阻塞（共享单连接下尤其要紧）。
     ///
-    /// `account` 仅用于在服务端判定会话无效（401/403）时**自愈清本地登录态**。
+    /// `account` 仅用于在服务端判定令牌无效（401）或账号被停用（403）时**自愈清本地登录态**。
     fn sync(&self, ns: &str, endpoint: &str, token: &str, account: &AccountStore) -> SyncResult {
         // 1) 收集待上行（dirty）记录（短锁）
         let dirty = self.db.pd_dirty(ns);
@@ -508,17 +542,21 @@ impl DataStore {
                 Ok(p) => p,
                 Err(e) => return SyncResult::not_synced("error", &format!("同步响应解析失败: {e}")),
             },
-            Err(ureq::Error::Status(code, _)) => {
-                if code == 401 || code == 403 {
-                    // 服务端判定会话无效：自愈清本地登录态，避免停留在「僵尸已登录」，让用户重新登录。
+            Err(e) => match crate::http::split_status_error(e) {
+                Ok((code, detail)) if code == 401 || code == 403 => {
+                    // 服务端判定这个账号现在用不了：自愈清本地登录态，避免停留在「僵尸已登录」。
                     account.invalidate_session();
-                    return SyncResult::not_synced("session_expired", "云端会话已失效，请重新登录");
+                    // 服务端给了具体原因就原样转达（停用时是运营填的那句话），
+                    // 没给才用兜底文案——自己编一句会把「被停用」说成「会话过期」。
+                    let msg = detail
+                        .unwrap_or_else(|| default_session_failure_message(code).to_string());
+                    return SyncResult::not_synced(session_failure_reason(code), &msg);
                 }
-                return SyncResult::not_synced("error", &format!("云端同步失败（HTTP {code}）"));
-            }
-            Err(ureq::Error::Transport(t)) => {
-                return SyncResult::not_synced("offline", &format!("无法连接云端: {t}"))
-            }
+                Ok((code, _)) => {
+                    return SyncResult::not_synced("error", &format!("云端同步失败（HTTP {code}）"))
+                }
+                Err(t) => return SyncResult::not_synced("offline", &format!("无法连接云端: {t}")),
+            },
         };
 
         // 3) 上行成功：只清「本次推送且此后未被覆盖」的 dirty（防在途写入被误清）
@@ -643,5 +681,29 @@ mod tests {
         assert_eq!(store.get("plugin:deskbox", "k"), Some(serde_json::json!(2)));
         assert_eq!(store.keys("app", ""), vec!["k".to_string()]);
         assert_eq!(store.keys("plugin:deskbox", ""), vec!["k".to_string()]);
+    }
+
+    // ---------- 401 与 403 必须分开 ----------
+
+    #[test]
+    fn session_failure_distinguishes_expired_from_disabled() {
+        assert_eq!(session_failure_reason(401), "session_expired");
+        assert_eq!(session_failure_reason(403), "account_disabled");
+        assert_ne!(
+            session_failure_reason(401),
+            session_failure_reason(403),
+            "两者折叠成一个 reason 的话，被停用的用户会一遍遍重登还进不去"
+        );
+    }
+
+    #[test]
+    fn fallback_messages_point_to_the_right_next_step() {
+        // 401 的下一步是重新登录；403 的下一步是找管理员——说反了就是把人往错路上引
+        assert!(default_session_failure_message(401).contains("重新登录"));
+        assert!(default_session_failure_message(403).contains("停用"));
+        assert!(
+            !default_session_failure_message(403).contains("重新登录"),
+            "账号被停用时不能叫人去重新登录，那是注定失败的动作"
+        );
     }
 }

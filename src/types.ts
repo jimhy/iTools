@@ -445,8 +445,11 @@ export interface AccountState {
 }
 
 /** 数据同步结果，与 Rust 侧 `SyncResult`（camelCase）一致。
- *  `synced=false` 时 `reason` ∈ cloud_not_configured | not_logged_in | offline | session_expired | error。
- *  （session_expired：会话失效，已自愈清本地登录态，需重新登录。） */
+ *  `synced=false` 时 `reason` ∈ cloud_not_configured | not_logged_in | offline |
+ *  session_expired | account_disabled | error。
+ *  - session_expired：令牌失效（401），已自愈清本地登录态，**重新登录即可**。
+ *  - account_disabled：账号被停用（403），已自愈清本地登录态，**重新登录也没用**；
+ *    `message` 里是服务端给的具体停用原因。 */
 export interface SyncResult {
   synced: boolean;
   reason?: string;
@@ -483,7 +486,8 @@ export interface CloudUsage {
 
 /** 「我的数据」用量汇总，与 Rust 侧 `DataUsage`（camelCase）一致。
  *  本地始终真实；`cloud=null` 表示云端不可用，`cloudReason` 说明原因
- *  ∈ cloud_not_configured | not_logged_in | offline | session_expired | error。 */
+ *  ∈ cloud_not_configured | not_logged_in | offline | session_expired |
+ *  account_disabled | error。 */
 export interface DataUsage {
   /** 可参与云同步的本地数据（`itools.data.*`）。 */
   local: NsCount[];

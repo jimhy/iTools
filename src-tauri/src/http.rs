@@ -640,6 +640,47 @@ fn transport_detail(e: &ureq::Error, t: &ureq::Transport) -> String {
     }
 }
 
+/// 从服务端的错误响应体里取出那句给用户看的话（`{"error": "..."}`）。
+///
+/// # 为什么需要它
+///
+/// 服务端对 4xx 会给一句明确的中文原因，比如账号被停用时是
+/// 「该账号已被停用：<运营填的原因>」。客户端如果按状态码折叠成自己写死的文案
+/// （历史实现把 401 和 403 一起映射成「用户名或密码错误」），被停用的用户就会
+/// 以为是自己记错了密码，反复重试还不知道为什么进不去——这正是
+/// `doc/开发准则.md` 里点名的「二次误导」。
+///
+/// 取不到就返回 `None`，由调用方回落到按状态码的固定文案：服务端可能返回
+/// 非 JSON（被中间网关截胡）或压根没有 `error` 字段，那种情况下猜不如不猜。
+///
+/// 长度上限是防御性的：这段文字会直接进 toast / 输入框下方，
+/// 服务端若返回一大段东西会把界面撑坏。超长即视为不可用。
+pub(crate) fn server_error_message(resp: ureq::Response) -> Option<String> {
+    const MAX_CHARS: usize = 200;
+    let body = resp.into_string().ok()?;
+    let v: serde_json::Value = serde_json::from_str(&body).ok()?;
+    let msg = v.get("error")?.as_str()?.trim();
+    if msg.is_empty() || msg.chars().count() > MAX_CHARS {
+        return None;
+    }
+    Some(msg.to_string())
+}
+
+/// 把 `ureq` 错误拆成「HTTP 状态错误」与「传输错误」两类。
+///
+/// `ureq::Error::Status` 持有 `Response`，而读 body 会消费掉整个错误值。
+/// 调用方通常还要用到状态码，所以这里返回 `(code, 可选的服务端文案)`。
+///
+/// 传输错误直接返回**已格式化且已脱敏**的字符串：它最终会进 toast 与日志，
+/// 而错误文本里可能带代理地址（`http://user:pass@host`）。让每个调用点各自记得
+/// 脱敏是靠不住的——只要有一处忘了，凭据就进日志了。
+pub(crate) fn split_status_error(e: ureq::Error) -> Result<(u16, Option<String>), String> {
+    match e {
+        ureq::Error::Status(code, resp) => Ok((code, server_error_message(resp))),
+        ureq::Error::Transport(t) => Err(redact_proxy_credentials(&t.to_string())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1103,5 +1144,80 @@ mod tests {
         let host = host_of(&t).expect("探测目标必须能解析出主机名");
         assert!(!is_bypass_host(&host), "探测目标不能命中绕过规则，否则测的不是代理: {host}");
         assert_eq!(host, "raw.githubusercontent.com");
+    }
+
+    // ---------- 服务端错误文案 ----------
+
+    /// 造一个带 body 的响应。ureq 2.x 的 `Response::new` 就是为测试准备的。
+    fn resp(status: u16, body: &str) -> ureq::Response {
+        ureq::Response::new(status, "test", body).expect("构造测试响应")
+    }
+
+    #[test]
+    fn server_message_is_passed_through_verbatim() {
+        let r = resp(403, r#"{"error":"该账号已被停用：违反使用条款"}"#);
+        assert_eq!(
+            server_error_message(r).as_deref(),
+            Some("该账号已被停用：违反使用条款"),
+            "服务端给的原因必须原样透传——折叠成自己写死的文案就是误导用户"
+        );
+    }
+
+    #[test]
+    fn non_json_or_missing_field_falls_back_to_none() {
+        // 被中间网关截胡时返回的是 HTML，不是 JSON
+        assert_eq!(server_error_message(resp(502, "<html>bad gateway</html>")), None);
+        // JSON 但没有 error 字段
+        assert_eq!(server_error_message(resp(400, r#"{"ok":false}"#)), None);
+        // error 不是字符串
+        assert_eq!(server_error_message(resp(400, r#"{"error":123}"#)), None);
+        // 空体
+        assert_eq!(server_error_message(resp(401, "")), None);
+        // 空串与纯空白都不算有效文案：显示一个空 toast 比不显示更让人困惑
+        assert_eq!(server_error_message(resp(401, r#"{"error":""}"#)), None);
+        assert_eq!(server_error_message(resp(401, r#"{"error":"   "}"#)), None);
+    }
+
+    #[test]
+    fn overlong_message_is_rejected() {
+        // 这段文字会直接进 toast，服务端返回一大段东西会把界面撑坏
+        let long = "封".repeat(201);
+        let body = format!(r#"{{"error":"{long}"}}"#);
+        assert_eq!(server_error_message(resp(403, &body)), None, "超长文案不采用");
+
+        let ok = "封".repeat(200);
+        let body = format!(r#"{{"error":"{ok}"}}"#);
+        assert!(server_error_message(resp(403, &body)).is_some(), "刚好到上限仍可用");
+    }
+
+    #[test]
+    fn message_is_trimmed() {
+        let r = resp(403, r#"{"error":"  账号已停用  "}"#);
+        assert_eq!(server_error_message(r).as_deref(), Some("账号已停用"));
+    }
+
+    #[test]
+    fn split_status_error_separates_code_and_message() {
+        let e = ureq::Error::Status(403, resp(403, r#"{"error":"停用了"}"#));
+        let (code, msg) = super::split_status_error(e).expect("状态类错误");
+        assert_eq!(code, 403);
+        assert_eq!(msg.as_deref(), Some("停用了"));
+
+        // 没有可用文案时只回状态码，由调用方决定兜底
+        let e = ureq::Error::Status(500, resp(500, "boom"));
+        let (code, msg) = super::split_status_error(e).expect("状态类错误");
+        assert_eq!(code, 500);
+        assert_eq!(msg, None);
+    }
+
+    #[test]
+    fn transport_errors_are_redacted_before_leaving_this_module() {
+        // 传输错误文本会进 toast 与日志；代理地址里的凭据必须先抹掉。
+        // 这里直接验证脱敏这一步本身——构造真实的 ureq::Transport 需要发一次请求，
+        // 而 split_status_error 的传输分支就是把它交给 redact_proxy_credentials。
+        let raw = "连不上代理 socks5://user:secret@127.0.0.1:1080：超时";
+        let out = redact_proxy_credentials(raw);
+        assert!(!out.contains("secret"), "凭据没抹干净：{out}");
+        assert!(out.contains("127.0.0.1:1080"), "地址本身要保留，否则没法排查：{out}");
     }
 }
