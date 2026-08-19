@@ -1,0 +1,61 @@
+[package]
+name = "itools-console"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+description = "iTools 运营控制台：只读直连云同步库的运营后台（Rust 实现，独立进程/独立端口）"
+publish = false
+
+[[bin]]
+name = "itools-console"
+path = "src/main.rs"
+
+[lib]
+name = "itools_console"
+path = "src/lib.rs"
+
+[dependencies]
+# HTTP 服务。与 server/ 同版本线，便于两边代码互相参照。
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "signal", "fs"] }
+tower = { version = "0.5", features = ["util"] }
+# fs：后台前端静态资源用 ServeDir（自带路径穿越防护）
+tower-http = { version = "0.6", features = ["trace", "fs", "set-header"] }
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["server-auto", "tokio"] }
+# TLS 终止：生产走 frps 纯 TCP 透传，证书由本进程终结（与 server/ 同一套做法）
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls-pemfile = "2"
+# 存储：与云同步服务端同一个 MariaDB 库。本服务对主服务的 5 张业务表**只读**，
+# 只写自己的 console_* 表（删号/踢下线除外，那是运营动作，见 store.rs 注释）。
+sqlx = { version = "0.8", default-features = false, features = ["mysql", "runtime-tokio", "tls-none", "macros"] }
+# 探测主服务 /health。webpki 内置根证书 → 容器里不依赖系统 ca-certificates；
+# 生产是自签/正式证书都可能，故额外开 danger 配置项由 CONSOLE_UPSTREAM_INSECURE 控制。
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "charset", "http2"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+# 口令哈希：scrypt，参数与 server/src/auth.rs 逐位一致
+scrypt = { version = "0.11", default-features = false }
+sha2 = "0.10"
+hex = "0.4"
+subtle = "2"
+rand = "0.9"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+hashlink = "0.10"
+
+[dev-dependencies]
+http-body-util = "0.1"
+
+# 与 server/ 同理：scrypt 刻意 CPU/内存密集，未优化编译时极慢且 debug 下会爆栈。
+# 这些包与业务逻辑无关、不需要调试，dev/test 构建里也按 release 级别优化。
+[profile.dev.package.scrypt]
+opt-level = 3
+[profile.dev.package.salsa20]
+opt-level = 3
+[profile.dev.package.pbkdf2]
+opt-level = 3
+[profile.dev.package.sha2]
+opt-level = 3
