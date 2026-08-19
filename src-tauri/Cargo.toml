@@ -1,6 +1,6 @@
 [package]
 name = "itools"
-version = "1.5.4"
+version = "1.5.5"
 description = "iTools — macOS 风格的效率启动器"
 authors = ["haifeng"]
 edition = "2021"
