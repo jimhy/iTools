@@ -23,6 +23,9 @@ tower = { version = "0.5", features = ["util"] }
 # 并支持 Range 请求（安装包几 MB，断点续传是刚需）——比自己拼路径读文件安全得多。
 tower-http = { version = "0.6", features = ["trace", "fs"] }
 hyper = { version = "1", features = ["http1", "server"] }
+# 指标中间件要读响应体的确定长度（size_hint）。它本就在 hyper/axum 的依赖树里，
+# 加成直接依赖只是为了把 trait 引进作用域，不增加构建面。
+http-body = "1"
 hyper-util = { version = "0.1", features = ["server-auto", "tokio"] }
 # TLS 终止（可选：配了证书才启用）。统一走 rustls + ring provider，不引 aws-lc-rs
 # ——后者在 Windows 上要 NASM/CMake，构建面无谓变大。

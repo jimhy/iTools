@@ -17,6 +17,25 @@ pub struct UserRecord {
     pub password_hash: String,
     pub salt: String,
     pub created_at: i64,
+    /// [`user_status::ACTIVE`] | [`user_status::DISABLED`]。
+    pub status: String,
+    /// 被停用的时刻（毫秒）；未停用为 0。
+    pub disabled_at: i64,
+    /// 停用原因。会原样告诉被停用的用户。
+    pub disabled_reason: String,
+}
+
+/// 会话校验的结果。三种情况必须分开，因为对外的响应完全不同：
+/// 无效令牌是 401「重新登录」，账号停用是 403「你被停用了，原因是…」。
+/// 把后者折叠成 401 会让被停用的用户以为是登录过期，反复重登也进不去还不知道为什么。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionCheck {
+    /// 令牌不存在 / 为空。
+    Invalid,
+    /// 令牌有效，但账号已被停用。
+    Disabled { username: String, reason: String },
+    /// 通过。
+    Active(String),
 }
 
 /// 一条同步数据记录（value 为任意 JSON；updated_at 由客户端提供，用于 last-write-wins）。
@@ -39,7 +58,14 @@ const CREATE_USERS: &str = "\
     username VARCHAR(190) PRIMARY KEY,
     password_hash TEXT NOT NULL,
     salt VARCHAR(64) NOT NULL,
-    created_at BIGINT NOT NULL
+    created_at BIGINT NOT NULL,
+    status VARCHAR(16) NOT NULL DEFAULT 'active',
+    disabled_at BIGINT NOT NULL DEFAULT 0,
+    -- 用 VARCHAR 而不是 TEXT：TEXT 在 MySQL 上不允许 DEFAULT，
+    -- 于是 NOT NULL 的 TEXT 列会要求每条 INSERT 都显式给值 ——
+    -- 而 create_user 只列了最初那四列，结果就是登录直接 500。
+    -- 停用原因 500 字够用（与插件下架原因的上限一致）。
+    disabled_reason VARCHAR(500) NOT NULL DEFAULT ''
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
 
 const CREATE_SESSIONS: &str = "\
@@ -101,15 +127,84 @@ const CREATE_MARKET: &str = "\
     updated_at BIGINT NOT NULL
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
 
+/// 按小时聚合的请求指标。一小时每路由每方法每状态类一行。
+///
+/// 主键就是聚合键，落库走 `ON DUPLICATE KEY UPDATE ... + VALUES(...)` 累加——
+/// 这样多次 flush 落到同一个小时桶时是**累加而不是覆盖**，进程重启也不会把
+/// 这一小时前半段的数据抹掉。
+const CREATE_TRAFFIC: &str = "\
+  CREATE TABLE IF NOT EXISTS traffic_hourly (
+    hour_ts BIGINT NOT NULL,
+    route VARCHAR(190) NOT NULL,
+    method VARCHAR(10) NOT NULL,
+    status_class TINYINT NOT NULL,
+    reqs BIGINT NOT NULL,
+    bytes_in BIGINT NOT NULL,
+    bytes_out BIGINT NOT NULL,
+    dur_sum_ms BIGINT NOT NULL,
+    dur_max_ms BIGINT NOT NULL,
+    b_fast BIGINT NOT NULL,
+    b_mid BIGINT NOT NULL,
+    b_slow BIGINT NOT NULL,
+    b_vslow BIGINT NOT NULL,
+    PRIMARY KEY (hour_ts, route, method, status_class),
+    INDEX idx_traffic_hour (hour_ts)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
+
+/// 按小时聚合的插件下载量。
+const CREATE_PLUGIN_DOWNLOADS: &str = "\
+  CREATE TABLE IF NOT EXISTS plugin_downloads_hourly (
+    hour_ts BIGINT NOT NULL,
+    name VARCHAR(190) NOT NULL,
+    downloads BIGINT NOT NULL,
+    PRIMARY KEY (hour_ts, name),
+    INDEX idx_pdl_hour (hour_ts)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
+
 /// 老库补列：`revoked_by` 是后加的（作者自助下架时需要区分「谁下的架」）。
 ///
 /// 用 information_schema 先判存在再 `ALTER`，而不是靠 `ADD COLUMN IF NOT EXISTS`：
 /// 后者是 MariaDB 的扩展语法，MySQL 上直接是语法错误，一条兼容性差异就能让服务启动不了。
-const MIGRATIONS: &[(&str, &str, &str)] = &[(
-    "market_entries",
-    "revoked_by",
-    "ALTER TABLE market_entries ADD COLUMN revoked_by VARCHAR(16) NOT NULL DEFAULT ''",
-)];
+const MIGRATIONS: &[(&str, &str, &str)] = &[
+    (
+        "market_entries",
+        "revoked_by",
+        "ALTER TABLE market_entries ADD COLUMN revoked_by VARCHAR(16) NOT NULL DEFAULT ''",
+    ),
+    // 账号停用位。默认 'active' 保证老库补列后所有存量账号照常可用。
+    (
+        "users",
+        "status",
+        "ALTER TABLE users ADD COLUMN status VARCHAR(16) NOT NULL DEFAULT 'active'",
+    ),
+    (
+        "users",
+        "disabled_at",
+        "ALTER TABLE users ADD COLUMN disabled_at BIGINT NOT NULL DEFAULT 0",
+    ),
+    // 停用原因会原样展示给被停用的用户 —— 他有权知道自己为什么进不去
+    (
+        "users",
+        "disabled_reason",
+        "ALTER TABLE users ADD COLUMN disabled_reason VARCHAR(500) NOT NULL DEFAULT ''",
+    ),
+];
+
+/// `users.status` 的取值。
+pub mod user_status {
+    /// 正常。
+    pub const ACTIVE: &str = "active";
+    /// 已停用：登录被拒，已有会话立即失效。
+    pub const DISABLED: &str = "disabled";
+
+    /// 这个状态是否允许访问。
+    ///
+    /// **未知值一律按停用处理**：库里出现没见过的状态说明数据被外部改过，
+    /// 这时放行比拒绝危险得多。
+    pub fn is_active(s: &str) -> bool {
+        s == ACTIVE
+    }
+}
 
 /// 一条提审单。
 #[derive(Debug, Clone, PartialEq)]
@@ -190,7 +285,15 @@ impl MariaDbStore {
             .connect_with(base_options(cfg).database(&cfg.database))
             .await?;
 
-        for ddl in [CREATE_USERS, CREATE_SESSIONS, CREATE_DATA, CREATE_SUBMISSIONS, CREATE_MARKET] {
+        for ddl in [
+            CREATE_USERS,
+            CREATE_SESSIONS,
+            CREATE_DATA,
+            CREATE_SUBMISSIONS,
+            CREATE_MARKET,
+            CREATE_TRAFFIC,
+            CREATE_PLUGIN_DOWNLOADS,
+        ] {
             pool.execute(ddl).await?;
         }
         for (table, column, ddl) in MIGRATIONS {
@@ -221,6 +324,14 @@ impl MariaDbStore {
         Self { pool }
     }
 
+    /// 底层连接池。
+    ///
+    /// 开放出来是给集成测试做断言用的（例如核对指标是否真的累加进了表），
+    /// 业务代码一律走本类型的方法——直接拿池子写 SQL 会绕开这里的全部不变量。
+    pub fn pool(&self) -> &MySqlPool {
+        &self.pool
+    }
+
     /// 关闭连接池（进程退出 / 测试收尾）。
     pub async fn close(&self) {
         self.pool.close().await;
@@ -230,7 +341,8 @@ impl MariaDbStore {
 
     pub async fn get_user(&self, username: &str) -> Result<Option<UserRecord>, sqlx::Error> {
         let row = sqlx::query(
-            "SELECT username, password_hash, salt, created_at FROM users WHERE username = ?",
+            "SELECT username, password_hash, salt, created_at, status, disabled_at, disabled_reason
+             FROM users WHERE username = ?",
         )
         .bind(username)
         .fetch_optional(&self.pool)
@@ -240,10 +352,16 @@ impl MariaDbStore {
             password_hash: r.get("password_hash"),
             salt: r.get("salt"),
             created_at: r.get("created_at"),
+            status: r.get("status"),
+            disabled_at: r.get("disabled_at"),
+            disabled_reason: r.get("disabled_reason"),
         }))
     }
 
     /// set 语义（与旧实现一致）：同名覆盖，避免并发下的重复键报错。
+    ///
+    /// ⚠ `ON DUPLICATE KEY UPDATE` 里**刻意不含 `status`**：被停用的账号即便触发
+    /// 这条 upsert 也不会被悄悄解禁。停用只能由 [`MariaDbStore::set_user_status`] 撤销。
     pub async fn create_user(&self, user: &UserRecord) -> Result<(), sqlx::Error> {
         sqlx::query(
             "INSERT INTO users (username, password_hash, salt, created_at) VALUES (?, ?, ?, ?)
@@ -296,6 +414,11 @@ impl MariaDbStore {
         Ok(())
     }
 
+    /// 只看会话是否存在，**不检查账号状态**。
+    ///
+    /// 仅供登出使用：被停用的账号也应该能清掉自己的会话——拒绝登出既没有安全收益，
+    /// 又会让客户端卡在一个退不出去的状态里。需要拦截停用账号的地方一律用
+    /// [`MariaDbStore::session_user_active`]。
     pub async fn session_user(&self, token: &str) -> Result<Option<String>, sqlx::Error> {
         if token.is_empty() {
             return Ok(None);
@@ -305,6 +428,183 @@ impl MariaDbStore {
             .fetch_optional(&self.pool)
             .await?;
         Ok(row.map(|r| r.get("username")))
+    }
+
+    /// 校验会话并**同时检查账号是否被停用**。
+    ///
+    /// 一次 JOIN 拿到状态，而不是「先查会话再查用户」两次往返——鉴权在每个受保护
+    /// 请求上都要走一遍，多一次 RTT 就是全站变慢。
+    ///
+    /// 停用为什么必须在这里查、而不能只靠「停用时删会话」：删会话只对**当时已存在**
+    /// 的会话有效，停用后对方仍可以用原口令重新登录拿到新令牌。登录那边也拦了，
+    /// 两处合起来才是完整的封停。
+    pub async fn session_user_active(&self, token: &str) -> Result<SessionCheck, sqlx::Error> {
+        if token.is_empty() {
+            return Ok(SessionCheck::Invalid);
+        }
+        let row = sqlx::query(
+            "SELECT s.username, u.status, u.disabled_reason
+             FROM sessions s JOIN users u ON u.username = s.username
+             WHERE s.token = ?",
+        )
+        .bind(token)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let Some(r) = row else {
+            return Ok(SessionCheck::Invalid);
+        };
+        let username: String = r.get("username");
+        let status: String = r.get("status");
+        if user_status::is_active(&status) {
+            Ok(SessionCheck::Active(username))
+        } else {
+            Ok(SessionCheck::Disabled {
+                username,
+                reason: r.get("disabled_reason"),
+            })
+        }
+    }
+
+    /// 设置账号状态。停用时**同时清掉该用户的全部会话**，单事务。
+    ///
+    /// 两件事必须在一个事务里：先删会话再改状态的话，中间那一瞬间对方还能用旧令牌
+    /// 正常访问；反过来先改状态再删会话，虽然鉴权已经拦得住，但留着一堆无效会话行没意义。
+    ///
+    /// 返回是否真的改到了行（用户不存在时为 `false`）。
+    pub async fn set_user_status(
+        &self,
+        username: &str,
+        status: &str,
+        reason: &str,
+        now_ms: i64,
+    ) -> Result<bool, sqlx::Error> {
+        let disabling = !user_status::is_active(status);
+        let mut tx = self.pool.begin().await?;
+        let affected = sqlx::query(
+            "UPDATE users SET status = ?, disabled_at = ?, disabled_reason = ? WHERE username = ?",
+        )
+        .bind(status)
+        .bind(if disabling { now_ms } else { 0 })
+        .bind(if disabling { reason } else { "" })
+        .bind(username)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+
+        if disabling {
+            sqlx::query("DELETE FROM sessions WHERE username = ?")
+                .bind(username)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        // rows_affected 在「值没变」时也可能是 0（MySQL 的行为），所以再确认一次存在性
+        if affected > 0 {
+            return Ok(true);
+        }
+        let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE username = ?")
+            .bind(username)
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(exists > 0)
+    }
+
+    // ---------- 请求指标 ----------
+
+    /// 把一批聚合好的请求指标累加进 `traffic_hourly`。
+    ///
+    /// 用 `ON DUPLICATE KEY UPDATE col = col + VALUES(col)` **累加**而不是覆盖：
+    /// 一个小时会被 flush 很多次（默认每分钟一次），覆盖的话这一小时只会剩最后一分钟的数。
+    /// `dur_max_ms` 特殊，取 `GREATEST` 而不是相加。
+    ///
+    /// 整批走一个事务：要么全落要么全不落，避免一半数据落库另一半丢在内存里。
+    pub async fn upsert_traffic(
+        &self,
+        rows: &[(crate::metrics::Key, crate::metrics::Agg)],
+    ) -> Result<u64, sqlx::Error> {
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        let mut tx = self.pool.begin().await?;
+        for (k, a) in rows {
+            sqlx::query(
+                "INSERT INTO traffic_hourly
+                 (hour_ts, route, method, status_class, reqs, bytes_in, bytes_out,
+                  dur_sum_ms, dur_max_ms, b_fast, b_mid, b_slow, b_vslow)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 ON DUPLICATE KEY UPDATE
+                   reqs       = reqs       + VALUES(reqs),
+                   bytes_in   = bytes_in   + VALUES(bytes_in),
+                   bytes_out  = bytes_out  + VALUES(bytes_out),
+                   dur_sum_ms = dur_sum_ms + VALUES(dur_sum_ms),
+                   dur_max_ms = GREATEST(dur_max_ms, VALUES(dur_max_ms)),
+                   b_fast     = b_fast     + VALUES(b_fast),
+                   b_mid      = b_mid      + VALUES(b_mid),
+                   b_slow     = b_slow     + VALUES(b_slow),
+                   b_vslow    = b_vslow    + VALUES(b_vslow)",
+            )
+            .bind(k.hour_ts)
+            // 路由模板理论上不会超长，但真超了宁可截断也不要整批落库失败
+            .bind(truncate(&k.route, 190))
+            .bind(truncate(&k.method, 10))
+            .bind(k.status_class as i8)
+            .bind(a.reqs)
+            .bind(a.bytes_in)
+            .bind(a.bytes_out)
+            .bind(a.dur_sum_ms)
+            .bind(a.dur_max_ms)
+            .bind(a.b_fast)
+            .bind(a.b_mid)
+            .bind(a.b_slow)
+            .bind(a.b_vslow)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(rows.len() as u64)
+    }
+
+    /// 把一批插件下载计数累加进 `plugin_downloads_hourly`。
+    pub async fn upsert_plugin_downloads(
+        &self,
+        rows: &[((i64, String), i64)],
+    ) -> Result<u64, sqlx::Error> {
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        let mut tx = self.pool.begin().await?;
+        for ((hour_ts, name), n) in rows {
+            sqlx::query(
+                "INSERT INTO plugin_downloads_hourly (hour_ts, name, downloads) VALUES (?, ?, ?)
+                 ON DUPLICATE KEY UPDATE downloads = downloads + VALUES(downloads)",
+            )
+            .bind(hour_ts)
+            .bind(truncate(name, 190))
+            .bind(n)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(rows.len() as u64)
+    }
+
+    /// 清理保留期之外的指标。返回删掉的行数。
+    ///
+    /// 指标是可再生的运营数据，过期即删没有争议——与审计日志不同，后者是安全资产，
+    /// 什么时候清必须由人显式决定。
+    pub async fn purge_metrics_before(&self, hour_ts: i64) -> Result<u64, sqlx::Error> {
+        let a = sqlx::query("DELETE FROM traffic_hourly WHERE hour_ts < ?")
+            .bind(hour_ts)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+        let b = sqlx::query("DELETE FROM plugin_downloads_hourly WHERE hour_ts < ?")
+            .bind(hour_ts)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+        Ok(a + b)
     }
 
     pub async fn delete_session(&self, token: &str) -> Result<(), sqlx::Error> {
@@ -624,5 +924,29 @@ fn row_to_entry(r: sqlx::mysql::MySqlRow) -> MarketRow {
         revoked_by: r.get("revoked_by"),
         published_at: r.get("published_at"),
         updated_at: r.get("updated_at"),
+    }
+}
+
+/// 按**字符**截断（不是字节），避免把 UTF-8 多字节序列切一半塞进库里。
+///
+/// 只用于指标落库这类「宁可截断也不要整批失败」的字段——业务数据一律不截断。
+fn truncate(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    s.chars().take(max_chars).collect()
+}
+
+#[cfg(test)]
+mod truncate_tests {
+    use super::truncate;
+
+    #[test]
+    fn never_splits_multibyte_chars() {
+        assert_eq!(truncate("/api/health", 190), "/api/health");
+        assert_eq!(truncate("abcdef", 3), "abc");
+        let s = truncate(&"插件名".repeat(100), 4);
+        assert_eq!(s.chars().count(), 4);
+        assert_eq!(s, "插件名插");
     }
 }

@@ -20,6 +20,10 @@ pub mod action {
     pub const ADMIN_RESET_PASSWORD: &str = "admin_reset_password";
     /// 强制某个终端用户下线（删其全部 `sessions`）
     pub const USER_KICK: &str = "user_kick";
+    /// 停用某个终端用户（写 `users.status`，主服务实时读）
+    pub const USER_DISABLE: &str = "user_disable";
+    /// 恢复某个被停用的终端用户
+    pub const USER_ENABLE: &str = "user_enable";
     /// 删除某个终端用户（三张表级联）
     pub const USER_DELETE: &str = "user_delete";
 }

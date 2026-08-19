@@ -173,6 +173,210 @@ export function barList(rows, formatValue) {
   return wrap;
 }
 
+
+/**
+ * 多系列折线图，支持「未采集」断线。
+ *
+ * 与 lineChart 的关键区别：每个点带 `covered`。未采集的点**不画**——
+ * 那一段是断开的，而不是贴着 0 的一条线。一条零线会被读成「这段时间没有流量」，
+ * 而事实是「服务端那时还没开始记录」，两者在图上必须看起来完全不同。
+ * 未采集区间另外铺一层斜纹底，让人一眼看出是数据缺失而非低谷。
+ *
+ * @param {{t:number,covered:boolean}[]} points 每个点还带各系列的键
+ * @param {{key:string,label:string,color:string,fill?:boolean}[]} lines
+ */
+export function seriesChart(points, lines, labelOf, titleOf, { height = 210, formatValue } = {}) {
+  const W = 720;
+  const H = height;
+  const padL = 48;
+  const padR = 12;
+  const padT = 12;
+  const padB = 26;
+  const innerW = W - padL - padR;
+  const innerH = H - padT - padB;
+
+  const fmtV = formatValue || ((v) => String(v));
+  const all = [];
+  for (const p of points) {
+    if (!p.covered) continue;
+    for (const l of lines) {
+      const v = Number(p[l.key]);
+      if (Number.isFinite(v)) all.push(v);
+    }
+  }
+  const { top, ticks } = niceScale(Math.max(...all, 0));
+  const n = points.length;
+  const x = (i) => (n === 1 ? padL + innerW / 2 : padL + (innerW * i) / (n - 1));
+  const y = (v) => padT + innerH - (innerH * v) / top;
+
+  const kids = [];
+
+  // 未采集区间的斜纹底（用 pattern 定义一次，复用）
+  const defs = svgEl('defs', {},
+    svgEl('pattern', {
+      id: 'uncovered-hatch', width: 8, height: 8,
+      patternUnits: 'userSpaceOnUse', patternTransform: 'rotate(45)',
+    },
+      svgEl('rect', { width: 8, height: 8, fill: 'var(--bg-hover)' }),
+      svgEl('line', { x1: 0, y1: 0, x2: 0, y2: 8, stroke: 'var(--border)', 'stroke-width': 3 }),
+    ),
+  );
+  kids.push(defs);
+
+  // 把连续的未采集段合并成矩形，别一个点画一块
+  let runStart = -1;
+  const halfStep = n > 1 ? innerW / (n - 1) / 2 : innerW / 2;
+  for (let i = 0; i <= n; i += 1) {
+    const uncovered = i < n && !points[i].covered;
+    if (uncovered && runStart < 0) runStart = i;
+    if (!uncovered && runStart >= 0) {
+      const x0 = Math.max(padL, x(runStart) - halfStep);
+      const x1 = Math.min(W - padR, x(i - 1) + halfStep);
+      kids.push(svgEl('rect', {
+        x: x0, y: padT, width: Math.max(1, x1 - x0), height: innerH,
+        fill: 'url(#uncovered-hatch)', opacity: 0.7,
+      }, svgEl('title', {}, '未采集：服务端那时还没开始记录（不是没有流量）')));
+      runStart = -1;
+    }
+  }
+
+  // 网格线与纵轴
+  for (const t of ticks) {
+    const yy = y(t);
+    kids.push(svgEl('line', { class: 'grid-line', x1: padL, y1: yy, x2: W - padR, y2: yy }));
+    kids.push(svgEl('text', { class: 'axis-text', x: padL - 6, y: yy + 3, 'text-anchor': 'end' }, formatTick(t)));
+  }
+
+  // 每条系列：把 covered 的连续段各画一条 path
+  for (const l of lines) {
+    let seg = [];
+    const flush = () => {
+      if (seg.length === 0) return;
+      const d = seg.map((s, i) => `${i === 0 ? 'M' : 'L'}${s[0].toFixed(1)},${s[1].toFixed(1)}`).join(' ');
+      if (l.fill && seg.length > 1) {
+        const area = `${d} L${seg[seg.length - 1][0].toFixed(1)},${y(0).toFixed(1)} L${seg[0][0].toFixed(1)},${y(0).toFixed(1)} Z`;
+        kids.push(svgEl('path', { d: area, fill: l.color, opacity: 0.1 }));
+      }
+      // 单点段画不出线，补一个圆点，否则这个点在图上会凭空消失
+      if (seg.length === 1) {
+        kids.push(svgEl('circle', { cx: seg[0][0], cy: seg[0][1], r: 2.5, fill: l.color }));
+      } else {
+        kids.push(svgEl('path', {
+          d, fill: 'none', stroke: l.color, 'stroke-width': 2,
+          'stroke-linejoin': 'round', 'stroke-linecap': 'round',
+          'stroke-dasharray': l.dash || undefined,
+        }));
+      }
+      seg = [];
+    };
+    points.forEach((p, i) => {
+      if (!p.covered) { flush(); return; }
+      const v = Number(p[l.key]);
+      if (!Number.isFinite(v)) { flush(); return; }
+      seg.push([x(i), y(v)]);
+    });
+    flush();
+  }
+
+  // 悬停热区：整列一块，显示该时刻所有系列的值
+  points.forEach((p, i) => {
+    const w = n === 1 ? innerW : innerW / (n - 1);
+    const lines_text = p.covered
+      ? lines.map((l) => `${l.label}：${fmtV(Number(p[l.key]) || 0, l.key)}`).join('\n')
+      : '未采集（服务端那时还没开始记录）';
+    kids.push(svgEl('rect', {
+      x: x(i) - w / 2, y: padT, width: w, height: innerH, fill: 'transparent',
+    }, svgEl('title', {}, `${titleOf(p.t)}\n${lines_text}`)));
+  });
+
+  // 横轴
+  for (const i of tickIndexes(n)) {
+    kids.push(svgEl('text', { class: 'axis-text', x: x(i), y: H - 8, 'text-anchor': 'middle' }, labelOf(points[i].t)));
+  }
+
+  return svgEl('svg', {
+    class: 'chart', viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: 'none',
+    role: 'img', 'aria-label': '流量时间序列',
+  }, kids);
+}
+
+/** 图例。与 seriesChart 的 lines 同构。 */
+export function legend(lines, extra) {
+  const wrap = document.createElement('div');
+  wrap.className = 'chart-legend';
+  for (const l of lines) {
+    const item = document.createElement('span');
+    item.style.display = 'inline-flex';
+    item.style.alignItems = 'center';
+    item.style.gap = '5px';
+    const dot = document.createElement('span');
+    dot.style.width = '10px';
+    dot.style.height = '3px';
+    dot.style.borderRadius = '2px';
+    dot.style.background = l.color;
+    item.append(dot, document.createTextNode(l.label));
+    wrap.append(item);
+  }
+  if (extra) {
+    const e = document.createElement('span');
+    e.style.color = 'var(--text-faint)';
+    e.textContent = extra;
+    wrap.append(e);
+  }
+  return wrap;
+}
+
+/**
+ * 横向占比条（状态码分布、延迟分布）。
+ * 段为 0 时不渲染——0 宽度的段只会让图例对不上。
+ */
+export function stackedBar(segments, total) {
+  const wrap = document.createElement('div');
+  if (!total) {
+    wrap.className = 'empty';
+    wrap.textContent = '这段时间没有请求';
+    return wrap;
+  }
+  const bar = document.createElement('div');
+  bar.style.display = 'flex';
+  bar.style.height = '14px';
+  bar.style.borderRadius = '999px';
+  bar.style.overflow = 'hidden';
+  bar.style.background = 'var(--bg-hover)';
+
+  for (const seg of segments) {
+    if (!seg.value) continue;
+    const el = document.createElement('div');
+    el.style.width = `${(seg.value / total) * 100}%`;
+    el.style.background = seg.color;
+    el.title = `${seg.label}：${seg.value}（${((seg.value / total) * 100).toFixed(1)}%）`;
+    bar.append(el);
+  }
+
+  const legendEl = document.createElement('div');
+  legendEl.className = 'chart-legend';
+  legendEl.style.flexWrap = 'wrap';
+  for (const seg of segments) {
+    if (!seg.value) continue;
+    const item = document.createElement('span');
+    item.style.display = 'inline-flex';
+    item.style.alignItems = 'center';
+    item.style.gap = '5px';
+    const dot = document.createElement('span');
+    dot.style.width = '8px';
+    dot.style.height = '8px';
+    dot.style.borderRadius = '50%';
+    dot.style.background = seg.color;
+    item.append(dot, document.createTextNode(
+      `${seg.label} ${seg.value}（${((seg.value / total) * 100).toFixed(1)}%）`,
+    ));
+    legendEl.append(item);
+  }
+
+  wrap.append(bar, legendEl);
+  return wrap;
+}
+
 /** 纵轴刻度的紧凑写法：1200 → 1.2k */
 function formatTick(v) {
   if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(v % 1_000_000 === 0 ? 0 : 1)}M`;

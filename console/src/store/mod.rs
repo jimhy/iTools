@@ -2,7 +2,8 @@
 //!
 //! | 表 | 归属 | 控制台的权限 |
 //! |---|---|---|
-//! | `users` / `sessions` / `data_records` | 主服务 | **只读**，外加两个运营动作（踢下线、删号），见下 |
+//! | `users` / `sessions` / `data_records` | 主服务 | **只读**，外加三个运营动作（踢下线、停用/恢复、删号），见下 |
+//! | `traffic_hourly` / `plugin_downloads_hourly` | 主服务 | **只读** |
 //! | `plugin_submissions` / `market_entries` | 主服务 | **只读** |
 //! | `console_admins` / `console_sessions` / `console_audit_log` | 本服务 | 读写 |
 //!
@@ -121,9 +122,12 @@ const CREATE_CONSOLE_AUDIT: &str = "\
 pub struct Caps {
     /// `market_entries.revoked_by`：区分「作者自助下架」与「维护者处置下架」。
     pub market_revoked_by: bool,
-    /// `users.status`：禁用位。**第二步给主服务打补丁后才会有**，
-    /// 在此之前控制台如实显示「服务端尚未支持」，不做假开关。
+    /// `users.status`：停用位。主服务打过补丁后才有；
+    /// 没有它时控制台如实显示「服务端尚未支持」，不做假开关。
     pub users_status: bool,
+    /// `traffic_hourly` / `plugin_downloads_hourly`：请求指标表。
+    /// 没有它时流量面板显示「未采集」，绝不画零线。
+    pub traffic: bool,
 }
 
 /// 存储层错误。对外一律折叠成「数据库错误」，细节只进日志——
@@ -176,11 +180,14 @@ impl Store {
         let caps = Caps {
             market_revoked_by: column_exists(&pool, "market_entries", "revoked_by").await?,
             users_status: column_exists(&pool, "users", "status").await?,
+            traffic: table_exists(&pool, "traffic_hourly").await?
+                && table_exists(&pool, "plugin_downloads_hourly").await?,
         };
         tracing::info!(
-            "[store] 主服务库能力探测：market_entries.revoked_by={} users.status={}",
+            "[store] 主服务库能力探测：market_entries.revoked_by={} users.status={} traffic={}",
             caps.market_revoked_by,
-            caps.users_status
+            caps.users_status,
+            caps.traffic
         );
 
         Ok(Self { pool, caps })
@@ -222,6 +229,17 @@ impl Store {
     pub async fn close(&self) {
         self.pool.close().await;
     }
+}
+
+async fn table_exists(pool: &MySqlPool, table: &str) -> StoreResult<bool> {
+    let n: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM information_schema.tables
+         WHERE table_schema = DATABASE() AND table_name = ?",
+    )
+    .bind(table)
+    .fetch_one(pool)
+    .await?;
+    Ok(n > 0)
 }
 
 async fn column_exists(pool: &MySqlPool, table: &str, column: &str) -> StoreResult<bool> {

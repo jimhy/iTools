@@ -173,6 +173,7 @@ pub async fn whoami(State(st): State<Arc<AppState>>, Extension(session): Extensi
             "canManageAdmins": crate::store::role::can_manage_admins(&session.role),
             "usersStatusColumn": caps.users_status,
             "marketRevokedBy": caps.market_revoked_by,
+            "traffic": caps.traffic,
         }
     }))
     .into_response()

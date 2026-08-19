@@ -1,14 +1,15 @@
-// 用户管理：列表 / 详情 / 强制下线 / 删除。
+// 用户管理：列表 / 详情 / 停用 / 强制下线 / 删除。
 //
-// 「禁用账号」在这里是一个**禁用状态的开关**，旁边写明为什么点不了。
-// 这不是偷懒：主服务的登录与鉴权根本不读任何禁用位，做一个能点的开关
-// 只会让运营以为封停了，实际对方下一秒就能登回来。
+// 「停用」是真实生效的封停：写 users.status 并清掉全部会话，主服务的登录与鉴权
+// 都实时读这一列。但它**依赖主服务版本**——老版本的库里没有这一列，那时写进去
+// 也没人读。所以开关是否可点由服务端返回的 capabilities.userDisable 决定，
+// 不支持时置灰并写明原因，绝不做一个点得动却不生效的开关。
 
 import { Api } from '../api.js';
 import * as fmt from '../fmt.js';
 import {
   card, cardHead, clear, confirmDialog, empty, h, note, pager, renderAsync,
-  table, tag, toastErr, toastOk,
+  table, tag, toast, toastErr, toastOk,
 } from '../ui.js';
 
 const state = {
@@ -59,12 +60,19 @@ async function renderList(container, ctx, page) {
       });
 
       const canWrite = !!ctx.me?.capabilities?.canWrite;
-      const canDisable = !!ctx.me?.capabilities?.usersStatusColumn;
+      // 以列表接口当次返回的能力位为准（比登录时缓存的 whoami 新）
+      const canDisable = !!data.capabilities?.userDisable;
 
       const cols = [
         {
           key: 'username', label: '用户名', sortable: true,
           render: (r) => h('a', { href: `#/users/${encodeURIComponent(r.username)}`, text: r.username }),
+        },
+        {
+          key: 'status', label: '状态', sortable: true,
+          render: (r) => (r.status === 'disabled'
+            ? h('span', { title: r.disabledReason || '（未填写原因）' }, tag('已停用', 'tag-danger'))
+            : tag('正常', 'tag-ok')),
         },
         { key: 'created_at', label: '注册时间', sortable: true, render: (r) => h('span', { title: fmt.time(r.createdAt), text: fmt.date(r.createdAt) }) },
         { key: 'sessions', label: '会话', num: true, sortable: true, render: (r) => fmt.num(r.sessionCount) },
@@ -86,13 +94,21 @@ async function renderList(container, ctx, page) {
               title: !canWrite ? '只读账号不能执行' : (r.sessionCount === 0 ? '该用户当前没有会话' : '删除其全部登录态，立即生效'),
               onclick: () => kick(r.username, reload),
             }),
-            h('button.btn.btn-sm', {
-              text: '禁用',
-              disabled: true,
-              title: canDisable
-                ? '服务端已支持禁用位，但控制台此版本尚未接入'
-                : '云同步服务端的 users 表没有禁用位，登录与鉴权也不检查它——做成可点的开关会是假功能',
-            }),
+            r.status === 'disabled'
+              ? h('button.btn.btn-sm', {
+                  text: '恢复',
+                  disabled: !canWrite || !canDisable,
+                  title: canDisable ? '解除停用（该用户需要重新登录一次）' : DISABLE_UNSUPPORTED,
+                  onclick: () => enableUser(r.username, reload),
+                })
+              : h('button.btn.btn-sm', {
+                  text: '停用',
+                  disabled: !canWrite || !canDisable,
+                  title: canDisable
+                    ? '封停账号：立即失效全部登录态，且无法用原口令重新登录'
+                    : DISABLE_UNSUPPORTED,
+                  onclick: () => showDisable(r.username, reload),
+                }),
             h('button.btn.btn-sm.btn-danger-soft', {
               text: '删除',
               disabled: !canWrite,
@@ -104,7 +120,7 @@ async function renderList(container, ctx, page) {
       ];
 
       const onSort = (key) => {
-        const sortable = { username: 'username', created_at: 'created_at', sessions: 'sessions', records: 'records', bytes: 'bytes' };
+        const sortable = { username: 'username', created_at: 'created_at', sessions: 'sessions', records: 'records', bytes: 'bytes', status: 'status' };
         if (!sortable[key]) return;
         if (state.sort === key) state.order = state.order === 'desc' ? 'asc' : 'desc';
         else { state.sort = key; state.order = 'desc'; }
@@ -113,11 +129,12 @@ async function renderList(container, ctx, page) {
       };
 
       return h('div', { style: 'display:flex;flex-direction:column;gap:14px' },
-        note(
-          '「禁用账号」需要云同步服务端支持：users 表目前没有禁用位，主服务的登录与鉴权也不会读它。'
-          + '现在能做的是「强制下线」——删掉全部会话，立即生效，但不阻止对方重新登录。',
-          'warn',
-        ),
+        canDisable
+          ? note(
+              '「停用」会立即失效该账号的全部登录态，并且对方无法用原口令重新登录——'
+              + '服务端的登录与鉴权都会实时读这个状态。「强制下线」只清会话，不阻止重新登录。',
+            )
+          : note(DISABLE_UNSUPPORTED, 'warn'),
         table(cols, data.items, {
           sort: state.sort, order: state.order, onSort,
           emptyText: state.q ? `没有匹配「${state.q}」的用户` : '还没有任何用户',
@@ -128,6 +145,84 @@ async function renderList(container, ctx, page) {
         }),
       );
     });
+  }
+}
+
+/** 服务端不支持停用时，到处都用这一句——保证说法一致。 */
+const DISABLE_UNSUPPORTED =
+  '云同步服务端还没有停用位（users 表没有 status 列），写进去也没人读。'
+  + '请先把服务端更新到支持停用的版本；在那之前这个开关不会假装能用。';
+
+/** 停用：必须填原因——它会原样展示给被停用的用户。 */
+function showDisable(username, reload) {
+  const reason = h('input', {
+    placeholder: '例如：违反使用条款 / 检测到异常行为',
+    maxlength: '500',
+  });
+  const errEl = h('div.login-error', { hidden: true });
+
+  const dlg = h('dialog.modal',
+    h('form.modal-body', {
+      onsubmit: async (ev) => {
+        ev.preventDefault();
+        const text = reason.value.trim();
+        if (!text) {
+          errEl.textContent = '请填写停用原因';
+          errEl.hidden = false;
+          return;
+        }
+        errEl.hidden = true;
+        try {
+          const r = await Api.disableUser(username, text);
+          toastOk(`已停用 ${username}`);
+          if (r?.note) toast(r.note, 'info', 6000);
+          dlg.close();
+          dlg.remove();
+          reload();
+        } catch (e) {
+          errEl.textContent = e.message;
+          errEl.hidden = false;
+        }
+      },
+    },
+      h('h3', { text: `停用 ${username}` }),
+      h('div.modal-text',
+        h('p', { text: '该账号的全部登录态立即失效，且无法用原口令重新登录。' }),
+        h('p', { text: '停用原因会原样展示给这个用户——请写清楚，别让人一句话不给就被挡在门外。' }),
+      ),
+      h('label.field', h('span', { text: '停用原因（必填）' }), reason),
+      errEl,
+      h('div.modal-actions',
+        h('button.btn.btn-ghost', {
+          type: 'button', text: '取消',
+          onclick: () => { dlg.close(); dlg.remove(); },
+        }),
+        h('button.btn.btn-danger', { type: 'submit', text: '确认停用' }),
+      ),
+    ),
+  );
+  document.body.append(dlg);
+  dlg.showModal();
+  reason.focus();
+}
+
+async function enableUser(username, reload) {
+  const ok = await confirmDialog({
+    title: '恢复账号',
+    text: [
+      `将解除 ${username} 的停用状态，该账号可以重新登录。`,
+      '注意：停用时清掉的会话不会自动找回，用户需要重新登录一次。',
+    ],
+    okText: '确认恢复',
+    danger: false,
+  });
+  if (!ok) return;
+  try {
+    await Api.enableUser(username);
+    toastOk(`已恢复 ${username}`);
+    reload();
+  } catch (e) {
+    toastErr(`恢复失败：${e.message}`);
   }
 }
 
@@ -195,7 +290,24 @@ async function renderDetail(container, ctx, username, page) {
         kv('同步记录', fmt.num(u.recordCount)),
         kv('占用空间', fmt.bytes(u.bytes)),
       ),
-      h('div', { style: 'margin-top:14px;display:flex;gap:8px' },
+      u.status === 'disabled'
+        ? h('div', { style: 'margin-top:14px' },
+            note(`该账号已被停用${u.disabledAt ? `（${fmt.time(u.disabledAt)}）` : ''}：${u.disabledReason || '（未填写原因）'}`, 'danger'))
+        : null,
+      h('div', { style: 'margin-top:14px;display:flex;gap:8px;flex-wrap:wrap' },
+        u.status === 'disabled'
+          ? h('button.btn', {
+              text: '恢复账号',
+              disabled: !canWrite || !u.capabilities?.userDisable,
+              title: u.capabilities?.userDisable ? '' : DISABLE_UNSUPPORTED,
+              onclick: () => enableUser(u.username, () => location.reload()),
+            })
+          : h('button.btn', {
+              text: '停用账号',
+              disabled: !canWrite || !u.capabilities?.userDisable,
+              title: u.capabilities?.userDisable ? '' : DISABLE_UNSUPPORTED,
+              onclick: () => showDisable(u.username, () => location.reload()),
+            }),
         h('button.btn', {
           text: '强制下线',
           disabled: !canWrite || u.sessionCount === 0,

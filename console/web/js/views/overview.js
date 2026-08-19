@@ -4,16 +4,17 @@
 // 不做二次概括——概括的过程最容易把语义弄丢。
 
 import { Api } from '../api.js';
-import { lineChart } from '../chart.js';
+import { legend, lineChart, seriesChart } from '../chart.js';
 import * as fmt from '../fmt.js';
 import { card, cardHead, clear, h, note, stat, tag, unavailable } from '../ui.js';
 
 export async function render(container, ctx, param, page) {
   page.setSubtitle('全部数字来自数据库实时聚合');
 
-  const [ov, series] = await Promise.all([
+  const [ov, series, traffic] = await Promise.all([
     Api.overview(),
     Api.series('users', 30),
+    Api.traffic(24, 'hour'),
   ]);
 
   const wrap = clear(container);
@@ -70,18 +71,42 @@ export async function render(container, ctx, param, page) {
     ),
   ));
 
-  // ---- 未采集的指标 ----
-  wrap.append(card(
-    cardHead('流量指标', '云同步服务端尚未采集，控制台无法凭空生成'),
-    note(
-      '下面这些是「后台管理系统」通常会有、但当前确实拿不到的指标。它们不是暂时没数据，'
-      + '而是服务端从来没有记录过——所以这里不画任何曲线，包括零线。',
-      'warn',
-    ),
-    h('div.grid.grid-2', { style: 'margin-top:12px' },
-      ov.unavailable.map((u) => unavailable(u)),
-    ),
-  ));
+  // ---- 流量（近 24 小时）----
+  if (traffic.available) {
+    const covered = traffic.points.filter((p) => p.covered);
+    const reqs = covered.reduce((a, p) => a + (p.reqs || 0), 0);
+    const errs = covered.reduce((a, p) => a + (p.errs || 0), 0);
+    const out = covered.reduce((a, p) => a + (p.bytesOut || 0), 0);
+    const lines = [
+      { key: 'reqs', label: '请求数', color: 'var(--accent)', fill: true },
+      { key: 'errs', label: '错误数', color: 'var(--warn)' },
+    ];
+    wrap.append(card(
+      cardHead('流量 · 近 24 小时',
+        `${fmt.num(reqs)} 次请求 · ${errs ? `${((errs / Math.max(reqs, 1)) * 100).toFixed(2)}% 错误` : '无错误'} · 出站 ${fmt.bytes(out)}`,
+        h('a.btn.btn-sm.btn-ghost', { href: '#/trends', text: '详细 →' }),
+      ),
+      seriesChart(traffic.points, lines,
+        (t) => fmt.tickLabel(t, true), (t) => fmt.tickTitle(t, true),
+        { height: 170, formatValue: (v) => fmt.num(v) }),
+      legend(lines, traffic.coveredPoints < traffic.points.length ? '斜纹区间为未采集' : ''),
+    ));
+  }
+
+  // ---- 仍然拿不到的指标 ----
+  if (ov.unavailable.length) {
+    wrap.append(card(
+      cardHead('拿不到的指标', '不是暂时没数据，是从来没被记录过'),
+      note(
+        '这些指标当前确实拿不到，原因逐条列在下面。它们不会被画成零线——'
+        + '一条零线会被读成「这段时间没有流量」，那是两回事。',
+        'warn',
+      ),
+      h('div.grid.grid-2', { style: 'margin-top:12px' },
+        ov.unavailable.map((u) => unavailable(u)),
+      ),
+    ));
+  }
 }
 
 function kv(label, value) {

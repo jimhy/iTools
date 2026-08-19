@@ -63,6 +63,41 @@ pub struct Overview {
     pub db_bytes: i64,
 }
 
+/// 流量时间序列的一个点。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TrafficPoint {
+    /// 桶起点（Unix 秒）
+    pub bucket: i64,
+    pub reqs: i64,
+    /// 4xx + 5xx
+    pub errs: i64,
+    /// 仅 5xx
+    pub server_errs: i64,
+    pub bytes_in: i64,
+    pub bytes_out: i64,
+    /// 耗时总和。平均值 = dur_sum_ms / reqs，**精确**，不是估算的百分位。
+    pub dur_sum_ms: i64,
+    pub dur_max_ms: i64,
+}
+
+/// 按路由汇总的一行。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteStat {
+    pub route: String,
+    pub method: String,
+    pub reqs: i64,
+    pub errs: i64,
+    pub server_errs: i64,
+    pub bytes_out: i64,
+    pub dur_sum_ms: i64,
+    pub dur_max_ms: i64,
+    /// 延迟分布：<50ms / <200ms / <1s / ≥1s
+    pub b_fast: i64,
+    pub b_mid: i64,
+    pub b_slow: i64,
+    pub b_vslow: i64,
+}
+
 /// 一天的秒数。
 const DAY: i64 = 86_400;
 /// 一小时的秒数。
@@ -231,6 +266,216 @@ impl Store {
                 bytes: r.get("b"),
             })
             .collect())
+    }
+
+    // ---------- 请求指标（来自主服务的 traffic_hourly / plugin_downloads_hourly）----------
+
+    /// 流量时间序列。`bucket_sec` 只接受 3600（小时）或 86400（天）。
+    ///
+    /// 主服务把指标按**小时**落库，所以小时是最细粒度——再细的曲线画不出来，
+    /// 也不会去插值伪造。按天则是把小时桶聚起来。
+    pub async fn traffic_series(
+        &self,
+        bucket_sec: i64,
+        points: i64,
+        now_ms: i64,
+        tz_offset_min: i64,
+    ) -> StoreResult<Vec<TrafficPoint>> {
+        if !self.caps().traffic {
+            return Ok(Vec::new());
+        }
+        let points = points.clamp(1, 400);
+        let bucket_sec = if bucket_sec >= DAY { DAY } else { HOUR };
+        let offset_sec = tz_offset_min * 60;
+        let since = now_ms / 1000 - points * bucket_sec;
+
+        // 按天聚合时要带时区偏移，否则「今天」的边界跟着数据库所在时区跑。
+        // 按小时聚合时 hour_ts 本身就是桶起点，直接用。
+        let bucket_expr = if bucket_sec == DAY {
+            "CAST(FLOOR((hour_ts + ?) / ?) * ? - ? AS SIGNED)"
+        } else {
+            "CAST(hour_ts AS SIGNED)"
+        };
+
+        let sql = format!(
+            "SELECT {bucket_expr} AS bkt,
+                    CAST(COALESCE(SUM(reqs), 0) AS SIGNED) AS reqs,
+                    CAST(COALESCE(SUM(CASE WHEN status_class IN (4,5) THEN reqs ELSE 0 END), 0) AS SIGNED) AS errs,
+                    CAST(COALESCE(SUM(CASE WHEN status_class = 5 THEN reqs ELSE 0 END), 0) AS SIGNED) AS server_errs,
+                    CAST(COALESCE(SUM(bytes_in), 0) AS SIGNED) AS bytes_in,
+                    CAST(COALESCE(SUM(bytes_out), 0) AS SIGNED) AS bytes_out,
+                    CAST(COALESCE(SUM(dur_sum_ms), 0) AS SIGNED) AS dur_sum_ms,
+                    CAST(COALESCE(MAX(dur_max_ms), 0) AS SIGNED) AS dur_max_ms
+             FROM traffic_hourly WHERE hour_ts >= ?
+             GROUP BY bkt ORDER BY bkt ASC"
+        );
+
+        let mut q = sqlx::query(&sql);
+        if bucket_sec == DAY {
+            q = q.bind(offset_sec).bind(bucket_sec).bind(bucket_sec).bind(offset_sec);
+        }
+        let rows = q.bind(since).fetch_all(self.pool()).await?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            out.push(TrafficPoint {
+                bucket: r.try_get("bkt")?,
+                reqs: r.try_get("reqs")?,
+                errs: r.try_get("errs")?,
+                server_errs: r.try_get("server_errs")?,
+                bytes_in: r.try_get("bytes_in")?,
+                bytes_out: r.try_get("bytes_out")?,
+                dur_sum_ms: r.try_get("dur_sum_ms")?,
+                dur_max_ms: r.try_get("dur_max_ms")?,
+            });
+        }
+        Ok(out)
+    }
+
+    /// 按路由汇总（Top N，按请求数倒序）。
+    pub async fn traffic_routes(
+        &self,
+        hours: i64,
+        limit: i64,
+        now_ms: i64,
+    ) -> StoreResult<Vec<RouteStat>> {
+        if !self.caps().traffic {
+            return Ok(Vec::new());
+        }
+        let since = now_ms / 1000 - hours.clamp(1, 24 * 365) * HOUR;
+        let rows = sqlx::query(
+            "SELECT route, method,
+                    CAST(SUM(reqs) AS SIGNED) AS reqs,
+                    CAST(SUM(CASE WHEN status_class IN (4,5) THEN reqs ELSE 0 END) AS SIGNED) AS errs,
+                    CAST(SUM(CASE WHEN status_class = 5 THEN reqs ELSE 0 END) AS SIGNED) AS server_errs,
+                    CAST(SUM(bytes_out) AS SIGNED) AS bytes_out,
+                    CAST(SUM(dur_sum_ms) AS SIGNED) AS dur_sum_ms,
+                    CAST(MAX(dur_max_ms) AS SIGNED) AS dur_max_ms,
+                    CAST(SUM(b_fast) AS SIGNED) AS b_fast,
+                    CAST(SUM(b_mid) AS SIGNED) AS b_mid,
+                    CAST(SUM(b_slow) AS SIGNED) AS b_slow,
+                    CAST(SUM(b_vslow) AS SIGNED) AS b_vslow
+             FROM traffic_hourly WHERE hour_ts >= ?
+             GROUP BY route, method ORDER BY reqs DESC LIMIT ?",
+        )
+        .bind(since)
+        .bind(limit.clamp(1, 100))
+        .fetch_all(self.pool())
+        .await?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            out.push(RouteStat {
+                route: r.try_get("route")?,
+                method: r.try_get("method")?,
+                reqs: r.try_get("reqs")?,
+                errs: r.try_get("errs")?,
+                server_errs: r.try_get("server_errs")?,
+                bytes_out: r.try_get("bytes_out")?,
+                dur_sum_ms: r.try_get("dur_sum_ms")?,
+                dur_max_ms: r.try_get("dur_max_ms")?,
+                b_fast: r.try_get("b_fast")?,
+                b_mid: r.try_get("b_mid")?,
+                b_slow: r.try_get("b_slow")?,
+                b_vslow: r.try_get("b_vslow")?,
+            });
+        }
+        Ok(out)
+    }
+
+    /// 状态码大类分布（近 N 小时）。
+    pub async fn traffic_status_mix(&self, hours: i64, now_ms: i64) -> StoreResult<Vec<(u8, i64)>> {
+        if !self.caps().traffic {
+            return Ok(Vec::new());
+        }
+        let since = now_ms / 1000 - hours.clamp(1, 24 * 365) * HOUR;
+        let rows = sqlx::query(
+            "SELECT status_class, CAST(SUM(reqs) AS SIGNED) AS reqs
+             FROM traffic_hourly WHERE hour_ts >= ?
+             GROUP BY status_class ORDER BY status_class",
+        )
+        .bind(since)
+        .fetch_all(self.pool())
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            out.push((r.try_get::<i8, _>("status_class")? as u8, r.try_get("reqs")?));
+        }
+        Ok(out)
+    }
+
+    /// 全局延迟分布（近 N 小时）。四个桶的精确计数，**不是估算的百分位**。
+    pub async fn traffic_latency_mix(&self, hours: i64, now_ms: i64) -> StoreResult<[i64; 4]> {
+        if !self.caps().traffic {
+            return Ok([0; 4]);
+        }
+        let since = now_ms / 1000 - hours.clamp(1, 24 * 365) * HOUR;
+        let row = sqlx::query(
+            "SELECT CAST(COALESCE(SUM(b_fast),0) AS SIGNED) AS a,
+                    CAST(COALESCE(SUM(b_mid),0) AS SIGNED) AS b,
+                    CAST(COALESCE(SUM(b_slow),0) AS SIGNED) AS c,
+                    CAST(COALESCE(SUM(b_vslow),0) AS SIGNED) AS d
+             FROM traffic_hourly WHERE hour_ts >= ?",
+        )
+        .bind(since)
+        .fetch_one(self.pool())
+        .await?;
+        Ok([
+            row.try_get("a")?,
+            row.try_get("b")?,
+            row.try_get("c")?,
+            row.try_get("d")?,
+        ])
+    }
+
+    /// 插件下载排行（近 N 天）。
+    pub async fn plugin_downloads(
+        &self,
+        days: i64,
+        limit: i64,
+        now_ms: i64,
+    ) -> StoreResult<Vec<(String, i64)>> {
+        if !self.caps().traffic {
+            return Ok(Vec::new());
+        }
+        let since = now_ms / 1000 - days.clamp(1, 3650) * DAY;
+        let rows = sqlx::query(
+            "SELECT name, CAST(SUM(downloads) AS SIGNED) AS n
+             FROM plugin_downloads_hourly WHERE hour_ts >= ?
+             GROUP BY name ORDER BY n DESC LIMIT ?",
+        )
+        .bind(since)
+        .bind(limit.clamp(1, 100))
+        .fetch_all(self.pool())
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            out.push((r.try_get("name")?, r.try_get("n")?));
+        }
+        Ok(out)
+    }
+
+    /// 指标覆盖的时间范围（最早/最晚的小时桶）。
+    ///
+    /// 面板用它如实标注「数据从什么时候开始有」——主服务是某次发版才开始采集的，
+    /// 在那之前的时间段是**没有数据**而不是**没有流量**，两者必须区分开。
+    pub async fn traffic_coverage(&self) -> StoreResult<Option<(i64, i64)>> {
+        if !self.caps().traffic {
+            return Ok(None);
+        }
+        let row = sqlx::query(
+            "SELECT CAST(COALESCE(MIN(hour_ts), 0) AS SIGNED) AS lo,
+                    CAST(COALESCE(MAX(hour_ts), 0) AS SIGNED) AS hi
+             FROM traffic_hourly",
+        )
+        .fetch_one(self.pool())
+        .await?;
+        let lo: i64 = row.try_get("lo")?;
+        let hi: i64 = row.try_get("hi")?;
+        if lo == 0 && hi == 0 {
+            return Ok(None);
+        }
+        Ok(Some((lo, hi)))
     }
 
     /// 通用分桶计数。

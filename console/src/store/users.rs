@@ -31,6 +31,11 @@ pub struct UserRow {
     pub bytes: i64,
     /// 该用户在市场上线的插件数（含已下架）。
     pub plugin_count: i64,
+    /// `active` | `disabled`。主服务未打补丁（无 `status` 列）时恒为 `active`——
+    /// 前端据 `Caps::users_status` 决定是显示状态还是显示「服务端未支持」。
+    pub status: String,
+    /// 停用原因。未停用或未支持时为空串。
+    pub disabled_reason: String,
 }
 
 /// 用户详情里的一个命名空间。
@@ -57,6 +62,8 @@ pub enum UserSort {
     Bytes,
     Records,
     Sessions,
+    /// 按停用状态排序（把被停用的排到一起看）
+    Status,
 }
 
 impl UserSort {
@@ -66,6 +73,7 @@ impl UserSort {
             "bytes" => Self::Bytes,
             "records" => Self::Records,
             "sessions" => Self::Sessions,
+            "status" => Self::Status,
             // 未知值一律回落到默认，不报错——排序字段写错不该让整页打不开
             _ => Self::CreatedAt,
         }
@@ -79,6 +87,7 @@ impl UserSort {
             Self::Bytes => "bytes",
             Self::Records => "record_count",
             Self::Sessions => "session_count",
+            Self::Status => "status",
         }
     }
 }
@@ -114,10 +123,19 @@ impl Store {
         .fetch_one(self.pool())
         .await?;
 
+        // 主服务未打补丁时没有 status/disabled_reason 列，用常量占位而不是让整条 SQL 报错。
+        let (status_expr, reason_expr) = if self.caps().users_status {
+            ("u.status", "u.disabled_reason")
+        } else {
+            ("'active'", "''")
+        };
+
         // SUM() 在 MariaDB 里返回 DECIMAL，必须 CAST 成 SIGNED 才能稳定解码成 i64。
         let sql = format!(
             r"SELECT u.username,
                      u.created_at,
+                     {status_expr}               AS status,
+                     {reason_expr}               AS disabled_reason,
                      COALESCE(s.cnt, 0)          AS session_count,
                      COALESCE(s.last_at, 0)      AS last_session_at,
                      COALESCE(d.cnt, 0)          AS record_count,
@@ -161,6 +179,8 @@ impl Store {
                 record_count: r.get("record_count"),
                 bytes: r.get("bytes"),
                 plugin_count: r.get("plugin_count"),
+                status: r.get("status"),
+                disabled_reason: r.get("disabled_reason"),
             })
             .collect();
         Ok((list, total))
@@ -239,6 +259,81 @@ impl Store {
             .execute(self.pool())
             .await?
             .rows_affected())
+    }
+
+    /// 停用 / 恢复账号。
+    ///
+    /// 与主服务的 `MariaDbStore::set_user_status` **逻辑逐条对齐**（改状态 + 停用时清会话，
+    /// 单事务）。两处各写一遍是因为它们是两个独立进程、无法共享代码；改动任一边都必须
+    /// 同步另一边，否则会出现「控制台停用了但主服务不认」这种最难查的不一致。
+    ///
+    /// 这是**真实生效**的：主服务的 `login` 与 `authenticate` 都会实时读这一列
+    /// （见 `server/src/routes.rs`）。停用后对方既进不来、也无法用原口令重新登录。
+    ///
+    /// 调用前必须确认 [`Caps::users_status`] 为真——主服务没打补丁时这一列不存在，
+    /// 强行写只会报 SQL 错误，而界面上看起来像是"操作失败"，掩盖了真正的原因。
+    ///
+    /// [`Caps::users_status`]: super::Caps::users_status
+    pub async fn set_user_status(
+        &self,
+        username: &str,
+        status: &str,
+        reason: &str,
+        now_ms: i64,
+    ) -> StoreResult<bool> {
+        let disabling = status != "active";
+        let mut tx = self.pool().begin().await?;
+        let affected = sqlx::query(
+            "UPDATE users SET status = ?, disabled_at = ?, disabled_reason = ? WHERE username = ?",
+        )
+        .bind(status)
+        .bind(if disabling { now_ms } else { 0 })
+        .bind(if disabling { reason } else { "" })
+        .bind(username)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+
+        // 停用时连会话一起清：这是主路径，比"留着会话再靠鉴权拦"更彻底。
+        // 主服务那边的状态复查是兜底，两层都在。
+        if disabling {
+            sqlx::query("DELETE FROM sessions WHERE username = ?")
+                .bind(username)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+
+        // MySQL 在"值没变"时 rows_affected 也是 0（比如重复停用同一个账号），
+        // 所以不能据此判断用户是否存在——再确认一次。
+        if affected > 0 {
+            return Ok(true);
+        }
+        let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE username = ?")
+            .bind(username)
+            .fetch_one(self.pool())
+            .await?;
+        Ok(exists > 0)
+    }
+
+    /// 读某个用户的停用状态。主服务没打补丁（无 `status` 列）时返回 `None`。
+    pub async fn user_status(&self, username: &str) -> StoreResult<Option<(String, i64, String)>> {
+        if !self.caps().users_status {
+            return Ok(None);
+        }
+        let row = sqlx::query(
+            "SELECT status, disabled_at, disabled_reason FROM users WHERE username = ?",
+        )
+        .bind(username)
+        .fetch_optional(self.pool())
+        .await?;
+        Ok(row.map(|r| {
+            (
+                r.get::<String, _>("status"),
+                r.get::<i64, _>("disabled_at"),
+                r.get::<String, _>("disabled_reason"),
+            )
+        }))
     }
 
     /// 删除终端用户：同步数据 → 会话 → 账号，单事务。

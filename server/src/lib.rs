@@ -19,6 +19,7 @@ pub mod auth;
 pub mod config;
 pub mod llm;
 pub mod market;
+pub mod metrics;
 pub mod mirrors;
 pub mod pkg;
 pub mod proxy;

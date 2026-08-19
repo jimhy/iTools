@@ -17,7 +17,8 @@ use itools_sync::config::{Config, TlsConfig};
 use itools_sync::market::MarketService;
 use itools_sync::mirrors::{MirrorRegistry, MirrorRegistryOptions};
 use itools_sync::ratelimit::{RateLimiterOptions, SlidingWindowLimiter};
-use itools_sync::routes::{build_router, AppState};
+use itools_sync::metrics::{Metrics, HOUR_SEC};
+use itools_sync::routes::{build_router, track_metrics, AppState};
 use itools_sync::store::MariaDbStore;
 use itools_sync::system_clock;
 
@@ -98,17 +99,38 @@ async fn main() -> ExitCode {
     let market = MarketService::new(store.clone(), config.clone(), clock.clone());
     market.bootstrap().await;
 
+    let metrics = Arc::new(Metrics::new(config.metrics.enabled));
+    if config.metrics.enabled {
+        tracing::info!(
+            "[metrics] 请求指标采集已开启：每 {} 秒落库一次，保留 {} 天",
+            config.metrics.flush_sec,
+            config.metrics.retention_days
+        );
+    } else {
+        tracing::info!("[metrics] 请求指标采集已关闭（SYNC_METRICS=false），运营面板会显示「未采集」");
+    }
+
     let state = Arc::new(AppState {
         store: store.clone(),
-        config,
+        config: config.clone(),
         mirrors: mirrors.clone(),
         mirror_limiter: Arc::new(limiter),
         market,
         market_limiter: Arc::new(market_limiter),
-        clock,
+        metrics: metrics.clone(),
+        clock: clock.clone(),
     });
 
-    let mut app = build_router(state);
+    // 指标落库任务。放在这里而不是 build_router 里：测试构造 Router 时不该偷偷起后台任务。
+    if config.metrics.enabled {
+        spawn_metrics_flush(store.clone(), metrics.clone(), config.clone(), clock.clone());
+    }
+
+    let mut app = build_router(state.clone());
+    // 指标中间件挂在最外层：官网静态站与 /download 也要计入，它们才是流量大头。
+    if config.metrics.enabled {
+        app = app.layer(axum::middleware::from_fn_with_state(state, track_metrics));
+    }
     if logger_on {
         app = app.layer(TraceLayer::new_for_http());
     }
@@ -141,6 +163,58 @@ async fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// 指标落库任务：定期把内存聚合刷进库，并按保留期清理旧数据。
+///
+/// 失败**不重试也不静默**——重试会让内存里越积越多（这一批已经被 drain 走了，
+/// 重试的是同一批数据，而新数据还在继续进），所以这里的取舍是：丢掉这一批，
+/// 但把失败大声打进日志。指标不是业务数据，丢一分钟远好过把服务拖垮。
+fn spawn_metrics_flush(
+    store: Arc<itools_sync::store::MariaDbStore>,
+    metrics: Arc<Metrics>,
+    config: Arc<itools_sync::config::Config>,
+    clock: itools_sync::Clock,
+) {
+    let flush_sec = config.metrics.flush_sec;
+    let retention_days = config.metrics.retention_days;
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(flush_sec));
+        ticker.tick().await; // 第一次 tick 立刻返回，跳过
+        // 清理不必每次 flush 都做，一天一次足够
+        let mut last_purge_day = -1i64;
+        loop {
+            ticker.tick().await;
+
+            let batch = metrics.drain();
+            if batch.dropped > 0 {
+                tracing::error!(
+                    "[metrics] 上个窗口有 {} 次请求因聚合键超上限被丢弃——路由模板可能取成了具体路径",
+                    batch.dropped
+                );
+            }
+            if !batch.is_empty() {
+                if let Err(e) = store.upsert_traffic(&batch.buckets).await {
+                    tracing::error!("[metrics] 请求指标落库失败（本批 {} 行已丢弃）：{e}", batch.buckets.len());
+                }
+                if let Err(e) = store.upsert_plugin_downloads(&batch.downloads).await {
+                    tracing::error!("[metrics] 下载量落库失败（本批 {} 行已丢弃）：{e}", batch.downloads.len());
+                }
+            }
+
+            let now_sec = clock() / 1000;
+            let today = now_sec / 86_400;
+            if today != last_purge_day {
+                last_purge_day = today;
+                let cutoff = (now_sec - retention_days * 86_400) / HOUR_SEC * HOUR_SEC;
+                match store.purge_metrics_before(cutoff).await {
+                    Ok(n) if n > 0 => tracing::info!("[metrics] 清理了 {n} 行超出保留期的指标"),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("[metrics] 清理旧指标失败：{e}"),
+                }
+            }
+        }
+    });
 }
 
 fn init_tracing(logger: bool) {

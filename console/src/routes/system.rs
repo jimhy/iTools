@@ -23,14 +23,15 @@ pub async fn meta(State(st): State<Arc<AppState>>) -> Response {
         "name": "iTools 运营控制台",
         "version": env!("CARGO_PKG_VERSION"),
         "capabilities": {
-            // 终端用户禁用位：主服务补丁落地前恒为 false，前端据此禁用开关并写明原因
+            // 这几个跟着**服务端实际能力**走，不是写死的常量——
+            // 前端据此决定开关可点还是置灰+说明。写死就等于做了个假开关。
             "userDisable": caps.users_status,
             "marketRevokedBy": caps.market_revoked_by,
-            // 第一版对插件与提审单只读
+            "httpMetrics": caps.traffic,
+            // 插件与提审仍是只读：主服务没有可调用的下架/改判端点，
+            // 而直接改库不会刷新它进程内的市场索引缓存，客户端看不到变化。
             "pluginWrite": false,
             "submissionReview": false,
-            // 主服务尚无采集，流量面板显示「未采集」
-            "httpMetrics": false,
         },
     }))
     .into_response()
@@ -73,6 +74,7 @@ pub async fn info(State(st): State<Arc<AppState>>) -> Response {
             "caps": {
                 "usersStatus": st.store.caps().users_status,
                 "marketRevokedBy": st.store.caps().market_revoked_by,
+                "traffic": st.store.caps().traffic,
             },
         },
         "upstream": upstream,

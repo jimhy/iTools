@@ -70,6 +70,8 @@ async fn harness(user: &str) -> (Router, Arc<MariaDbStore>) {
         mirror_limiter: Arc::new(limiter),
         market,
         market_limiter: Arc::new(market_limiter),
+        // 测试里不采集指标：既不需要，也免得单测之间通过内存聚合互相影响
+        metrics: Arc::new(itools_sync::metrics::Metrics::new(false)),
         clock,
     }));
     (app, store)
@@ -355,5 +357,275 @@ async fn password_hash_is_never_stored_in_plaintext() {
     assert!(!record.password_hash.contains("s3cret"));
     assert_eq!(record.password_hash.len(), 128, "scrypt 64 字节派生值的 hex 长度");
     assert_eq!(record.salt.len(), 32, "每用户 16 字节随机盐");
+    store.close().await;
+}
+
+// ---------------------------------------------------------------- 账号停用
+
+/// 停用的完整闭环：**四处缺一不可**。
+///
+/// 只删会话挡不住重新登录，只拦登录挡不住已有令牌，两者都做才是真的封停。
+/// 这个用例把四条路径逐一走一遍，任何一处退化都会在这里炸。
+#[tokio::test]
+async fn disabled_account_is_blocked_on_every_path() {
+    use itools_sync::store::user_status;
+
+    let user = "rust_disabled";
+    let (app, store) = harness(user).await;
+    let now = itools_sync::system_clock()();
+
+    // 先正常登录，确认停用前一切可用
+    let res = post(&app, "/auth/login", json!({"username": user, "password": "s3cret"}), None).await;
+    assert_eq!(res.status, StatusCode::OK);
+    let token = res.json()["token"].as_str().unwrap_or_default().to_string();
+    assert!(!token.is_empty());
+    assert_eq!(
+        get(&app, "/data/_usage", Some(&token)).await.status,
+        StatusCode::OK,
+        "停用前已有会话应当可用"
+    );
+
+    // 停用
+    let changed = store
+        .set_user_status(user, user_status::DISABLED, "违反使用条款", now)
+        .await
+        .expect("停用应当成功");
+    assert!(changed, "停用一个存在的账号必须返回 true");
+
+    // ① 已有会话立即失效。这里是 **401**：停用是连会话行一起删的，
+    //    旧令牌根本查不到会话——这是主路径，比「留着会话再靠检查拦」更彻底。
+    let after = get(&app, "/data/_usage", Some(&token)).await;
+    assert_eq!(after.status, StatusCode::UNAUTHORIZED, "停用后已有令牌必须失效");
+
+    // ② 会话行确实被删了：logout 这条不检查账号状态的路径也说会话无效
+    let lo = post(&app, "/auth/logout", json!({}), Some(&token)).await;
+    assert_eq!(lo.status, StatusCode::UNAUTHORIZED, "停用时应当已清掉会话行");
+
+    // ③ 兜底那一层：手工插一条会话，模拟「停用时会话没被删干净」的竞态。
+    //    `authenticate` 里的状态复查必须把它拦下，而且返回 403 + 原因——
+    //    没有这一层的话，任何一条漏网的会话都是全功能可用的。
+    let orphan = "orphan-token-for-disabled-user";
+    sqlx::query("INSERT INTO sessions (token, username, created_at) VALUES (?, ?, ?)")
+        .bind(orphan)
+        .bind(user)
+        .bind(now)
+        .execute(store.pool())
+        .await
+        .expect("插入残留会话");
+    let res2 = get(&app, "/data/_usage", Some(orphan)).await;
+    assert_eq!(res2.status, StatusCode::FORBIDDEN, "残留会话必须被状态复查兜住");
+    let msg = res2.json()["error"].as_str().unwrap_or_default().to_string();
+    assert!(msg.contains("违反使用条款"), "停用原因要如实告诉用户，实际：{msg}");
+
+    // ④ 用**正确口令**重新登录同样被拒——只删会话是挡不住这一步的
+    let relogin =
+        post(&app, "/auth/login", json!({"username": user, "password": "s3cret"}), None).await;
+    assert_eq!(relogin.status, StatusCode::FORBIDDEN, "停用后重新登录必须被拒");
+    assert!(relogin.json()["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("违反使用条款"));
+
+    // ⑤ 口令错误时仍是 401：不知道口令的人不该从这个接口探出「某账号被停用了」
+    let wrong =
+        post(&app, "/auth/login", json!({"username": user, "password": "wrong"}), None).await;
+    assert_eq!(
+        wrong.status,
+        StatusCode::UNAUTHORIZED,
+        "口令不对时不能泄露账号状态，否则这个接口就成了封禁探测器"
+    );
+
+    // 恢复后一切照旧
+    store
+        .set_user_status(user, user_status::ACTIVE, "", now)
+        .await
+        .expect("恢复应当成功");
+    let ok = post(&app, "/auth/login", json!({"username": user, "password": "s3cret"}), None).await;
+    assert_eq!(ok.status, StatusCode::OK, "恢复后必须能重新登录");
+    let t2 = ok.json()["token"].as_str().unwrap_or_default().to_string();
+    assert_eq!(get(&app, "/data/_usage", Some(&t2)).await.status, StatusCode::OK);
+
+    store.close().await;
+}
+
+/// 停用状态**不能被 upsert 洗掉**。
+///
+/// `create_user` 是 set 语义（同名覆盖），如果 `ON DUPLICATE KEY UPDATE` 里带上了
+/// `status`，那么任何一条重建账号的路径都会把封禁悄悄解除。这条性质必须钉死。
+#[tokio::test]
+async fn upsert_does_not_clear_disabled_status() {
+    use itools_sync::store::{user_status, UserRecord};
+
+    let user = "rust_disabled_upsert";
+    let (_app, store) = harness(user).await;
+    let now = itools_sync::system_clock()();
+
+    let hashed = itools_sync::auth::hash_password("s3cret");
+    store
+        .create_user(&UserRecord {
+            username: user.to_string(),
+            password_hash: hashed.hash.clone(),
+            salt: hashed.salt.clone(),
+            created_at: now,
+            status: user_status::ACTIVE.to_string(),
+            disabled_at: 0,
+            disabled_reason: String::new(),
+        })
+        .await
+        .expect("建账号");
+    store
+        .set_user_status(user, user_status::DISABLED, "测试封禁", now)
+        .await
+        .expect("停用");
+
+    // 再 upsert 一次（模拟任何重建账号的路径）
+    store
+        .create_user(&UserRecord {
+            username: user.to_string(),
+            password_hash: hashed.hash,
+            salt: hashed.salt,
+            created_at: now,
+            status: user_status::ACTIVE.to_string(),
+            disabled_at: 0,
+            disabled_reason: String::new(),
+        })
+        .await
+        .expect("再次 upsert");
+
+    let u = store.get_user(user).await.expect("查账号").expect("账号应存在");
+    assert_eq!(
+        u.status,
+        user_status::DISABLED,
+        "upsert 绝不能把停用状态洗掉，否则封禁形同虚设"
+    );
+    assert_eq!(u.disabled_reason, "测试封禁", "原因也要保住");
+
+    store.delete_user(user).await.expect("清理");
+    store.close().await;
+}
+
+/// 不存在的用户停用时返回 false，而不是假装成功。
+#[tokio::test]
+async fn disabling_missing_user_reports_false() {
+    use itools_sync::store::user_status;
+
+    let (_app, store) = harness("rust_no_such_user").await;
+    let now = itools_sync::system_clock()();
+    let changed = store
+        .set_user_status("rust_no_such_user", user_status::DISABLED, "x", now)
+        .await
+        .expect("查询本身应当成功");
+    assert!(!changed, "对不存在的账号必须如实返回 false");
+    store.close().await;
+}
+
+// ---------------------------------------------------------------- 请求指标
+
+/// 指标落库必须是**累加**而不是覆盖。
+///
+/// 一个小时会被 flush 几十次，如果 upsert 写成覆盖，这一小时最后只会剩最后一分钟的数据——
+/// 而面板上看起来一切正常，这种错最难发现。
+#[tokio::test]
+async fn traffic_upsert_accumulates() {
+    use itools_sync::metrics::{Agg, Key};
+
+    let (_app, store) = harness("rust_traffic_probe").await;
+    // 用一个远离真实数据的历史小时桶，避免与并行用例或真实流量互相干扰
+    let hour = 1_000_000 * 3_600;
+    let key = Key {
+        hour_ts: hour,
+        route: "/__test__/traffic".to_string(),
+        method: "GET".to_string(),
+        status_class: 2,
+    };
+    // 起点干净
+    store.purge_metrics_before(hour + 1).await.expect("清理历史桶");
+
+    let first = Agg {
+        reqs: 3,
+        bytes_in: 100,
+        bytes_out: 200,
+        dur_sum_ms: 30,
+        dur_max_ms: 20,
+        b_fast: 3,
+        ..Default::default()
+    };
+    let second = Agg {
+        reqs: 2,
+        bytes_in: 50,
+        bytes_out: 60,
+        dur_sum_ms: 500,
+        dur_max_ms: 400,
+        b_slow: 2,
+        ..Default::default()
+    };
+    store.upsert_traffic(&[(key.clone(), first)]).await.expect("第一次落库");
+    store.upsert_traffic(&[(key.clone(), second)]).await.expect("第二次落库");
+
+    let row: (i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT reqs, bytes_in, bytes_out, dur_sum_ms, dur_max_ms, b_fast, b_slow
+         FROM traffic_hourly WHERE hour_ts = ? AND route = ? AND method = ? AND status_class = ?",
+    )
+    .bind(key.hour_ts)
+    .bind(&key.route)
+    .bind(&key.method)
+    .bind(key.status_class as i8)
+    .fetch_one(store.pool())
+    .await
+    .expect("应当查到落库的行");
+
+    assert_eq!(row.0, 5, "请求数必须累加（3+2）");
+    assert_eq!(row.1, 150, "入字节累加");
+    assert_eq!(row.2, 260, "出字节累加");
+    assert_eq!(row.3, 530, "耗时总和累加");
+    assert_eq!(row.4, 400, "最大耗时取更大的那个，不是相加");
+    assert_eq!(row.5, 3, "延迟桶累加");
+    assert_eq!(row.6, 2);
+
+    // 清理：把这个测试桶删掉，别留在库里污染面板
+    store.purge_metrics_before(hour + 1).await.expect("清理测试数据");
+    store.close().await;
+}
+
+/// 插件下载量同样累加，并按插件名分开。
+#[tokio::test]
+async fn plugin_downloads_upsert_accumulates_per_plugin() {
+    let (_app, store) = harness("rust_downloads_probe").await;
+    let hour = 1_000_001 * 3_600;
+    store.purge_metrics_before(hour + 1).await.expect("清理历史桶");
+
+    store
+        .upsert_plugin_downloads(&[
+            ((hour, "probe-a".to_string()), 2),
+            ((hour, "probe-b".to_string()), 5),
+        ])
+        .await
+        .expect("第一次落库");
+    store
+        .upsert_plugin_downloads(&[((hour, "probe-a".to_string()), 3)])
+        .await
+        .expect("第二次落库");
+
+    let a: i64 = sqlx::query_scalar(
+        "SELECT downloads FROM plugin_downloads_hourly WHERE hour_ts = ? AND name = ?",
+    )
+    .bind(hour)
+    .bind("probe-a")
+    .fetch_one(store.pool())
+    .await
+    .expect("应当查到 probe-a");
+    let b: i64 = sqlx::query_scalar(
+        "SELECT downloads FROM plugin_downloads_hourly WHERE hour_ts = ? AND name = ?",
+    )
+    .bind(hour)
+    .bind("probe-b")
+    .fetch_one(store.pool())
+    .await
+    .expect("应当查到 probe-b");
+
+    assert_eq!(a, 5, "同一插件累加（2+3）");
+    assert_eq!(b, 5, "另一个插件不受影响");
+
+    store.purge_metrics_before(hour + 1).await.expect("清理测试数据");
     store.close().await;
 }

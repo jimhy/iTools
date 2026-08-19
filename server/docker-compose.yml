@@ -45,6 +45,10 @@ services:
       SYNC_PACKAGES_DIR: /app/data/packages
       SYNC_ADMIN_USERS: ${SYNC_ADMIN_USERS:-}
       SYNC_MAX_UPLOAD_MB: ${SYNC_MAX_UPLOAD_MB:-32}
+      # ---- 请求指标（运营控制台的流量面板数据源）----
+      SYNC_METRICS: ${SYNC_METRICS:-true}
+      SYNC_METRICS_FLUSH_SEC: ${SYNC_METRICS_FLUSH_SEC:-60}
+      SYNC_METRICS_RETENTION_DAYS: ${SYNC_METRICS_RETENTION_DAYS:-180}
       SYNC_SUBMIT_COOLDOWN_SEC: ${SYNC_SUBMIT_COOLDOWN_SEC:-60}
       # ⚠ key 只来自 .env；没配的话提审只做机械校验、不会自动上线（服务照常启动，日志里会警告）
       ITOOLS_LLM_BASE_URL: ${ITOOLS_LLM_BASE_URL:-https://punkcodeai.myverse.site}

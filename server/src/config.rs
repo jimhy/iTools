@@ -108,6 +108,19 @@ pub struct MarketConfig {
     pub submit_cooldown_sec: i64,
 }
 
+/// 请求指标采集（按小时聚合后落库）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetricsConfig {
+    /// 是否采集。关掉后一条都不记，运营面板会如实显示「未采集」——
+    /// 而不是显示一条零线让人以为没有流量。
+    pub enabled: bool,
+    /// 内存聚合落库的间隔（秒）。进程崩溃最多丢这么长时间的数据。
+    pub flush_sec: u64,
+    /// 保留期（天）。指标是可再生的运营数据，过期即删；
+    /// 这与审计日志不同，后者是安全资产、什么时候清必须由人显式决定。
+    pub retention_days: i64,
+}
+
 /// TLS 证书（可选）：配了则以 HTTPS 起服务，直接在本进程做 TLS 终止。
 ///
 /// 用于「frps 纯 TCP 透传 → 本机做 TLS」的部署（证书/私钥文件路径走环境变量，源码零明文）。
@@ -132,6 +145,8 @@ pub struct Config {
     pub market: MarketConfig,
     /// 官网静态站与安装包下载（都可选，目录不存在则不挂载）
     pub site: SiteConfig,
+    /// 请求指标采集
+    pub metrics: MetricsConfig,
     /// 是否允许「首次登录即自动注册」（自托管默认开）
     pub allow_register: bool,
     /// 会话令牌随机字节数
@@ -336,6 +351,15 @@ impl Config {
             submit_cooldown_sec: num_env(get(env, "SYNC_SUBMIT_COOLDOWN_SEC"), 60.0, 0.0, 86_400.0) as i64,
         };
 
+        let metrics = MetricsConfig {
+            enabled: bool_env(get(env, "SYNC_METRICS"), true),
+            // 下限 5 秒：再短就成了变相的每请求写库；上限 1 小时，
+            // 再长的话「崩溃丢一个窗口」的代价就太大了。
+            flush_sec: num_env(get(env, "SYNC_METRICS_FLUSH_SEC"), 60.0, 5.0, 3_600.0) as u64,
+            retention_days: num_env(get(env, "SYNC_METRICS_RETENTION_DAYS"), 180.0, 1.0, 3_650.0)
+                as i64,
+        };
+
         // 官网静态站与安装包目录。**空串等于没配**（容器里 env 常被写成空字符串），
         // 目录存不存在留到 routes 那边判断——config 只负责解析意图，不碰文件系统，
         // 这样单测不必造目录。
@@ -366,6 +390,7 @@ impl Config {
             llm,
             market,
             site,
+            metrics,
             allow_register: bool_env(get(env, "SYNC_ALLOW_REGISTER"), true),
             token_bytes: plain_num(get(env, "SYNC_TOKEN_BYTES"), 32),
             logger: bool_env(get(env, "SYNC_LOG"), true),

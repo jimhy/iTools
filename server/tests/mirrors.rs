@@ -222,6 +222,8 @@ fn serve(registry: Arc<MirrorRegistry>, env: &[(&str, &str)]) -> Router {
         mirror_limiter: Arc::new(limiter),
         market,
         market_limiter: Arc::new(market_limiter),
+        // 测试里不采集指标：既不需要，也免得单测之间通过内存聚合互相影响
+        metrics: Arc::new(itools_sync::metrics::Metrics::new(false)),
         clock,
     }))
 }

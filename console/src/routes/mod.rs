@@ -219,11 +219,17 @@ fn protected_routes() -> Router<Arc<AppState>> {
         .route("/api/stats/series", get(stats::series))
         .route("/api/stats/storage", get(stats::storage))
         .route("/api/stats/namespaces", get(stats::namespaces))
+        // 流量（数据源是主服务的 traffic_hourly / plugin_downloads_hourly）
+        .route("/api/stats/traffic", get(stats::traffic))
+        .route("/api/stats/traffic/routes", get(stats::traffic_routes))
+        .route("/api/stats/downloads", get(stats::downloads))
         // 终端用户
         .route("/api/users", get(users::list))
         .route("/api/users/{username}", get(users::detail))
         .route("/api/users/{username}", delete(users::remove))
         .route("/api/users/{username}/kick", post(users::kick))
+        .route("/api/users/{username}/disable", post(users::disable))
+        .route("/api/users/{username}/enable", post(users::enable))
         // 插件（只读）
         .route("/api/plugins", get(plugins::list_market))
         .route("/api/plugins/{name}", get(plugins::market_detail))

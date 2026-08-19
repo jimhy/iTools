@@ -117,10 +117,15 @@ export const Api = {
   series: (metric, points, bucket) => api.get('/api/stats/series', { metric, points, bucket }),
   storage: (limit) => api.get('/api/stats/storage', { limit }),
   namespaces: () => api.get('/api/stats/namespaces'),
+  traffic: (points, bucket) => api.get('/api/stats/traffic', { points, bucket }),
+  trafficRoutes: (hours, limit) => api.get('/api/stats/traffic/routes', { hours, limit }),
+  downloads: (days, limit) => api.get('/api/stats/downloads', { days, limit }),
 
   users: (params) => api.get('/api/users', params),
   user: (name) => api.get(`/api/users/${encodeURIComponent(name)}`),
   kickUser: (name) => api.post(`/api/users/${encodeURIComponent(name)}/kick`),
+  disableUser: (name, reason) => api.post(`/api/users/${encodeURIComponent(name)}/disable`, { reason }),
+  enableUser: (name) => api.post(`/api/users/${encodeURIComponent(name)}/enable`),
   deleteUser: (name) => api.del(`/api/users/${encodeURIComponent(name)}`, { confirm: name }),
 
   plugins: (params) => api.get('/api/plugins', params),

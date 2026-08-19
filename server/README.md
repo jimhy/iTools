@@ -47,6 +47,9 @@ SYNC_DB_PASSWORD=yourpass cargo run --release   # 默认监听 http://127.0.0.1:
 | `SYNC_MIRROR_RATE_MAX` | `120` | `/api/mirrors` 每 IP 每窗口最大请求数（0 = 关闭限流） |
 | `SYNC_MIRROR_RATE_WINDOW_SEC` | `60` | 限流窗口长度（秒） |
 | `SYNC_TLS_CERT_FILE` / `SYNC_TLS_KEY_FILE` | — | 两个都设置则本进程直接起 HTTPS、自行终结 TLS |
+| `SYNC_METRICS` | `true` | 请求指标采集开关。关掉后一条都不记，运营控制台会如实显示「未采集」 |
+| `SYNC_METRICS_FLUSH_SEC` | `60` | 内存聚合落库的间隔（秒，夹紧到 5~3600）。进程崩溃最多丢这么长时间的指标 |
+| `SYNC_METRICS_RETENTION_DAYS` | `180` | 指标保留期（天）。超期的小时桶每天清一次 |
 
 > 测试分两组：
 > - `cargo test --lib --test mirrors`——单元测试 + 镜像源/探测测试，**不连数据库、不打外网**
@@ -59,6 +62,45 @@ SYNC_DB_PASSWORD=yourpass cargo run --release   # 默认监听 http://127.0.0.1:
 > docker run --name itools-mariadb-test -e MARIADB_ROOT_PASSWORD=roottest -e MARIADB_DATABASE=itools -p 3307:3306 -d mariadb:11
 > SYNC_DB_PORT=3307 SYNC_DB_USER=root SYNC_DB_PASSWORD=roottest SYNC_DB_NAME=itools cargo test
 > ```
+
+## 账号停用
+
+`users.status` 为 `disabled` 的账号会在**两个地方**被拦下，缺一不可：
+
+- `POST /auth/login`：口令**正确**之后才判停用，返回 **403** 与停用原因。
+  顺序很重要——先判停用的话，这个接口就成了「查某账号是否被封」的探测器。
+  口令不对仍是 401，不泄露账号状态。
+- `authenticate`（全服唯一鉴权收口）：每个受保护请求实时复查，停用返回 **403** + 原因。
+
+停用动作本身（`MariaDbStore::set_user_status`）会在**同一个事务**里改状态并删掉该用户的
+全部会话，所以主路径上旧令牌拿到的是 401（会话不存在）；`authenticate` 里的复查是**兜底**，
+挡住任何因竞态残留的会话。
+
+> 只删会话是**挡不住**封禁的：对方用原口令重新登录就又进来了。只拦登录也不够：
+> 已经发出去的令牌还在。两处都做才是完整的封停——集成测试
+> `disabled_account_is_blocked_on_every_path` 把这四条路径逐一钉死了。
+
+停用与恢复由**运营控制台**（`console/`）操作，它直连同一个库；服务端这边只负责读这个状态。
+`create_user` 的 upsert **刻意不含 `status`**，任何重建账号的路径都不会把封禁悄悄解除。
+
+## 请求指标
+
+开启 `SYNC_METRICS`（默认开）后，一个中间件会统计每个请求的
+**路由模板 / 方法 / 状态码大类 / 耗时 / 请求与响应字节数**，在内存里按小时聚合，
+每 `SYNC_METRICS_FLUSH_SEC` 秒累加落进 `traffic_hourly`；插件包下载另按插件名落
+`plugin_downloads_hourly`。运营控制台的流量面板读这两张表。
+
+几条刻意的取舍：
+
+- **路由模板不是具体路径**：`/api/market/package/{name}`、`/download/*`、`/*site`。
+  用具体路径会让基数跟着插件数、版本数无限增长。代价是看不出「哪个安装包下得最多」。
+- **不算 P95**：只记四个延迟桶（<50ms / <200ms / <1s / ≥1s）加总和与最大值。
+  从桶里插值出的百分位是估算，而 avg 与 max 是精确的——与其给一个看着精确其实是猜的数，
+  不如给精确的分布。
+- **字节数取 body 的确定长度**，分块传输的响应记 0：**少记而不是猜**。
+- **进程崩溃会丢最后一个未落库的窗口**（最多 `SYNC_METRICS_FLUSH_SEC` 秒）。
+  这一点在控制台面板上有标注，不会让人以为那段时间真的没有流量。
+- 不记 IP、不记 User-Agent、不记请求体内容。
 
 ### 容器部署
 

@@ -1,9 +1,11 @@
 //! 终端用户（iTools 云账号）管理。
 //!
-//! 「禁用账号」**不在这里**——主服务的 `users` 表没有禁用位、登录与鉴权也不读任何
-//! 这样的列，控制台单方面加一列改一改是彻底无效的。前端对应的开关是禁用状态并写明
-//! 原因，`/api/whoami` 的 `capabilities.usersStatusColumn` 就是那个开关的依据。
-//! 等主服务补上禁用位与拦截逻辑，这里再加端点。
+//! 「停用账号」是**真实生效**的：写 `users.status` 并清掉全部会话，
+//! 主服务的 `login` 与 `authenticate` 都实时读这一列（见 `server/src/routes.rs`）。
+//!
+//! 但它**依赖主服务的版本**：老版本的库里没有 `status` 列，那时写进去也没人读。
+//! 所以每个停用端点都先查 `Caps::users_status`，不支持就返回 501 并说明原因——
+//! 绝不写一条谁也不读的数据然后回一个「成功」。前端同样据这个能力位决定开关是否可点。
 
 use std::sync::Arc;
 
@@ -61,7 +63,11 @@ pub async fn list(State(st): State<Arc<AppState>>, Query(q): Query<ListQuery>) -
                 "recordCount": u.record_count,
                 "bytes": u.bytes,
                 "pluginCount": u.plugin_count,
+                "status": u.status,
+                "disabledReason": u.disabled_reason,
             })).collect::<Vec<_>>(),
+            // 前端据此决定「停用」开关是可点还是置灰+说明
+            "capabilities": { "userDisable": st.store.caps().users_status },
         }))
         .into_response(),
         Err(e) => store_err("查询用户列表", e),
@@ -95,9 +101,15 @@ pub async fn detail(State(st): State<Arc<AppState>>, Path(username): Path<String
         Err(e) => return store_err("查询用户插件", e),
     };
 
+    let status_info = st.store.user_status(&username).await.unwrap_or(None);
+
     Json(json!({
         "username": row.username,
         "createdAt": row.created_at,
+        "status": row.status,
+        "disabledReason": row.disabled_reason,
+        "disabledAt": status_info.as_ref().map(|(_, at, _)| *at).unwrap_or(0),
+        "capabilities": { "userDisable": st.store.caps().users_status },
         "sessionCount": row.session_count,
         "lastSessionAt": row.last_session_at,
         "recordCount": row.record_count,
@@ -235,6 +247,150 @@ pub async fn remove(
                 )
                 .await;
             store_err("删除用户", e)
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct DisableBody {
+    /// 停用原因。**必填**——它会原样展示给被停用的用户，
+    /// 让人一句话不给就被挡在门外，是最差的产品行为。
+    #[serde(default)]
+    reason: String,
+}
+
+/// 停用账号。
+///
+/// 这是**真实生效**的封停：写 `users.status` 并在同一事务里清掉该用户全部会话。
+/// 主服务的 `login` 与 `authenticate` 都会实时读这一列（见 `server/src/routes.rs`），
+/// 所以对方既进不来、也无法用原口令重新登录。
+///
+/// 主服务没打补丁（库里没有 `status` 列）时**直接拒绝**并说明原因，
+/// 而不是写一条谁也不读的数据然后回一个「成功」。
+pub async fn disable(
+    State(st): State<Arc<AppState>>,
+    Extension(ClientIp(ip)): Extension<ClientIp>,
+    Extension(session): Extension<ConsoleSession>,
+    Path(username): Path<String>,
+    Json(body): Json<DisableBody>,
+) -> Response {
+    if let Err(r) = require_write(&session) {
+        return r;
+    }
+    if !st.store.caps().users_status {
+        return super::err(
+            axum::http::StatusCode::NOT_IMPLEMENTED,
+            "unsupported",
+            "云同步服务端还没有停用位（users.status 列不存在）。请先把服务端更新到支持停用的版本——\
+             在那之前写这个状态没有任何效果，所以这里不会假装成功。",
+        );
+    }
+
+    let reason = body.reason.trim().to_string();
+    if reason.is_empty() {
+        return super::bad_request("必须填写停用原因（会原样展示给被停用的用户）");
+    }
+    if reason.chars().count() > 500 {
+        return super::bad_request("停用原因太长（最多 500 字）");
+    }
+
+    let now = st.now();
+    match st
+        .store
+        .set_user_status(&username, "disabled", &reason, now)
+        .await
+    {
+        Ok(true) => {
+            st.store
+                .audit(
+                    &session.username,
+                    action::USER_DISABLE,
+                    &username,
+                    &reason,
+                    &ip,
+                    true,
+                    now,
+                )
+                .await;
+            Json(json!({
+                "ok": true,
+                "note": "已停用。该账号的全部登录态立即失效，且无法用原口令重新登录——服务端的登录与鉴权都会实时读这个状态。"
+            }))
+            .into_response()
+        }
+        Ok(false) => not_found("用户不存在"),
+        Err(e) => {
+            st.store
+                .audit(
+                    &session.username,
+                    action::USER_DISABLE,
+                    &username,
+                    "数据库错误",
+                    &ip,
+                    false,
+                    now,
+                )
+                .await;
+            store_err("停用账号", e)
+        }
+    }
+}
+
+/// 恢复被停用的账号。
+///
+/// 恢复**不会**把之前删掉的会话找回来——用户需要重新登录一次。
+/// 这是删会话那个设计的必然结果，返回体里如实说明。
+pub async fn enable(
+    State(st): State<Arc<AppState>>,
+    Extension(ClientIp(ip)): Extension<ClientIp>,
+    Extension(session): Extension<ConsoleSession>,
+    Path(username): Path<String>,
+) -> Response {
+    if let Err(r) = require_write(&session) {
+        return r;
+    }
+    if !st.store.caps().users_status {
+        return super::err(
+            axum::http::StatusCode::NOT_IMPLEMENTED,
+            "unsupported",
+            "云同步服务端还没有停用位（users.status 列不存在）。",
+        );
+    }
+
+    let now = st.now();
+    match st.store.set_user_status(&username, "active", "", now).await {
+        Ok(true) => {
+            st.store
+                .audit(
+                    &session.username,
+                    action::USER_ENABLE,
+                    &username,
+                    "",
+                    &ip,
+                    true,
+                    now,
+                )
+                .await;
+            Json(json!({
+                "ok": true,
+                "note": "已恢复。停用时清掉的会话不会自动找回，该用户需要重新登录一次。"
+            }))
+            .into_response()
+        }
+        Ok(false) => not_found("用户不存在"),
+        Err(e) => {
+            st.store
+                .audit(
+                    &session.username,
+                    action::USER_ENABLE,
+                    &username,
+                    "数据库错误",
+                    &ip,
+                    false,
+                    now,
+                )
+                .await;
+            store_err("恢复账号", e)
         }
     }
 }

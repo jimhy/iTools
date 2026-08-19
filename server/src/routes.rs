@@ -26,21 +26,24 @@ use std::path::Path as StdPath;
 use std::sync::Arc;
 
 use axum::body::Bytes;
-use axum::extract::{ConnectInfo, FromRequestParts, Path, State};
+use axum::extract::{ConnectInfo, FromRequestParts, MatchedPath, Path, Request, State};
 use axum::http::request::Parts;
 use axum::http::{header, HeaderMap, StatusCode};
+use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use http_body::Body as _;
 use serde_json::{json, Value};
 use tower_http::services::ServeDir;
 
 use crate::config::Config;
 use crate::market::MarketService;
+use crate::metrics::Metrics;
 use crate::mirrors::{matches_etag, MirrorRegistry};
 use crate::proxy::client_ip;
 use crate::ratelimit::SlidingWindowLimiter;
-use crate::store::{MariaDbStore, UserRecord, WireRecord};
+use crate::store::{user_status, MariaDbStore, SessionCheck, UserRecord, WireRecord};
 use crate::{auth, Clock};
 
 pub struct AppState {
@@ -51,7 +54,64 @@ pub struct AppState {
     /// 插件市场与提审。与镜像端点一样是公开可读的，所以另配一个限流桶。
     pub market: Arc<MarketService>,
     pub market_limiter: Arc<SlidingWindowLimiter>,
+    /// 请求指标的内存聚合。由 `main.rs` 的定时任务落库。
+    pub metrics: Arc<Metrics>,
     pub clock: Clock,
+}
+
+/// 把请求归一成**路由模板**，作为指标的聚合维度。
+///
+/// 绝不能用具体路径：`/api/market/package/deskbox`、`/download/iTools-1.5.4.exe`
+/// 这类路径的基数会跟着插件数、版本数无限增长，几天就能把指标表撑成垃圾场。
+///
+/// `/download/*` 与官网静态站没有 `MatchedPath`（它们走 `nest_service` / `fallback_service`），
+/// 这里按前缀显式归一。代价是看不出「哪个安装包下得最多」——那需要单独计数，
+/// 与插件下载量的做法一样，第一版没做。
+fn metrics_route(req: &Request) -> String {
+    let path = req.uri().path();
+    if path == "/download" || path.starts_with("/download/") {
+        return "/download/*".to_string();
+    }
+    if let Some(mp) = req.extensions().get::<MatchedPath>() {
+        return mp.as_str().to_string();
+    }
+    "/*site".to_string()
+}
+
+/// 请求体字节数。取 `Content-Length`，没有就记 0——**少记而不是猜**。
+fn request_bytes(headers: &HeaderMap) -> i64 {
+    headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(0)
+        .max(0)
+}
+
+/// 请求指标中间件。**挂在整个 Router 上**，所有端点（含静态站）都会经过。
+///
+/// 它只做三件事：计时、读两个长度、往内存里加一笔。没有任何 IO，
+/// 因此对请求延迟的影响可以忽略——落库是另一个任务干的事。
+pub async fn track_metrics(
+    State(st): State<Arc<AppState>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let started = std::time::Instant::now();
+    let method = req.method().as_str().to_string();
+    let route = metrics_route(&req);
+    let bytes_in = request_bytes(req.headers());
+
+    let res = next.run(req).await;
+
+    let dur_ms = started.elapsed().as_millis().min(i64::MAX as u128) as i64;
+    let status = res.status().as_u16();
+    // 响应体长度取 size_hint 的**确定值**：分块传输（流式）拿不到确切长度，记 0 而不是估。
+    let bytes_out = res.body().size_hint().exact().unwrap_or(0).min(i64::MAX as u64) as i64;
+
+    st.metrics
+        .record(&route, &method, status, dur_ms, bytes_in, bytes_out, (st.clock)());
+    res
 }
 
 /// 组装路由表。
@@ -389,6 +449,10 @@ async fn login(State(st): State<Arc<AppState>>, body: Bytes) -> Response {
                 password_hash: hashed.hash,
                 salt: hashed.salt,
                 created_at: (st.clock)(),
+                // 新注册的账号一律正常。停用只能由维护者显式施加。
+                status: user_status::ACTIVE.to_string(),
+                disabled_at: 0,
+                disabled_reason: String::new(),
             };
             if let Err(e) = st.store.create_user(&user).await {
                 return store_error("创建用户", e);
@@ -396,8 +460,16 @@ async fn login(State(st): State<Arc<AppState>>, body: Bytes) -> Response {
             tracing::info!("[auth] {username} 首登自动注册");
         }
         Some(user) => {
+            let status = user.status.clone();
+            let reason = user.disabled_reason.clone();
             if !verify_password_off_thread(password, user.salt, user.password_hash).await {
                 return error_response(StatusCode::UNAUTHORIZED, "用户名或密码错误");
+            }
+            // 口令**正确**之后才告知停用状态。反过来的话，这个接口就成了
+            // 「查某个账号是否被封」的探测器——不知道口令的人不该拿到这个信息。
+            if !user_status::is_active(&status) {
+                tracing::info!("[auth] 已停用的账号尝试登录");
+                return error_response(StatusCode::FORBIDDEN, &disabled_message(&reason));
             }
         }
     }
@@ -641,6 +713,11 @@ async fn market_package(
         }
     };
 
+    // 下载量按插件名单独计数。总请求量由中间件按路由模板统计，那里拿不到具体插件名
+    // （模板是 `/api/market/package/{name}`），要看「哪个插件被下得最多」只能在这里记。
+    // 只在真的把包读出来之后才记，404 与读盘失败都不算下载。
+    st.metrics.record_download(&name, (st.clock)());
+
     let mut res = bytes.into_response();
     res.headers_mut().insert(
         header::CONTENT_TYPE,
@@ -788,10 +865,31 @@ fn as_millis(v: &Value) -> Option<i64> {
 }
 
 /// 校验 Bearer 令牌并返回用户名；失败时直接给出 401 响应。
+/// 停用账号的对外文案。原因为空时给一句兜底，不留一个没头没尾的「已被停用」。
+fn disabled_message(reason: &str) -> String {
+    let reason = reason.trim();
+    if reason.is_empty() {
+        "该账号已被停用，请联系管理员".to_string()
+    } else {
+        format!("该账号已被停用：{reason}")
+    }
+}
+
+/// 全服唯一的鉴权收口。
+///
+/// 除了校验会话，还**复查账号是否被停用**——只在停用时删会话是不够的：
+/// 那只影响当时已存在的会话，对方仍能用原口令重新登录。登录那边也拦了，两处合起来才完整。
+///
+/// 停用返回 **403**（不是 401）：客户端据此能区分「登录过期，重登即可」与
+/// 「账号被停用，重登也没用」。都返回 401 的话，用户会一直重登还不知道为什么进不去。
 async fn authenticate(st: &AppState, headers: &HeaderMap) -> Result<String, Response> {
-    match st.store.session_user(&bearer(headers)).await {
-        Ok(Some(u)) => Ok(u),
-        Ok(None) => Err(error_response(
+    match st.store.session_user_active(&bearer(headers)).await {
+        Ok(SessionCheck::Active(u)) => Ok(u),
+        Ok(SessionCheck::Disabled { reason, .. }) => Err(error_response(
+            StatusCode::FORBIDDEN,
+            &disabled_message(&reason),
+        )),
+        Ok(SessionCheck::Invalid) => Err(error_response(
             StatusCode::UNAUTHORIZED,
             "未授权（需有效会话令牌）",
         )),
