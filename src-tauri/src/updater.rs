@@ -154,6 +154,28 @@ const USER_AGENT: &str = "itools-updater";
 /// 还挂着别的 exe 附件（调试符号、便携版…），裸后缀会把它们误当安装包下下来运行。
 const INSTALLER_SUFFIX: &str = "-setup.exe";
 
+/// 调起安装器时传的参数。**少了 `/UPDATE` 就会变成「先卸载再安装」**。
+///
+/// # 为什么必须带这几个（2026-08-19 从生成的 installer.nsi 里逐条核对）
+///
+/// 不带参数时安装器走完整交互向导，其中 `PageReinstall` 在「已装旧版」的场景下会让用户
+/// 二选一，而**默认选中的是「安装前卸载」**——于是每次更新都要看一遍卸载流程。
+///
+/// - `/UPDATE`：模板里写着 `In update mode, always proceeds without uninstalling`，
+///   直接**覆盖安装**，跳过那个页面，也跳过 WebView2 的重复检测。
+///   注意它不会放过历史 MSI：`PageLeaveReinstall` 里 `$WixMode = 1` 的判断排在
+///   `$UpdateMode` 前面，存量 MSI 该卸的照卸（那份必须卸，否则两条卸载记录）。
+/// - `/P`（passive）：不渲染选择页，只留一个进度条并在装完自动关闭。
+///   顺带补一件事：passive / silent 下模板会主动 `CreateOrUpdateDesktopShortcut`，
+///   桌面图标不会在更新后消失。
+/// - `/R`：装完由安装器把 iTools 重新拉起来（`.onInstSuccess` 里只在 passive/silent
+///   下识别这个标志）。没有它，用户点完「立即更新」就只剩一个装完自动关掉的窗口，
+///   得自己再去点一次图标。
+///
+/// ⚠ 改这几个参数前先重读 `src-tauri/target/release/nsis/x64/installer.nsi`——
+/// 它们是 Tauri NSIS 模板的内部约定，不是稳定公开接口（同 `windows/hooks.nsh` 的告诫）。
+const INSTALLER_ARGS: &[&str] = &["/P", "/UPDATE", "/R"];
+
 /// 远端最新版本信息（归一化后返回给前端）。字段以 camelCase 序列化，方便前端使用。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -750,13 +772,14 @@ fn shutdown_mft_daemon_before_install() -> Result<(), String> {
         .to_string())
 }
 
-/// 命令：启动 NSIS 安装向导（交互式）并退出当前 app。
+/// 命令：调起 NSIS 安装器**覆盖安装**（[`INSTALLER_ARGS`]）并退出当前 app。
 ///
 /// 退出是必须的：升级要替换正在运行的 `itools.exe`，进程占用会导致文件锁。
-/// 安装程序为独立进程，不受本 app 退出影响。安装完由用户手动打开新版本。
+/// 安装程序为独立进程，不受本 app 退出影响；`/R` 会让它在装完后把 iTools 拉起来。
 ///
-/// 直接运行 setup.exe、**不带 `/S`**：静默安装会让用户在毫无反馈的情况下等着，
-/// 也剥夺了改安装目录的机会。交互式向导与用户从官网下载安装的体验完全一致。
+/// **不再走完整交互向导**：那条路的 `PageReinstall` 在升级场景下默认选中「安装前卸载」，
+/// 于是每次更新都要看一遍卸载流程（用户实际反馈）。参数的逐条依据见 [`INSTALLER_ARGS`]。
+/// 也不用 `/S` 全静默——那会让用户在毫无反馈的情况下干等，`/P` 保留了进度条。
 ///
 /// `async fn` + `spawn_blocking`：本命令会等提权守护退出（最长 3 秒，见
 /// [`shutdown_mft_daemon_before_install`]），而同步命令的函数体是内联进 IPC handler
@@ -788,6 +811,7 @@ fn launch_blocking(path: &str) -> Result<(), String> {
     }
     shutdown_mft_daemon_before_install()?;
     std::process::Command::new(path)
+        .args(INSTALLER_ARGS)
         .spawn()
         .map_err(|e| format!("启动安装程序失败: {e}"))?;
     Ok(())
@@ -797,8 +821,21 @@ fn launch_blocking(path: &str) -> Result<(), String> {
 mod tests {
     use super::{
         ensure_channel_url, is_valid_installer, safe_installer_filename, selfhost_endpoint,
-        version_gt, CHANNEL, CHANNEL_MARK, FALLBACK_INSTALLER_FILE,
+        version_gt, CHANNEL, CHANNEL_MARK, FALLBACK_INSTALLER_FILE, INSTALLER_ARGS,
     };
+
+    /// 更新安装必须是**覆盖安装**：少了 `/UPDATE`，NSIS 的 PageReinstall 在升级场景下
+    /// 默认选中「安装前卸载」，用户每次更新都要走一遍卸载流程。
+    ///
+    /// 这三个参数是 Tauri NSIS 模板的内部约定，改动前要重读生成的 installer.nsi。
+    #[test]
+    fn installer_is_launched_as_an_in_place_update() {
+        assert!(INSTALLER_ARGS.contains(&"/UPDATE"), "少了它就会先卸载再安装");
+        assert!(INSTALLER_ARGS.contains(&"/P"), "少了它会弹出完整交互向导");
+        assert!(INSTALLER_ARGS.contains(&"/R"), "少了它更新完不会自动重启 iTools");
+        // /S 是全静默：装的过程没有任何反馈，刻意不用
+        assert!(!INSTALLER_ARGS.contains(&"/S"), "不做无反馈的全静默安装");
+    }
 
     /// 发行线指纹必须与 [`CHANNEL`] 一致，且格式就是发布脚本 grep 的那个串。
     ///
