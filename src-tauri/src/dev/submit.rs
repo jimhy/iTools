@@ -75,6 +75,15 @@ pub struct PublishStatus {
     pub revoked: bool,
     #[serde(default)]
     pub revoked_reason: String,
+    /// 下架方：`""` 未下架 | `owner` 作者自己下架 | `admin` 平台维护者下架。
+    /// 维护者下的架作者收不回来，前端据此把「恢复上架」按钮禁用并写明原因。
+    pub revoked_by: String,
+    /// 市场条目上记录的作者账号（服务端确认的提审账号）；空串 = 还没上线过 / 没查到。
+    pub online_author: String,
+    /// 当前登录的账号是不是这个市场条目的作者 —— 只有作者本人能下架它。
+    ///
+    /// 未登录、没查到条目时一律为 `false`：宁可让按钮禁用，也不画一个点了才知道行不行的控件。
+    pub is_owner: bool,
     /// 本地版本是否高于线上（可以提交新版本）。
     pub can_submit_new_version: bool,
     /// 该插件最近一次提审记录；`None` = 从没提交过。
@@ -286,6 +295,27 @@ pub fn get_submission(token: &str, id: &str) -> Result<Submission, String> {
         .map_err(|e| format!("读取服务端响应失败: {e}"))?;
     serde_json::from_str(&text)
         .map_err(|e| format!("提审详情解析失败: {e}（原文前 200 字：{}）", head(&text)))
+}
+
+/// 下架 / 恢复一个已上线的插件。
+///
+/// 服务端只认**插件名**（市场条目的主键），并在那边做鉴权：作者只能动自己的插件，
+/// 且收不回维护者下的架。客户端不做任何本地推断，鉴权结论一律以服务端的回应为准。
+pub fn set_revoked(token: &str, name: &str, revoked: bool, reason: &str) -> Result<(), String> {
+    let ep = endpoint()?;
+    let tk = require_token(token)?;
+    let url = format!("{ep}/api/market/revoke");
+    crate::http::post(&url)
+        .timeout(std::time::Duration::from_secs(QUERY_TIMEOUT_SECS))
+        .set("Authorization", &format!("Bearer {tk}"))
+        .send_json(serde_json::json!({
+            "name": name,
+            "revoked": revoked,
+            "reason": reason,
+        }))
+        .map_err(|e| describe(if revoked { "下架插件" } else { "恢复上架" }, e))?;
+    ilog!("[iTools] 已{}插件 {name}", if revoked { "下架" } else { "恢复上架" });
+    Ok(())
 }
 
 fn head(s: &str) -> String {

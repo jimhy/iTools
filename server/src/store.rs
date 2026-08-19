@@ -96,9 +96,20 @@ const CREATE_MARKET: &str = "\
     entry LONGTEXT NOT NULL,
     revoked TINYINT NOT NULL DEFAULT 0,
     revoked_reason TEXT NOT NULL,
+    revoked_by VARCHAR(16) NOT NULL DEFAULT '',
     published_at BIGINT NOT NULL,
     updated_at BIGINT NOT NULL
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
+
+/// 老库补列：`revoked_by` 是后加的（作者自助下架时需要区分「谁下的架」）。
+///
+/// 用 information_schema 先判存在再 `ALTER`，而不是靠 `ADD COLUMN IF NOT EXISTS`：
+/// 后者是 MariaDB 的扩展语法，MySQL 上直接是语法错误，一条兼容性差异就能让服务启动不了。
+const MIGRATIONS: &[(&str, &str, &str)] = &[(
+    "market_entries",
+    "revoked_by",
+    "ALTER TABLE market_entries ADD COLUMN revoked_by VARCHAR(16) NOT NULL DEFAULT ''",
+)];
 
 /// 一条提审单。
 #[derive(Debug, Clone, PartialEq)]
@@ -122,6 +133,14 @@ pub struct Submission {
     pub updated_at: i64,
 }
 
+/// `market_entries.revoked_by` 的取值。
+pub mod revoked_by {
+    /// 作者把自己的插件下架了（可自行恢复，也可提交新版本重新上线）。
+    pub const OWNER: &str = "owner";
+    /// 维护者下架（处置）。作者**不能**自行恢复，也不能靠提交新版本绕过。
+    pub const ADMIN: &str = "admin";
+}
+
 /// 一条已上线的市场条目。
 #[derive(Debug, Clone, PartialEq)]
 pub struct MarketRow {
@@ -134,6 +153,10 @@ pub struct MarketRow {
     pub entry: String,
     pub revoked: bool,
     pub revoked_reason: String,
+    /// 谁下的架：`""` 未下架 | [`revoked_by::OWNER`] 作者自助下架 | [`revoked_by::ADMIN`] 维护者下架。
+    ///
+    /// 这一列是**安全字段**：维护者下架属于处置，作者不能自己恢复、也不能靠提交新版本绕过。
+    pub revoked_by: String,
     pub published_at: i64,
     pub updated_at: i64,
 }
@@ -169,6 +192,20 @@ impl MariaDbStore {
 
         for ddl in [CREATE_USERS, CREATE_SESSIONS, CREATE_DATA, CREATE_SUBMISSIONS, CREATE_MARKET] {
             pool.execute(ddl).await?;
+        }
+        for (table, column, ddl) in MIGRATIONS {
+            let exists: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM information_schema.columns
+                 WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?",
+            )
+            .bind(table)
+            .bind(column)
+            .fetch_one(&pool)
+            .await?;
+            if exists == 0 {
+                pool.execute(*ddl).await?;
+                tracing::info!("[store] 已为 {table} 补上 {column} 列");
+            }
         }
         Ok(Self { pool })
     }
@@ -463,19 +500,24 @@ impl MariaDbStore {
     // ---------- 市场条目 ----------
 
     /// 发布 / 更新一个条目（同名覆盖，`owner` 与 `published_at` 保持首次值）。
+    ///
+    /// 上新版本会清掉**作者自己下的架**（作者下架后再发一版即视为重新上线），
+    /// 但**维护者下的架不会被清**：否则「被维护者下架」只要提交一版就能绕过，那道处置形同虚设。
+    /// 三个 `IF(revoked_by = 'admin', …)` 里读到的都是旧行的值 —— `revoked_by` 自己排在最后赋值。
     pub async fn publish_entry(&self, e: &MarketRow) -> Result<(), sqlx::Error> {
         sqlx::query(
             "INSERT INTO market_entries
                (name, owner, version, content_hash, package_file, entry, revoked, revoked_reason,
-                published_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, 0, '', ?, ?)
+                revoked_by, published_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, 0, '', '', ?, ?)
              ON DUPLICATE KEY UPDATE
                version = VALUES(version),
                content_hash = VALUES(content_hash),
                package_file = VALUES(package_file),
                entry = VALUES(entry),
-               revoked = 0,
-               revoked_reason = '',
+               revoked = IF(revoked_by = ?, revoked, 0),
+               revoked_reason = IF(revoked_by = ?, revoked_reason, ''),
+               revoked_by = IF(revoked_by = ?, revoked_by, ''),
                updated_at = VALUES(updated_at)",
         )
         .bind(&e.name)
@@ -486,6 +528,9 @@ impl MariaDbStore {
         .bind(&e.entry)
         .bind(e.published_at)
         .bind(e.updated_at)
+        .bind(revoked_by::ADMIN)
+        .bind(revoked_by::ADMIN)
+        .bind(revoked_by::ADMIN)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -494,7 +539,7 @@ impl MariaDbStore {
     pub async fn get_entry(&self, name: &str) -> Result<Option<MarketRow>, sqlx::Error> {
         let row = sqlx::query(
             "SELECT name, owner, version, content_hash, package_file, entry, revoked, revoked_reason,
-                    published_at, updated_at FROM market_entries WHERE name = ?",
+                    revoked_by, published_at, updated_at FROM market_entries WHERE name = ?",
         )
         .bind(name)
         .fetch_optional(&self.pool)
@@ -506,7 +551,7 @@ impl MariaDbStore {
     pub async fn list_entries(&self) -> Result<Vec<MarketRow>, sqlx::Error> {
         let rows = sqlx::query(
             "SELECT name, owner, version, content_hash, package_file, entry, revoked, revoked_reason,
-                    published_at, updated_at FROM market_entries ORDER BY updated_at DESC",
+                    revoked_by, published_at, updated_at FROM market_entries ORDER BY updated_at DESC",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -514,18 +559,24 @@ impl MariaDbStore {
     }
 
     /// 下架 / 恢复。下架原因会原样展示给已安装该插件的用户，所以调用方必须给出真实原因。
+    ///
+    /// `by` 是下架方（[`revoked_by::OWNER`] / [`revoked_by::ADMIN`]），恢复时一律清空。
+    /// **鉴权不在这一层**：谁能对哪个插件做这件事，由 `market::MarketService::set_revoked` 判。
     pub async fn set_revoked(
         &self,
         name: &str,
         revoked: bool,
         reason: &str,
+        by: &str,
         now_ms: i64,
     ) -> Result<bool, sqlx::Error> {
         let res = sqlx::query(
-            "UPDATE market_entries SET revoked = ?, revoked_reason = ?, updated_at = ? WHERE name = ?",
+            "UPDATE market_entries SET revoked = ?, revoked_reason = ?, revoked_by = ?, updated_at = ?
+             WHERE name = ?",
         )
         .bind(if revoked { 1 } else { 0 })
-        .bind(reason)
+        .bind(if revoked { reason } else { "" })
+        .bind(if revoked { by } else { "" })
         .bind(now_ms)
         .bind(name)
         .execute(&self.pool)
@@ -570,6 +621,7 @@ fn row_to_entry(r: sqlx::mysql::MySqlRow) -> MarketRow {
         entry: r.get("entry"),
         revoked: r.get::<i8, _>("revoked") != 0,
         revoked_reason: r.get("revoked_reason"),
+        revoked_by: r.get("revoked_by"),
         published_at: r.get("published_at"),
         updated_at: r.get("updated_at"),
     }

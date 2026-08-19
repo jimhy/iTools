@@ -134,6 +134,10 @@ pub struct MarketEntry {
     pub revoked: bool,
     #[serde(default)]
     pub revoked_reason: String,
+    /// 下架方：`""` 未下架 | `owner` 作者自己下架 | `admin` 平台维护者下架。
+    /// 开发者中心据此决定「恢复上架」按钮能不能点——维护者下的架，作者收不回来。
+    #[serde(default)]
+    pub revoked_by: String,
     #[serde(default)]
     pub added_at: String,
     #[serde(default)]

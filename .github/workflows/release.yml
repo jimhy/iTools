@@ -36,7 +36,10 @@ jobs:
       - name: 安装前端依赖
         run: npm ci
 
-      - name: 构建并发布（Windows 安装包）
+      # 先发**草稿**：草稿不出现在 releases/latest，客户端的更新检查取不到它。
+      # 这样后面那步反向校验才有意义——校验没过的包不会有任何用户下载到。
+      - name: 构建并发布（Windows 安装包，草稿）
+        id: tauri
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -60,9 +63,59 @@ jobs:
 
             本 Release 由 GitHub Actions 自动构建，附件为 Windows 安装程序（NSIS `-setup.exe`）。
 
+            ### ⚠️ 这是**开源版**，与官网下载的版本是两条独立的发行线
+
+            开源版**不含任何服务端地址**：账号登录、数据同步、插件市场都会显示「云端未接入」，
+            需要你自己在「设置 → 网络 → 服务器地址」填一台自建服务器（服务端源码在 `server/`）。
+            它的自动更新也只从这里取包，永远不会把你切到官网版。
+
+            **如果你用的是官网下载的版本，请不要装这个包**——装上之后云服务接入会失效，
+            且之后的自动更新会一直停在开源版。请到官网下载页更新。
+
             **从 1.5.2 及更早版本升级**：那些版本是用 .msi 装的，与现在的安装程序互不识别，
             同时装会在「应用和功能」里留下两条 iTools、桌面上出现两个图标。
             新的安装程序会在安装前自动卸掉旧的 .msi 那份；若它提示清理失败，
             请先到「应用和功能」手动卸载 iTools 后再安装。
-          releaseDraft: false
+          releaseDraft: true
           prerelease: false
+
+      # ---- 发行线反向校验：GitHub 线只许发开源包 ----
+      #
+      # 上面那步是「不设置 ITOOLS_DEFAULT_ENDPOINT」，那是一个**消极**保证：
+      # 哪天 secret 被加回 env、或 runner 环境里恰好有同名变量，产出的包就会带上运维拓扑
+      # 与官网端点发到公开 release 上，而外观完全正常、没有一步会发现。
+      #
+      # 指纹由 src-tauri/src/updater.rs 的 CHANNEL_MARK 在编译期定死：注入过端点就是
+      # selfhost，没注入就是 oss。搜它能给出绝对判据——这条流水线并不知道端点是什么
+      # （secret 刻意不给它），没法靠搜一个自己不知道的值来证明「我没带上它」。
+      - name: 校验产物是开源线（不含服务端地址）
+        shell: bash
+        run: |
+          exe=src-tauri/target/release/itools.exe
+          if [ ! -f "$exe" ]; then
+            echo "✗ 找不到裸 exe $exe，无法校验发行线" >&2
+            exit 1
+          fi
+          # 校验裸 exe 而不是 NSIS 安装包：安装包被 LZMA 整体压缩，grep 任何字符串都搜不到，
+          # 于是无论有没有串线都会得出「不含」的结论（同 scripts/publish.sh 里的那条注释）。
+          if grep -a -q -F 'ITOOLS_RELEASE_CHANNEL=selfhost' "$exe"; then
+            echo "✗ 这个产物自报 selfhost：构建时带上了 ITOOLS_DEFAULT_ENDPOINT。" >&2
+            echo "  官网线的包不能发到 GitHub —— 它含服务端地址，且会让开源用户默认连到自建服务器。" >&2
+            echo "  请从本流水线的 env 里移除该变量后重跑。草稿 release 已保留，确认后手动删除。" >&2
+            exit 1
+          fi
+          if grep -a -q -F 'ITOOLS_RELEASE_CHANNEL=oss' "$exe"; then
+            echo "✓ 产物自报 oss（开源线）"
+          else
+            echo "✗ 产物里找不到发行线指纹，无法确认它属于哪条线，不予发布。" >&2
+            echo "  多半是 updater.rs 的 log_channel() 那行日志被删了（CHANNEL_MARK 因此被优化掉）。" >&2
+            exit 1
+          fi
+
+      # 校验通过才转正式：到这一步 releases/latest 才会指向它，老客户端也才拿得到。
+      - name: 转为正式发布
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.inputs.version || github.ref_name }}
+        run: gh release edit "$TAG" --draft=false --latest

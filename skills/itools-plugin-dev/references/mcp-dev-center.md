@@ -141,6 +141,7 @@ claude          # 或 codex
 | `preflight(id)` | 发布前自检，会**现查线上版本**比对版本号 | 提审前 |
 | `submit(id)` | 打包上传、提交审核 | 自检通过后 |
 | `publish_status(id)` | 本地版本 / 线上版本 / 审核结论与历史 | 提审后查结果，被驳回时里面是模型给出的逐条理由 |
+| `revoke(id, revoked?, reason)` | 把已上线的插件从市场下架 / 恢复上架 | **只有用户明确要求才调**：它对线上真实用户生效。`reason` 下架时必填、会原样展示给已装该插件的用户；已装的那份不会被自动卸载。维护者下架的（`revokedBy=admin`）作者恢复不了 |
 
 ### 典型闭环
 
@@ -154,6 +155,8 @@ read_logs               → 看调用与报错；有问题就改 → rescan → 
 preflight               → 自检；版本号被拦时返回里的 suggestedVersion 可直接用
 submit → publish_status → 提审与查结论
 ```
+
+上线之后如果用户要把插件撤下来：`revoke(id, reason="…")` 下架，`revoke(id, revoked=false)` 恢复上架。这条不属于日常闭环，用户没提就别碰。
 
 ### 边界（照实说，别替它吹）
 

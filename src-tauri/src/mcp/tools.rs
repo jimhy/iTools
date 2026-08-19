@@ -51,6 +51,9 @@ run_plugin 跑一次 → read_logs 看调用与报错 → 反复改 → **升 ve
 
 ════════════════════════════════════════════════════════
 
+下架：revoke 把已上线的插件撤下市场（reason 必填、会展示给用户），revoked=false 恢复；
+**它对线上用户生效，调用前必须先征得用户同意**。
+
 其它：issues 里 level=error 必须先修（warn 不影响调试但发布前要清）；改了文件要 rescan；
 提审需用户已登录云账号；审核由大模型读代码判断（恶意行为、权限是否名副其实、描述是否相符），不是走过场。"#;
 
@@ -168,6 +171,22 @@ pub fn list() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "revoke",
+            "description": "把已上线的插件从市场下架（默认），或传 revoked=false 恢复上架。                ⚠ 对**线上真实用户**生效：别人装不到、已装的收不到更新（已装的那份不会被自动卸载）。                **调用前必须先征得用户明确同意**，别自行判断就替他下架。                只有作者本人能动；publish_status 的 revokedBy=admin 表示是维护者下架的，作者恢复不了。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "插件 id" },
+                    "revoked": { "type": "boolean", "description": "true=下架（默认），false=恢复上架" },
+                    "reason": {
+                        "type": "string",
+                        "description": "下架原因，下架时必填；会原样展示给已装该插件的用户"
+                    }
+                },
+                "required": ["id"]
+            }
+        }),
+        json!({
             "name": "publish_status",
             "description": "查一个插件的发布状态：本地版本、已上线版本、最近一次提审的结论与历史。\
                 被驳回时 message 里是模型给出的逐条理由（照着改就行）。\
@@ -242,6 +261,7 @@ pub fn call(app: &AppHandle, name: &str, args: &Value) -> Result<String, String>
         "preflight" => preflight(app, args),
         "submit" => submit(app, args),
         "publish_status" => publish_status(app, args),
+        "revoke" => revoke(app, args),
         other => Err(format!("没有这个工具：{other}")),
     }
 }
@@ -404,6 +424,42 @@ fn submit(app: &AppHandle, args: &Value) -> Result<String, String> {
     }))
 }
 
+/// 下架 / 恢复上架。**鉴权全在服务端**（作者本人才能动，且收不回维护者下的架），
+/// 这里只把插件 id 翻成插件名、拦住「下架不写原因」这种服务端必拒的请求。
+///
+/// 这是本套工具里唯一一个**对线上真实用户生效**的写操作，所以工具描述里明确要求
+/// 先征得用户同意——AI 不该因为自己判断「插件有问题」就替作者把插件撤下来。
+fn revoke(app: &AppHandle, args: &Value) -> Result<String, String> {
+    let id = arg_str(args, "id");
+    let info = find_plugin(app, &id)?;
+    // 缺省是下架：这个工具的主用途就是下架，但恢复要显式传 false，不会被误解成默认动作
+    let revoked = args.get("revoked").and_then(Value::as_bool).unwrap_or(true);
+    let reason = arg_str(args, "reason");
+    if revoked && reason.is_empty() {
+        return Err(
+            "下架必须给出 reason：它会原样展示给已经装了这个插件的用户。请先问用户下架原因是什么。"
+                .to_string(),
+        );
+    }
+    let account = app.state::<crate::account::AccountStore>();
+    let token = account.token().ok_or_else(|| {
+        "下架插件需要用户先登录 iTools 云账号（管理中心 →「我的账号」）——插件的归属挂在账号上。"
+            .to_string()
+    })?;
+
+    crate::dev::submit::set_revoked(&token, &info.name, revoked, &reason)?;
+    pretty(&json!({
+        "name": info.name,
+        "revoked": revoked,
+        "reason": if revoked { reason } else { String::new() },
+        "hint": if revoked {
+            "已下架：插件市场不再分发它，别的用户装不到、已装的用户也收不到更新。             已经装了它的用户**不会**被自动卸载。想重新上线：调 revoke 传 revoked=false 恢复，             或者升 version 后重新 submit。"
+        } else {
+            "已恢复上架：市场重新分发这个插件当前的线上版本。用 publish_status 复核状态。"
+        },
+    }))
+}
+
 fn publish_status(app: &AppHandle, args: &Value) -> Result<String, String> {
     let id = arg_str(args, "id");
     let info = find_plugin(app, &id)?;
@@ -411,14 +467,14 @@ fn publish_status(app: &AppHandle, args: &Value) -> Result<String, String> {
     let token = account.token().unwrap_or_default();
 
     let mut errors: Vec<String> = Vec::new();
-    let (online, revoked, revoked_reason) = match crate::plugin::market::fetch_index() {
+    let (online, revoked, revoked_reason, revoked_by) = match crate::plugin::market::fetch_index() {
         Ok(index) => match index.plugins.into_iter().find(|p| p.name == info.name) {
-            Some(e) => (Some(e.version), e.revoked, e.revoked_reason),
-            None => (None, false, String::new()),
+            Some(e) => (Some(e.version), e.revoked, e.revoked_reason, e.revoked_by),
+            None => (None, false, String::new(), String::new()),
         },
         Err(e) => {
             errors.push(format!("读取市场索引失败：{e}"));
-            (None, false, String::new())
+            (None, false, String::new(), String::new())
         }
     };
     let history = match crate::dev::submit::list_submissions(&token) {
@@ -434,6 +490,9 @@ fn publish_status(app: &AppHandle, args: &Value) -> Result<String, String> {
         "onlineVersion": online,
         "revoked": revoked,
         "revokedReason": revoked_reason,
+        // owner = 作者自己下的架（可以调 revoke 传 revoked=false 恢复，或升版本重新提交）；
+        // admin = 平台维护者下的架（作者恢复不了，提交新版本也不会重新上线）
+        "revokedBy": revoked_by,
         "latest": history.first(),
         "history": history,
         // 查不到就说查不到，绝不用「没有记录」把失败盖过去
@@ -484,6 +543,51 @@ mod tests {
         }
     }
 
+    /// 工具清单与 [`call`] 的分发必须一一对应：列出来却没接线的工具，
+    /// 对模型就是一个「看着能调、调了报没这个工具」的假控件。
+    ///
+    /// `call` 需要 `AppHandle`、单测里造不出来，所以这里比对的是**分发表里的名字**
+    /// （从源码里取，改了 match 分支就会飘红）。
+    #[test]
+    fn every_listed_tool_is_dispatched() {
+        const DISPATCHED: &[&str] = &[
+            "read_docs",
+            "list_plugins",
+            "rescan",
+            "run_plugin",
+            "read_logs",
+            "preflight",
+            "submit",
+            "publish_status",
+            "revoke",
+        ];
+        let listed: Vec<String> = list()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap_or_default().to_string())
+            .collect();
+        for name in &listed {
+            assert!(DISPATCHED.contains(&name.as_str()), "{name} 列出来了却没在 call 里接线");
+        }
+        for name in DISPATCHED {
+            assert!(listed.iter().any(|l| l == name), "{name} 接了线却没列进 tools/list");
+        }
+    }
+
+    /// 下架是唯一一个对线上真实用户生效的写操作，说明里必须写清它的边界与「先问用户」。
+    #[test]
+    fn revoke_tool_declares_its_real_effect() {
+        let tools = list();
+        let t = tools
+            .iter()
+            .find(|t| t["name"] == json!("revoke"))
+            .expect("revoke 工具应该在清单里");
+        let desc = t["description"].as_str().unwrap_or_default();
+        assert!(desc.contains("同意"), "必须要求先征得用户同意：{desc}");
+        assert!(desc.contains("不会被自动卸载") || desc.contains("不会自动卸载"), "{desc}");
+        let props = &t["inputSchema"]["properties"];
+        assert!(props["revoked"].is_object() && props["reason"].is_object());
+    }
+
     #[test]
     fn bump_patch_suggests_a_strictly_higher_version() {
         // 「只讲规则不给值」等于让 AI 自己解析版本号，多一个出错的地方
@@ -520,9 +624,12 @@ mod tests {
     fn resident_context_stays_small() {
         let tools_json = serde_json::to_string(&list()).expect("工具清单必然可序列化");
         let total = SERVER_INSTRUCTIONS.chars().count() + tools_json.chars().count();
-        // 3800 是在 2026-08 精简后（实测 3740）之上留的一点余量，不是拍脑袋的整数。
+        // 3800 → 4400：2026-08 加 revoke 工具后实测 4329。这 589 字符没法挪走——
+        // 它是唯一一个对线上真实用户生效的写操作，「先征得用户同意」「已装的不会被自动卸载」
+        // 「维护者下架作者恢复不了」这三条必须待在常驻说明里：挪进 skill 就意味着
+        // 没装 skill 的客户端读不到，AI 可能替作者把插件撤下来。描述已按最短写法压过一轮。
         assert!(
-            total <= 3800,
+            total <= 4400,
             "常驻上下文涨到 {total} 字符，超过 3800 的护栏。\
              先考虑把内容挪进 skill 或工具返回值，而不是直接抬高上限。"
         );

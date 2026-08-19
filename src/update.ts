@@ -52,6 +52,9 @@ function renderUpdate(info: UpdateInfo): void {
   head.append(
     el("div", "up-title", `发现新版本 v${info.latestVersion}`),
     el("div", "up-meta", `当前 v${info.currentVersion} → v${info.latestVersion}`),
+    // 包从哪来必须写出来：官网版与开源版是两条独立发行线，装错线会让云服务接入失效。
+    // 后端已经拦死了跨线下载，界面这一行是让用户**看得见**自己在哪条线上。
+    el("div", "up-meta", `来源：${info.source}`),
   );
 
   const notes = el("div", "up-notes");

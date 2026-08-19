@@ -291,6 +291,14 @@ export async function renderSettings(root: HTMLElement, ctx: AdminCtx): Promise<
   const statusRow = h("div", { class: "set-row" }, updateStatus);
   statusRow.style.display = "none";
 
+  // 发行线：官网版与开源版是两条**独立**的发行线，更新路径不交叉。
+  // 把它明明白白摆在界面上——用户装了哪一份、更新会从哪拿包，不该靠猜。
+  const channelDesc = h("div", { class: "set-row-desc", text: "正在读取发行线…" });
+  const channelRow = h("div", { class: "set-row" }, channelDesc);
+  // 被跨线覆盖过时的告警（如官网版被开源版顶掉，云服务接入会静默失效）
+  const channelWarn = h("div", { class: "info-box info-box-warn" });
+  channelWarn.style.display = "none";
+
   let latestUrl = "";
   let latestInstaller: string | null = null;
 
@@ -355,7 +363,7 @@ export async function renderSettings(root: HTMLElement, ctx: AdminCtx): Promise<
   function renderResult(info: UpdateInfo): void {
     versionBadge.textContent = `v${info.currentVersion}`;
     if (info.hasUpdate) {
-      updateStatus.textContent = `发现新版本 v${info.latestVersion}，建议更新`;
+      updateStatus.textContent = `发现新版本 v${info.latestVersion}，建议更新（来自 ${info.source}）`;
       latestUrl = info.releaseUrl;
       latestInstaller = info.installerUrl;
       downloadBtn.style.display = "";
@@ -386,6 +394,15 @@ export async function renderSettings(root: HTMLElement, ctx: AdminCtx): Promise<
     .updateStatus()
     .then((st) => {
       versionBadge.textContent = `v${st.currentVersion}`;
+      channelDesc.textContent = st.channelDesc;
+      if (st.channelSwitchNote) {
+        // 跨线覆盖是静默发生的，不主动说没人会发现——这里必须显眼
+        channelWarn.replaceChildren(
+          h("div", { text: "这台机器的安装来源变过" }),
+          h("div", { class: "info-box-detail", text: st.channelSwitchNote }),
+        );
+        channelWarn.style.display = "";
+      }
       if (st.checkedAt === 0) {
         // 启动后还没到第一次自动检查（20 秒）——如实说，不要让人以为「检查过且没新版」
         updateStatus.textContent = "启动后还没有自动检查过，可点右侧手动检查。";
@@ -403,7 +420,10 @@ export async function renderSettings(root: HTMLElement, ctx: AdminCtx): Promise<
         updateStatus.textContent += `（${when}自动检查）`;
       }
     })
-    .catch((err) => console.error("update_status failed", err));
+    .catch((err) => {
+      console.error("update_status failed", err);
+      channelDesc.textContent = "没能读到发行线信息（更新源未知）。";
+    });
 
   // ---------- 运行日志 ----------
   // iTools 会把运行日志写成一个文件（release 在 %LOCALAPPDATA%\itools\itools.log，2MB 轮转），
@@ -452,6 +472,8 @@ export async function renderSettings(root: HTMLElement, ctx: AdminCtx): Promise<
     "关于 iTools",
     row("当前版本", "每小时自动检查一次新版本；也可以随时手动检查", versionBadge, checkBtn, downloadBtn, installBtn),
     statusRow,
+    channelRow,
+    channelWarn,
     logRow,
   );
 

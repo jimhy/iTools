@@ -216,6 +216,7 @@ mod tests {
             screenshots: vec![],
             revoked: false,
             revoked_reason: String::new(),
+            revoked_by: String::new(),
             added_at: String::new(),
             audit_report: String::new(),
             file_count: 3,
@@ -229,7 +230,7 @@ mod tests {
                 "contentHash", "reviewedBy", "publishedAt", "updatedAt", "sizeBytes", "readme",
                 "category", "tags", "keywords", "permissions", "permissionReasons",
                 "minAppVersion", "license", "homepage", "sourceRepo", "screenshots", "revoked",
-                "revokedReason", "addedAt", "auditReport", "fileCount",
+                "revokedReason", "revokedBy", "addedAt", "auditReport", "fileCount",
             ],
             "索引由**自建服务端**生成（server/src/market.rs 的 render_index），不再来自 GitHub registry。\
              package 是相对下载路径，客户端拼上自己配置的服务器地址；reviewedBy 是审核模型名，\
@@ -616,8 +617,14 @@ mod tests {
                 info: None,
                 error: None,
                 current_version: "1.1.1".into(),
+                channel: "selfhost".into(),
+                channel_desc: "官网版 · 更新来自 官网（https://example.com:7101）".into(),
+                channel_switch_note: None,
             },
-            &["checkedAt", "info", "error", "currentVersion"],
+            &[
+                "checkedAt", "info", "error", "currentVersion", "channel", "channelDesc",
+                "channelSwitchNote",
+            ],
             "本地瞬时快照，不发请求。**checkedAt=0 表示本次启动后还没检查过**——             界面不许把它渲染成「已是最新」，那正是「自动检查看起来没生效」的根源：             没有新版时角标不显示，于是「查过了」与「没查成」长得一模一样。",
         );
 
@@ -631,12 +638,13 @@ mod tests {
                 release_url: String::new(),
                 release_notes: String::new(),
                 installer_url: None,
+                source: "GitHub Release（jimhy/iTools）".into(),
             },
             &[
                 "latestVersion", "currentVersion", "hasUpdate", "releaseUrl", "releaseNotes",
-                "installerUrl",
+                "installerUrl", "source",
             ],
-            "installerUrl 为 null 时前端不该提供「立即更新」（只能去 release 页手动下）。\
+            "source 是这条结果来自哪个更新源（官网 / GitHub），界面要展示它——             官网版与开源版是两条独立发行线，用户点更新前就该知道包从哪来。             installerUrl 为 null 时前端不该提供「立即更新」（只能去 release 页手动下）。\
              它是 NSIS 的 `-setup.exe` 直链——本项目只发这一种安装包，见 updater.rs 模块注释。",
         );
 
@@ -913,18 +921,23 @@ mod tests {
                 online_version: Some("1.0.0".into()),
                 revoked: false,
                 revoked_reason: String::new(),
+                revoked_by: String::new(),
+                online_author: "a".into(),
+                is_owner: true,
                 can_submit_new_version: true,
                 latest: None,
                 history: vec![],
                 error: None,
             },
             &[
-                "name", "localVersion", "onlineVersion", "revoked", "revokedReason",
-                "canSubmitNewVersion", "latest", "history", "error",
+                "name", "localVersion", "onlineVersion", "revoked", "revokedReason", "revokedBy",
+                "onlineAuthor", "isOwner", "canSubmitNewVersion", "latest", "history", "error",
             ],
             "onlineVersion 来自市场索引（服务端的真相源），不是本地记的。\
              error 非空时其余字段可能不完整，UI 必须如实展示这条 —— \
-             把「查不到」渲染成「没有记录」是两件完全不同的事。",
+             把「查不到」渲染成「没有记录」是两件完全不同的事。\
+             revokedBy 取值为 空串 | owner | admin：admin 下的架作者收不回来，UI 必须把「恢复上架」按钮禁用并写明原因，\
+             而不是让它点了吃一记 403。isOwner=false（未登录 / 不是这个条目的作者）时下架按钮同样禁用。",
         );
 
         freeze(

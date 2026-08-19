@@ -3293,6 +3293,13 @@ select {
 .dev-textarea:focus {
   border-color: var(--accent);
 }
+/* 下架原因：比 JSON 编辑框矮得多，也不需要等宽字体（写的是给用户看的一句话） */
+.dev-revoke-reason {
+  height: 76px;
+  font-family: inherit;
+  font-size: 13px;
+  margin-bottom: 10px;
+}
 .dev-modal-hint {
   font-size: 12px;
   margin-top: 8px;

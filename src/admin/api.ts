@@ -301,6 +301,12 @@ export const devPreflight = (id: string) => invoke<Preflight>("dev_preflight", {
 export const devSubmitPlugin = (id: string) => invoke<Submission>("dev_submit_plugin", { id });
 /** 查一条提审单的详情（含模型裁决原文）。 */
 export const devSubmissionDetail = (id: string) => invoke<Submission>("dev_submission_detail", { id });
+/** 下架自己的插件 / 把自己下架的恢复上架（`revoked=false`）。
+ *
+ *  鉴权在服务端：只有市场条目的作者本人（或平台维护者）能动，且作者**收不回**维护者下的架。
+ *  下架原因会原样展示给已安装该插件的用户，所以下架时必填。 */
+export const devRevokePlugin = (id: string, revoked: boolean, reason: string) =>
+  invoke<void>("dev_revoke_plugin", { id, revoked, reason });
 
 // ---------- 插件市场 ----------
 /** 拉取市场列表。失败**不 reject**：会带着 error + 本地缓存返回，由 UI 如实呈现。

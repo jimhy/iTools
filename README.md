@@ -72,11 +72,30 @@ npm install
 npm run tauri dev
 ```
 
-## 打包
+## 打包与发行线
 
 ```bash
 npm run tauri build      # 生成 Windows 安装程序（NSIS -setup.exe）
 ```
+
+iTools 有**两条互不交叉的发行线**，产物不同，更新路径也各走各的：
+
+| | 开源版 | 官网版 |
+|---|---|---|
+| 从哪来 | GitHub Release（`.github/workflows/release.yml`） | 官网下载（`scripts/publish.sh`） |
+| 服务端地址 | **不含**——云服务显示「云端未接入」，需自己在「设置 → 网络」填 | 构建期注入 `ITOOLS_DEFAULT_ENDPOINT` |
+| 检查更新 | GitHub `releases/latest` | 官网 `/api/download/latest` |
+| 产物指纹 | `ITOOLS_RELEASE_CHANNEL=oss` | `ITOOLS_RELEASE_CHANNEL=selfhost` |
+
+隔离是四道，缺一道就有一条串线路径（细节见 `src-tauri/src/updater.rs` 模块注释）：
+
+1. **构建期**：两条流水线各自 grep 裸 exe 里的指纹做**反向校验**——发错线直接失败；
+2. **检查更新**：按编译期常量分流，不看用户填的同步地址；
+3. **下载与跳转**：`download_update` / `open_release_page` 只接受本发行线的 URL，
+   另一条线的地址一律拒绝（装错线会让云服务接入失效）；
+4. **安装后**：启动时比对上次运行的发行线，被跨线覆盖过就在日志与「关于」页如实提示。
+
+自己克隆编译（不注入端点）得到的就是开源版，行为与 GitHub Release 一致。
 
 ## 交互速查
 

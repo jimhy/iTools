@@ -182,6 +182,11 @@ pub fn run() {
             let db = std::sync::Arc::new(db::Db::open_default());
             // 设置最先加载：搜索索引与视觉效果都依赖它
             let settings_store = SettingsStore::load(db.clone());
+            // 发行线：先记录再比对，两条线（官网版 / 开源版）的更新路径彻底分开，
+            // 被跨线覆盖过就在日志与界面上如实说明——它是静默发生的，不主动说没人会发现。
+            updater::init_channel_record();
+            updater::log_channel();
+
             let current = settings_store.get();
             // 用户手填的云端地址（设置里读；env/debug 兜底见 account::cloud_endpoint）装入运行期。
             account::set_user_endpoint(&current.sync_endpoint);
@@ -538,6 +543,7 @@ pub fn run() {
             dev::commands::dev_preflight,
             dev::commands::dev_submit_plugin,
             dev::commands::dev_submission_detail,
+            dev::commands::dev_revoke_plugin,
             mcp::mcp_status,
             ai_clients::ai_clients_status,
             ai_clients::ai_client_install,

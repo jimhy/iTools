@@ -224,6 +224,7 @@
     "readme",
     "reviewedBy",
     "revoked",
+    "revokedBy",
     "revokedReason",
     "screenshots",
     "sizeBytes",
@@ -338,11 +339,14 @@
     "canSubmitNewVersion",
     "error",
     "history",
+    "isOwner",
     "latest",
     "localVersion",
     "name",
+    "onlineAuthor",
     "onlineVersion",
     "revoked",
+    "revokedBy",
     "revokedReason"
   ],
   "SearchItem": [
@@ -406,9 +410,13 @@
     "installerUrl",
     "latestVersion",
     "releaseNotes",
-    "releaseUrl"
+    "releaseUrl",
+    "source"
   ],
   "UpdateStatus": [
+    "channel",
+    "channelDesc",
+    "channelSwitchNote",
     "checkedAt",
     "currentVersion",
     "error",

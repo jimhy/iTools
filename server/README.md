@@ -339,7 +339,7 @@ server/
 | `GET /api/plugins/submissions/{id}` | Bearer | 单条详情，含**模型裁决原文** |
 | `GET /api/market/index` | **无需认证** | 市场索引（带 ETag、按 IP 限流） |
 | `GET /api/market/package/{name}` | **无需认证** | 已上线插件包 zip |
-| `POST /api/market/revoke` | Bearer（限 `SYNC_ADMIN_USERS`） | 下架 / 恢复，`{name, revoked?, reason}` |
+| `POST /api/market/revoke` | Bearer（**作者本人**或 `SYNC_ADMIN_USERS`） | 下架 / 恢复，`{name, revoked?, reason}`；作者只能动自己的插件，且**收不回维护者下的架** |
 
 ### 审核是两段
 
@@ -397,7 +397,7 @@ server/
 # 2. 复制 .env.example 为 .env，至少填这两项：
 #      SYNC_DB_PASSWORD=<自己设一个强口令>
 #      ITOOLS_LLM_API_KEY=<审核模型的 key>
-#    再按需填 SYNC_ADMIN_USERS=<你的账号名>（不填就没人能下架插件）
+#    再按需填 SYNC_ADMIN_USERS=<你的账号名>（不填时只有插件作者能下架自己的插件，没人能下架别人的）
 # 3. 起服务
 docker compose up -d --build
 ```

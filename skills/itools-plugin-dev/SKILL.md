@@ -241,6 +241,8 @@ read_logs                    → 看它发出的调用与报错
 （改 plugin.json 的 version —— iTools 不会替你升，已上线过的必须严格高于线上版本）
 preflight(id)                → 自检；版本号被拦时返回的 suggestedVersion 可直接用
 submit(id) → publish_status  → 提审、查结论；被驳回时里面是模型给出的逐条理由
+revoke(id, reason="…")      → 把已上线的插件下架（revoked=false 恢复上架）
+                              对线上真实用户生效，**用户明确要求才调**
 ```
 
 几条要记住的：

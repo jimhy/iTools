@@ -556,6 +556,13 @@ export interface UpdateStatus {
   error: string | null;
   /** 当前应用版本（无论查没查过都有） */
   currentVersion: string;
+  /** 发行线：`"selfhost"` = 官网版（内置服务端地址），`"oss"` = GitHub 开源版 */
+  channel: string;
+  /** 发行线 + 更新源的人话，如「官网版 · 更新来自 官网（https://…）」。界面直接展示 */
+  channelDesc: string;
+  /** 检测到「上次运行的是另一条线」时的提示；没换过为 null。
+   *  非空 = 这台机器被跨线覆盖过，UI **必须**显著提示：云服务接入可能已经悄悄失效。 */
+  channelSwitchNote: string | null;
 }
 
 /** 版本更新信息，与 Rust 侧 `UpdateInfo`（camelCase）一致 */
@@ -566,6 +573,9 @@ export interface UpdateInfo {
   releaseUrl: string;
   releaseNotes: string;
   installerUrl: string | null;
+  /** 这条结果来自哪个更新源（如「官网（https://…）」/「GitHub Release（jimhy/iTools）」）。
+   *  官网版与开源版是两条独立发行线，用户点更新前就该知道包是从哪来的。 */
+  source: string;
 }
 
 // ---------- 开发者中心（插件调试环境） ----------
@@ -811,6 +821,14 @@ export interface PublishStatus {
   onlineVersion: string | null;
   revoked: boolean;
   revokedReason: string;
+  /** 下架方：`""` 未下架 | `"owner"` 作者自己下架 | `"admin"` 平台维护者下架。
+   *  维护者下的架作者收不回来，UI 必须把「恢复上架」按钮禁用并写明原因。 */
+  revokedBy: string;
+  /** 市场条目上记录的作者账号（服务端确认的提审账号）；空串 = 没上线过 / 没查到 */
+  onlineAuthor: string;
+  /** 当前登录账号是不是这个市场条目的作者 —— 只有作者本人能下架它。
+   *  未登录 / 查不到条目时为 false，此时下架按钮必须禁用（不做点了才知道行不行的控件）。 */
+  isOwner: boolean;
   /** 本地版本是否高于线上（可以提交新版本） */
   canSubmitNewVersion: boolean;
   latest: Submission | null;
@@ -881,6 +899,8 @@ export interface MarketEntry {
   revoked: boolean;
   /** 下架原因，原样展示给用户 */
   revokedReason: string;
+  /** 下架方：`""` 未下架 | `"owner"` 作者自己下架 | `"admin"` 平台维护者下架 */
+  revokedBy: string;
   addedAt: string;
   /** 本次收录的审核记录链接，供用户查证「凭什么信任它」 */
   auditReport: string;

@@ -16,13 +16,23 @@
 //! 通过自检**不代表**会过审：代码审核由服务端的大模型做，本地看不出结论。
 //! 文案必须写清楚这层区别，不能让绿色的「自检通过」被读成「稳过」。
 //!
+//! # 下架也是这一页的事
+//!
+//! 作者可以把自己上线的插件下架（市场停止分发），也可以把**自己下架的**恢复上架。
+//! 两条边界必须在 UI 上说清楚，不能让作者误解：
+//!
+//! - 下架**不会**把插件从已安装用户的电脑上删掉——客户端做不到这件事。它做的是
+//!   「市场不再分发 + 已安装的用户看到已下架与你写的原因」；
+//! - 平台维护者下架的插件，作者**收不回来**（那是处置，不是作者的自主选择），
+//!   此时「恢复上架」按钮禁用并写明去找谁。
+//!
 //! # 不做假控件
 //!
 //! 不能提交时（未登录、有阻断项、已有在审的单子、版本号没升）按钮**禁用并写明原因**，
 //! 不做「看着能点、点了没反应」的按钮。
 
 import type { DevPluginInfo, Preflight, PublishStatus, Submission } from "../types";
-import { h } from "./ui";
+import { confirmDialog, h } from "./ui";
 import * as api from "./api";
 import { errText } from "./plugin-install";
 
@@ -106,15 +116,29 @@ export function renderDevPublish(host: HTMLElement, o: DevPublishOpts): void {
   let preflight: Preflight | null = null;
   let loading = false;
   let submitting = false;
+  let revoking = false;
 
   const body = h("div", { class: "dev-tab-body" });
   host.appendChild(body);
 
   const refreshBtn = h("button", { class: "btn", text: "刷新状态" });
   const submitBtn = h("button", { class: "btn btn-primary", text: "提交审核" });
+  const revokeBtn = h("button", { class: "btn btn-danger", text: "下架插件" });
+  const restoreBtn = h("button", { class: "btn", text: "恢复上架" });
+  // 这三个控件在 paint() 之间复用同一批实例：重绘时若新建 textarea，
+  // 作者正在输入的下架原因会被清掉。
+  const reasonInput = h("textarea", {
+    class: "dev-textarea dev-revoke-reason",
+    spellcheck: "false",
+    placeholder: "写清楚为什么下架，例如「有严重 bug，修好后重新上线」。这句话会原样展示给已安装的用户。",
+  });
 
   refreshBtn.addEventListener("click", () => void load());
   submitBtn.addEventListener("click", () => void doSubmit());
+  revokeBtn.addEventListener("click", () => void doRevoke(true));
+  restoreBtn.addEventListener("click", () => void doRevoke(false));
+  // 原因是下架的必填项：边打字边解禁按钮，而不是等点了才报错
+  reasonInput.addEventListener("input", syncRevokeBtn);
 
   // ---------- 各区块 ----------
 
@@ -175,7 +199,9 @@ export function renderDevPublish(host: HTMLElement, o: DevPublishOpts): void {
     if (status.revoked) {
       badgeLabel = "已下架";
       badgeCls = "dev-pub-badge-bad";
-      badgeDesc = `这个插件已被市场下架，用户无法再安装。下架原因：${status.revokedReason || "未给出原因"}`;
+      // 「你自己下的架」和「被维护者下架」对作者是完全不同的两件事，措辞必须分开
+      const who = status.revokedBy === "owner" ? "你把这个插件下架了" : "这个插件已被市场下架";
+      badgeDesc = `${who}，用户无法再安装。下架原因：${status.revokedReason || "未给出原因"}`;
     } else if (status.onlineVersion) {
       badgeLabel = `已上线 v${status.onlineVersion}`;
       badgeCls = "dev-pub-badge-ok";
@@ -346,6 +372,11 @@ function bumpHint(online: string): string {
         ? "需要先登录云账号（插件归属与审核结果都挂在账号上）"
         : "发布状态读取失败，先解决上面的问题";
     }
+    // 服务端会直接拒收「被维护者下架的插件」的新提审 —— 与其让作者白传一个 32MB 的包，
+    // 不如在这里就说清楚：这条路走不通，得去找维护者。
+    if (status.revoked && status.revokedBy === "admin") {
+      return "这个插件被平台维护者下架了，提交新版本也不会重新上线，请先联系维护者";
+    }
     if (status.latest?.status === "reviewing") {
       return `v${status.latest.version} 还在审核中，出结果后才能提交下一版`;
     }
@@ -358,6 +389,142 @@ function bumpHint(online: string): string {
       );
     }
     return null;
+  }
+
+  // ---------- 下架 / 恢复 ----------
+
+  /** 下架方 → 一句「你能不能自己收回来」的实话。 */
+  function revokedByText(by: string): string {
+    if (by === "owner") {
+      return "这是你自己下的架，随时可以恢复上架；提交一个版本号更高的新包也会重新上线。";
+    }
+    if (by === "admin") {
+      return (
+        "这是平台维护者下的架 —— 作者无法自行恢复，提交新版本也不会重新上线。" +
+        "如有异议请联系维护者。"
+      );
+    }
+    // 旧版服务端没有记录下架方，这里不猜：能不能恢复以服务端的判定为准
+    return "服务端没有给出下架方（可能是旧版本留下的记录），能否恢复以服务端判定为准。";
+  }
+
+  /** 不能下架时的**具体**原因；能下架返回 null（原因是否填了不在这里判，见 [`syncRevokeBtn`]）。 */
+  function revokeBlockedReason(): string | null {
+    if (loading) return "正在读取状态…";
+    if (!status) return "还没读到发布状态";
+    if (status.error) {
+      return status.error.includes("登录")
+        ? "需要先登录云账号（插件的归属挂在账号上）"
+        : "发布状态读取失败，先解决上面的问题";
+    }
+    if (!status.onlineVersion && !status.revoked) return "这个插件还没上线，没有可下架的条目";
+    if (!status.isOwner) {
+      return status.onlineAuthor
+        ? `市场上的「${status.name}」属于账号 ${status.onlineAuthor}，只有作者本人能下架它`
+        : "没读到这个插件在市场上的作者，无法确认它是不是你的";
+    }
+    return null;
+  }
+
+  /** 不能恢复上架时的原因；能恢复返回 null。 */
+  function restoreBlockedReason(): string | null {
+    const base = revokeBlockedReason();
+    if (base) return base;
+    // 维护者下的架作者收不回来 —— 与其让按钮点了吃一记 403，不如直接说清楚
+    if (status?.revokedBy === "admin") {
+      return "这是平台维护者下的架，作者无法自行恢复，请联系维护者";
+    }
+    return null;
+  }
+
+  /** 下架按钮的可用性：原因是必填项，边打字边解禁。 */
+  function syncRevokeBtn(): void {
+    const blocked = revokeBlockedReason();
+    const hasReason = reasonInput.value.trim().length > 0;
+    revokeBtn.disabled = blocked !== null || revoking || !hasReason;
+    revokeBtn.textContent = revoking ? "正在提交…" : "下架插件";
+    revokeBtn.title = blocked ?? (hasReason ? "把这个插件从插件市场撤下" : "先写明下架原因");
+    reasonInput.disabled = blocked !== null || revoking;
+  }
+
+  /**
+   * 下架管理卡：作者把自己上线的插件从市场撤下 / 把自己下架的恢复回来。
+   *
+   * 文案上必须交代清楚下架的**真实边界**：它停的是市场分发，不是「从别人电脑上删掉」。
+   */
+  function revokeCard(): HTMLElement {
+    const box = h("div", { class: "dev-pub-card" });
+    box.appendChild(h("div", { class: "dev-sec-title", text: "下架管理" }));
+    box.appendChild(
+      h("div", {
+        class: "dev-sec-desc",
+        text:
+          "下架 = 插件市场停止分发这个插件：别的用户搜不到也装不到，已装的用户收不到更新，" +
+          "市场页上会显示「已下架」和你写的原因。" +
+          "它不会把插件从已经安装的用户电脑上删掉 —— 客户端做不到这件事。",
+      }),
+    );
+
+    if (!status) {
+      box.appendChild(h("div", { class: "dev-kv-loading", text: "正在查询发布状态…" }));
+      return box;
+    }
+    if (!status.onlineVersion && !status.revoked) {
+      box.appendChild(
+        h("div", {
+          class: "dev-sec-desc",
+          text: "这个插件还没有上线到插件市场，没有可下架的条目。",
+        }),
+      );
+      return box;
+    }
+
+    if (status.revoked) {
+      box.appendChild(
+        h(
+          "div",
+          { class: "info-box info-box-warn" },
+          h("div", { text: `「${status.name}」当前是已下架状态，市场不再分发它。` }),
+          h("div", {
+            class: "info-box-detail",
+            text: `下架原因：${status.revokedReason || "未给出原因"}`,
+          }),
+          h("div", { class: "info-box-detail", text: revokedByText(status.revokedBy) }),
+        ),
+      );
+      const blocked = restoreBlockedReason();
+      restoreBtn.disabled = blocked !== null || revoking;
+      restoreBtn.textContent = revoking ? "正在提交…" : "恢复上架";
+      restoreBtn.title = blocked ?? "让市场重新分发这个插件";
+      box.appendChild(
+        h(
+          "div",
+          { class: "dev-run-actions" },
+          restoreBtn,
+          blocked ? h("span", { class: "dev-blocked", text: blocked }) : null,
+        ),
+      );
+      return box;
+    }
+
+    box.appendChild(
+      h("div", {
+        class: "dev-sec-desc",
+        text: "下架原因（必填）：这句话会原样展示给已经装了这个插件的用户，请写真实原因。",
+      }),
+    );
+    box.appendChild(reasonInput);
+    const blocked = revokeBlockedReason();
+    box.appendChild(
+      h(
+        "div",
+        { class: "dev-run-actions" },
+        revokeBtn,
+        blocked ? h("span", { class: "dev-blocked", text: blocked }) : null,
+      ),
+    );
+    syncRevokeBtn();
+    return box;
   }
 
   /** 提审历史（可展开看模型裁决原文）。 */
@@ -495,7 +662,14 @@ function bumpHint(online: string): string {
   // ---------- 数据装载 ----------
 
   function paint(): void {
-    body.replaceChildren(intro(), statusCard(), preflightCard(), submitCard(), historyCard());
+    body.replaceChildren(
+      intro(),
+      statusCard(),
+      preflightCard(),
+      submitCard(),
+      revokeCard(),
+      historyCard(),
+    );
   }
 
   async function load(): Promise<void> {
@@ -517,6 +691,10 @@ function bumpHint(online: string): string {
         onlineVersion: null,
         revoked: false,
         revokedReason: "",
+        revokedBy: "",
+        onlineAuthor: "",
+        // 查不到状态时一律当「不是我的」：宁可禁用下架按钮，也不画一个点了必然失败的控件
+        isOwner: false,
         canSubmitNewVersion: false,
         latest: null,
         history: [],
@@ -544,6 +722,54 @@ function bumpHint(online: string): string {
       toast(errText(err, "提交审核失败"));
     } finally {
       submitting = false;
+      await load();
+    }
+  }
+
+  /** 下架 / 恢复上架。二次确认里把真实后果写清楚，不用「确定吗」糊过去。 */
+  async function doRevoke(revoked: boolean): Promise<void> {
+    if (revoking || !status) return;
+    const name = status.name;
+    const reason = reasonInput.value.trim();
+    // 按钮本就禁用着，这里是兜底：绝不发一个服务端必拒的请求
+    if (revoked && !reason) {
+      toast("下架必须写明原因：它会展示给已安装这个插件的用户");
+      return;
+    }
+    const ok = await confirmDialog(
+      revoked
+        ? {
+            title: "下架插件",
+            message: `确定把「${name}」从插件市场下架吗？`,
+            warn:
+              "下架后：市场不再分发它，别的用户装不到、已装的用户也收不到更新；" +
+              "已经装了它的用户不会被自动卸载，但会看到「已下架」和你写的原因。" +
+              "你随时可以自己恢复上架，或提交一个更高版本重新上线。",
+            confirmText: "下架",
+          }
+        : {
+            title: "恢复上架",
+            message: `确定把「${name}」恢复上架吗？`,
+            warn: status.onlineVersion
+              ? `恢复后市场会重新分发线上的 v${status.onlineVersion}，用户可以正常安装。`
+              : "恢复后市场会重新分发这个插件的线上版本。",
+            confirmText: "恢复上架",
+            danger: false,
+          },
+    );
+    if (!ok) return;
+
+    revoking = true;
+    paint();
+    try {
+      await api.devRevokePlugin(plugin.id, revoked, reason);
+      toast(revoked ? `已下架「${name}」` : `已恢复上架「${name}」`);
+      reasonInput.value = "";
+    } catch (err) {
+      // 服务端的拒绝原因（不是作者、维护者下的架…）是写给作者看的，原样弹出来
+      toast(errText(err, revoked ? "下架失败" : "恢复上架失败"));
+    } finally {
+      revoking = false;
       await load();
     }
   }

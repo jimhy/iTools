@@ -376,6 +376,9 @@ pub async fn dev_publish_status(
 ) -> Result<super::submit::PublishStatus, String> {
     let info = find_plugin(&dev, &id, &settings)?;
     let token = account.token().unwrap_or_default();
+    // 判「这个市场条目是不是我的」要用当前登录账号。未登录时是空串——
+    // 那就一律判成「不是我的」，把下架按钮禁掉，而不是画一个点了必然 403 的控件。
+    let me = account.state().username;
 
     let name = info.name.clone();
     let local_version = info.version.clone();
@@ -383,17 +386,18 @@ pub async fn dev_publish_status(
         let mut errors: Vec<String> = Vec::new();
 
         // ① 线上版本：查市场索引
-        let (online_version, revoked, revoked_reason) =
+        let (online_version, revoked, revoked_reason, revoked_by, online_author) =
             match crate::plugin::market::fetch_index() {
                 Ok(index) => match index.plugins.into_iter().find(|p| p.name == name) {
-                    Some(e) => (Some(e.version), e.revoked, e.revoked_reason),
-                    None => (None, false, String::new()),
+                    Some(e) => (Some(e.version), e.revoked, e.revoked_reason, e.revoked_by, e.author),
+                    None => (None, false, String::new(), String::new(), String::new()),
                 },
                 Err(e) => {
                     errors.push(format!("读取市场索引失败：{e}"));
-                    (None, false, String::new())
+                    (None, false, String::new(), String::new(), String::new())
                 }
             };
+        let is_owner = !me.is_empty() && !online_author.is_empty() && online_author == me;
 
         // ② 提审历史：只取这个插件名下的
         let history = match super::submit::list_submissions(&token) {
@@ -416,6 +420,9 @@ pub async fn dev_publish_status(
             online_version,
             revoked,
             revoked_reason,
+            revoked_by,
+            online_author,
+            is_owner,
             can_submit_new_version,
             latest: history.first().cloned(),
             history,
@@ -509,6 +516,40 @@ pub async fn dev_submit_plugin(
     })
     .await
     .map_err(|e| format!("提交审核任务异常终止: {e}"))?
+}
+
+/// 下架自己的插件 / 把自己下架的恢复上架。
+///
+/// 鉴权在**服务端**：作者只能动自己的插件，且收不回维护者下的架。这里只做两件事——
+/// 把调试插件 id 翻成市场条目的插件名，以及拦住「下架不写原因」这种服务端必拒的请求。
+///
+/// 下架不删已安装用户机器上的插件（客户端也做不到），它做的是：市场停止分发、
+/// 已安装的用户会在插件列表看到「已下架」与你写的原因。这句话必须在 UI 上说清楚，
+/// 不能让作者以为点一下就能把插件从别人电脑上收回。
+#[tauri::command(async)]
+pub async fn dev_revoke_plugin(
+    id: String,
+    revoked: bool,
+    reason: String,
+    dev: State<'_, Arc<DevRuntime>>,
+    settings: State<'_, SettingsStore>,
+    account: State<'_, crate::account::AccountStore>,
+) -> Result<(), String> {
+    let info = find_plugin(&dev, &id, &settings)?;
+    let token = account.token().ok_or_else(|| {
+        "下架插件需要先登录云账号（插件的归属挂在账号上）。请到「我的账号」页登录后再试。"
+            .to_string()
+    })?;
+    let reason = reason.trim().to_string();
+    if revoked && reason.is_empty() {
+        return Err("下架必须写明原因：它会原样展示给已经装了这个插件的用户。".to_string());
+    }
+    let name = info.name.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        super::submit::set_revoked(&token, &name, revoked, &reason)
+    })
+    .await
+    .map_err(|e| format!("下架任务异常终止: {e}"))?
 }
 
 /// 查一条提审单的详情（含模型裁决原文，供作者看到「模型到底说了什么」）。

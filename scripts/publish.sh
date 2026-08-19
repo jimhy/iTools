@@ -139,6 +139,18 @@ publish_app() {
     exit 1
   fi
 
+  echo "==> [app] 校验发行线指纹是 selfhost"
+  # 两条发行线的**反向校验**：官网线发出去的包必须自报 selfhost，GitHub 线的必须自报 oss。
+  # 光校验「含端点」不够——它只能证明这一次注入成功，证明不了产物没被拿去当开源包发。
+  # 指纹由 src-tauri/src/updater.rs 的 CHANNEL_MARK 在编译期定死，启动日志每次都会打印它。
+  if grep -a -q -F 'ITOOLS_RELEASE_CHANNEL=selfhost' "$EXE_SRC"; then
+    echo "    ✓ 产物自报 selfhost（官网线）"
+  else
+    echo "✗ 产物不是官网线（找不到 ITOOLS_RELEASE_CHANNEL=selfhost）——这个包别发到官网" >&2
+    echo "  多半是 ITOOLS_DEFAULT_ENDPOINT 没进构建；发出去会让用户的云服务接入直接失效" >&2
+    exit 1
+  fi
+
   echo "==> [app] 校验地址真的注入了"
   # 见文件头注意事项 2：不校验的话，发出去的包连不上服务器且外观完全正常。
   #

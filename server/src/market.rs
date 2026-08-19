@@ -176,6 +176,20 @@ impl MarketService {
         // 归属校验：同名插件只能由首次上线它的账号更新。
         // 客户端按插件名归属授权与数据，顶包等于直接继承受害插件的用户授权——这条必须挡死。
         match self.store.get_entry(&name).await {
+            // 被维护者下架的插件不能靠「发一个新版本」复活——那等于把处置绕过去了。
+            // 作者自己下架的不在此列：再发一版就是重新上线，这正是作者想要的。
+            Ok(Some(existing))
+                if existing.revoked && existing.revoked_by == crate::store::revoked_by::ADMIN =>
+            {
+                return Err(SubmitError::Forbidden(format!(
+                    "「{name}」已被平台维护者下架，暂不接受新版本。下架原因：{}。如有异议请联系维护者。",
+                    if existing.revoked_reason.is_empty() {
+                        "未给出原因"
+                    } else {
+                        &existing.revoked_reason
+                    }
+                )));
+            }
             Ok(Some(existing)) if existing.owner != author => {
                 return Err(SubmitError::Forbidden(format!(
                     "插件名「{name}」已被账号 {} 占用。请换一个 name —— 它同时是安装目录名与数据命名空间，不能重名。",
@@ -360,6 +374,7 @@ impl MarketService {
             "updatedAt": now,
             "revoked": false,
             "revokedReason": "",
+            "revokedBy": "",
         });
 
         let row = MarketRow {
@@ -371,6 +386,7 @@ impl MarketService {
             entry: serde_json::to_string(&entry).map_err(|e| format!("序列化条目失败: {e}"))?,
             revoked: false,
             revoked_reason: String::new(),
+            revoked_by: String::new(),
             published_at,
             updated_at: now,
         };
@@ -380,18 +396,50 @@ impl MarketService {
         Ok(())
     }
 
-    /// 下架 / 恢复一个插件（维护者操作）。
-    pub async fn set_revoked(&self, name: &str, revoked: bool, reason: &str) -> Result<bool, String> {
+    /// 下架 / 恢复一个插件。
+    ///
+    /// # 谁能动谁
+    ///
+    /// - **作者**（`entry.owner == actor`）：可以下架自己的插件，也可以把**自己下架的**恢复回来。
+    /// - **维护者**：可以下架 / 恢复任何插件。
+    /// - 作者**不能**恢复维护者下架的插件 —— 那是处置，不是作者的自主选择。
+    ///   （同一道防线在 [`Self::submit`] 与 `store::publish_entry` 里也拦了「发新版本复活」这条路。）
+    ///
+    /// 恢复时 `reason` 与 `revoked_by` 一并清空，不留一条过期的下架原因挂在条目上。
+    pub async fn set_revoked(
+        &self,
+        actor: &str,
+        name: &str,
+        revoked: bool,
+        reason: &str,
+    ) -> Result<(), RevokeError> {
+        let entry = self
+            .store
+            .get_entry(name)
+            .await
+            .map_err(|e| RevokeError::Server(format!("查询市场条目失败: {e}")))?
+            .ok_or(RevokeError::NotFound)?;
+
+        let by = decide_revoke(actor, &entry, self.is_admin(actor), revoked)
+            .map_err(RevokeError::Forbidden)?;
         let now = (self.clock)();
         let ok = self
             .store
-            .set_revoked(name, revoked, reason, now)
+            .set_revoked(name, revoked, reason, by, now)
             .await
-            .map_err(|e| format!("更新市场条目失败: {e}"))?;
-        if ok {
-            self.rebuild_index().await.map_err(|e| format!("重建索引失败: {e}"))?;
+            .map_err(|e| RevokeError::Server(format!("更新市场条目失败: {e}")))?;
+        if !ok {
+            // get_entry 刚查到、这里却没有命中：条目在这两步之间被删了
+            return Err(RevokeError::NotFound);
         }
-        Ok(ok)
+        self.rebuild_index()
+            .await
+            .map_err(|e| RevokeError::Server(format!("重建索引失败: {e}")))?;
+        tracing::info!(
+            "[market] {name} 已{}（操作者身份：{by}）",
+            if revoked { "下架" } else { "恢复上架" }
+        );
+        Ok(())
     }
 
     pub fn is_admin(&self, user: &str) -> bool {
@@ -415,10 +463,54 @@ pub enum SubmitError {
     Server(String),
 }
 
+/// 下架 / 恢复失败的分类。
+pub enum RevokeError {
+    /// 市场里没有这个插件（404）。
+    NotFound,
+    /// 不是作者、也不是维护者；或作者想恢复维护者下架的插件（403）——原文写给操作者看。
+    Forbidden(String),
+    /// 服务端自身问题（500）——细节只进日志。
+    Server(String),
+}
+
+/// 下架 / 恢复的**鉴权判定**。抽成纯函数是为了能单测——这几条边界一旦写错，
+/// 要么谁都能下架别人的插件，要么被处置的插件作者自己就能恢复上架。
+///
+/// 返回本次操作应记录的下架方（[`crate::store::revoked_by`] 的常量），
+/// `Err` 里是给操作者看的中文原文。
+fn decide_revoke(
+    actor: &str,
+    entry: &MarketRow,
+    is_admin: bool,
+    revoked: bool,
+) -> Result<&'static str, String> {
+    use crate::store::revoked_by;
+
+    let is_owner = entry.owner == actor;
+    if !is_owner && !is_admin {
+        // 不暴露「这个插件属于谁」——只说你不是作者
+        return Err("只有插件作者本人或平台维护者可以下架 / 恢复这个插件。".to_string());
+    }
+    // 维护者下的架，作者自己收不回来（同一道防线在 submit 与 publish_entry 里也拦了发新版本这条路）
+    if !revoked && !is_admin && entry.revoked_by == revoked_by::ADMIN {
+        return Err(format!(
+            "「{}」是被平台维护者下架的，作者无法自行恢复。下架原因：{}。如有异议请联系维护者。",
+            entry.name,
+            if entry.revoked_reason.is_empty() {
+                "未给出原因"
+            } else {
+                &entry.revoked_reason
+            }
+        ));
+    }
+    // 维护者操作自己的插件时按「作者」记：那是他的自主选择，理应能自己收回
+    Ok(if is_owner { revoked_by::OWNER } else { revoked_by::ADMIN })
+}
+
 /// 渲染市场索引 JSON + ETag。
 ///
 /// 形状与客户端 `src-tauri/src/plugin/market.rs::MarketIndex` 对齐。
-/// **已下架的条目照样在索引里**（带 `revoked` 与原因）——客户端要靠它提醒已安装的用户。
+/// **已下架的条目照样在索引里**（带 `revoked`、原因与下架方）——客户端要靠它提醒已安装的用户。
 fn render_index(rows: &[MarketRow], config: &Config) -> IndexBody {
     let plugins: Vec<Value> = rows
         .iter()
@@ -431,6 +523,9 @@ fn render_index(rows: &[MarketRow], config: &Config) -> IndexBody {
                 o.insert("contentHash".into(), json!(r.content_hash));
                 o.insert("revoked".into(), json!(r.revoked));
                 o.insert("revokedReason".into(), json!(r.revoked_reason));
+                // 下架方（owner / admin）：开发者中心据此决定作者能不能自己恢复上架，
+                // 不给这个字段，前端就只能画一个「点了才知道行不行」的按钮。
+                o.insert("revokedBy".into(), json!(r.revoked_by));
                 // 下载地址是**相对路径**：客户端拼上自己配置的服务器地址即可，
                 // 服务端不需要知道自己被从哪个域名访问（反代 / 内网 / 端口转发都不影响）。
                 o.insert("package".into(), json!(format!("/api/market/package/{}", r.name)));
@@ -522,6 +617,7 @@ mod tests {
             entry: json!({"name": name, "description": "d"}).to_string(),
             revoked,
             revoked_reason: if revoked { "有问题".into() } else { String::new() },
+            revoked_by: if revoked { "admin".into() } else { String::new() },
             published_at: 1,
             updated_at: 2,
         }
@@ -543,6 +639,8 @@ mod tests {
         let p = &v["plugins"][0];
         assert_eq!(p["revoked"], json!(true));
         assert_eq!(p["revokedReason"], json!("有问题"));
+        // 少了 revokedBy，开发者中心就无法区分「自己下的架」和「被维护者下架」
+        assert_eq!(p["revokedBy"], json!("admin"));
     }
 
     #[test]
@@ -577,6 +675,49 @@ mod tests {
         assert!(matches_etag(Some("*"), "\"abc\""));
         assert!(!matches_etag(None, "\"abc\""));
         assert!(!matches_etag(Some("\"zzz\""), "\"abc\""));
+    }
+
+    /// 下架 / 恢复的权限边界。这几条判错的后果分别是「谁都能下架别人的插件」
+    /// 与「被平台处置的插件作者自己就能恢复上架」，都必须钉死。
+    #[test]
+    fn revoke_permission_boundaries() {
+        use crate::store::revoked_by;
+        let mut mine = row("demo", false);
+        mine.owner = "alice".into();
+
+        // 作者可以下架自己的插件，记作 owner
+        assert_eq!(decide_revoke("alice", &mine, false, true).unwrap(), revoked_by::OWNER);
+        // 陌生人不行
+        assert!(decide_revoke("mallory", &mine, false, true).is_err());
+        // 维护者可以下架别人的插件，记作 admin
+        assert_eq!(decide_revoke("root", &mine, true, true).unwrap(), revoked_by::ADMIN);
+        // 维护者动自己的插件按 owner 记（那是自主选择，他理应能自己收回）
+        assert_eq!(decide_revoke("alice", &mine, true, true).unwrap(), revoked_by::OWNER);
+    }
+
+    #[test]
+    fn author_cannot_undo_an_admin_takedown() {
+        use crate::store::revoked_by;
+        let mut punished = row("demo", true); // row() 造的正是 revoked_by = admin
+        punished.owner = "alice".into();
+        assert_eq!(punished.revoked_by, revoked_by::ADMIN);
+
+        // 作者恢复不了，而且必须把下架原因原文带给他，不能只说一句「没权限」
+        let err = decide_revoke("alice", &punished, false, false).unwrap_err();
+        assert!(err.contains("有问题"), "{err}");
+        // 维护者可以恢复
+        assert!(decide_revoke("root", &punished, true, false).is_ok());
+        // 作者自己下的架，作者可以自己收回来
+        let mut self_revoked = punished.clone();
+        self_revoked.revoked_by = revoked_by::OWNER.into();
+        assert_eq!(
+            decide_revoke("alice", &self_revoked, false, false).unwrap(),
+            revoked_by::OWNER
+        );
+        // 旧数据没有下架方：不当成处置，作者可以恢复（能否恢复以这条判定为准）
+        let mut legacy = punished.clone();
+        legacy.revoked_by = String::new();
+        assert!(decide_revoke("alice", &legacy, false, false).is_ok());
     }
 
     #[test]

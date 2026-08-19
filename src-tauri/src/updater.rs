@@ -10,6 +10,23 @@
 //! 编译期注入的服务端地址随之消失，表现为某天起「云端未接入」而用户自己什么都没改。
 //! 判据只看**编译期常量**、不看用户填的同步地址——理由见 [`selfhost_endpoint`]。
 //!
+//! # 两条线的隔离是**四道**，不是一道
+//!
+//! 只在检查更新时分流是不够的：那只保证「正常点更新」不串线，串线的其它路子照样通着。
+//! 四道各自独立、缺一道就有一条交叉路径：
+//!
+//! 1. **构建期**：产物自带发行线指纹 [`CHANNEL_MARK`]（有没有注入端点决定它是 `selfhost`
+//!    还是 `oss`）。两条发布流水线各自 grep 它做**反向校验**：官网线发出去的必须是
+//!    `selfhost`，GitHub 线发出去的必须是 `oss`。没有它，CI 上多一个环境变量就能把
+//!    带着运维拓扑的包发到公开 release 上，而外观完全正常。
+//! 2. **检查更新**：[`check_blocking`] 按 [`selfhost_endpoint`] 分流（本条最早就有）。
+//! 3. **下载与跳转**：[`download_update`] / [`open_release_page`] 拿的 URL 由前端传入，
+//!    必须再过一遍 [`ensure_channel_url`] ——只允许本发行线的地址。缺这道，任何能调到
+//!    这两个命令的地方都可以让官网版去下 GitHub 的包并执行它。
+//! 4. **安装后**：[`init_channel_record`] 把本次运行的发行线记在数据目录里，与上次比对。
+//!    真被跨线覆盖了（多半是老版本客户端从 GitHub 装的），要让用户**当场看见**
+//!    「云服务接入没了、怎么恢复」，而不是某天自己发现「云端未接入」。
+//!
 //! ⚠ 可达性（部署前必读）：GitHub API 在国内网络下可能超时或被重置。本模块的请求走
 //! [`crate::http`]，会遵循用户配置的代理；没配代理时检查更新可能失败——失败是**静默降级**
 //! （只返回 Err，前端不打扰用户），不会影响任何其它功能。原实现用的是 Gitee（中国区可达性
@@ -58,6 +75,47 @@ use std::time::Duration;
 
 // 令牌脱敏与插件安装模块共用一份实现（两处都把 access_token 拼在 URL 上，泄漏面完全相同）
 use crate::plugin::install::redact_token;
+
+// ==================== 发行线（编译期确定） ====================
+
+/// 本二进制属于哪条发行线：`selfhost` = 官网（自建服务）版，`oss` = GitHub 开源版。
+///
+/// 判据与 [`selfhost_endpoint`] 完全一致（编译期有没有注入 `ITOOLS_DEFAULT_ENDPOINT`），
+/// 只是把它显式命名出来——「发行线」这件事要能被日志、界面和发布脚本各自引用，
+/// 靠每处再判一次 `option_env!` 迟早分叉。
+pub const CHANNEL: &str = match option_env!("ITOOLS_DEFAULT_ENDPOINT") {
+    Some(_) => "selfhost",
+    None => "oss",
+};
+
+/// 产物里的**发行线指纹**，供两条发布流水线 `grep` 裸 exe 做反向校验。
+///
+/// 为什么要一个专门的字符串而不是搜端点地址：GitHub 的流水线**不知道**端点是什么
+/// （那是 secret，刻意不给它），没法搜一个自己不知道的值来证明「我没带上它」。
+/// 搜这个指纹就能给出绝对判据：开源包里必须是 `oss`，官网包里必须是 `selfhost`。
+///
+/// ⚠ 它必须真的出现在二进制里才有意义——[`log_channel`] 每次启动都会把它打进日志，
+/// 这就是它不会被优化掉的原因。**别把那行日志删了**。
+pub const CHANNEL_MARK: &str = match option_env!("ITOOLS_DEFAULT_ENDPOINT") {
+    Some(_) => "ITOOLS_RELEASE_CHANNEL=selfhost",
+    None => "ITOOLS_RELEASE_CHANNEL=oss",
+};
+
+/// 发行线的中文名（给用户看）。
+pub fn channel_label() -> &'static str {
+    if CHANNEL == "selfhost" { "官网版" } else { "开源版" }
+}
+
+/// 本发行线的更新来源，一句人话（界面直接展示，让用户随时知道自己在哪条线上）。
+pub fn update_source_label() -> String {
+    match selfhost_endpoint() {
+        Some(ep) => format!("官网（{ep}）"),
+        None => {
+            let (owner, repo) = update_repo();
+            format!("GitHub Release（{owner}/{repo}）")
+        }
+    }
+}
 
 /// 更新源仓库的环境变量覆盖（形如 `owner/repo`）。满足准则「服务端地址可配置、不写死」：
 /// 默认指向下方公开发布仓库，可用 `ITOOLS_UPDATE_REPO` 覆盖（换发布主体 / 私有仓库）。
@@ -113,6 +171,9 @@ pub struct UpdateInfo {
     /// 安装包直链（release 附件里第一个 [`INSTALLER_SUFFIX`] 结尾者），无则 None。
     /// 前端据此决定是否提供「立即更新」（自动下载 + 调起安装）。
     pub installer_url: Option<String>,
+    /// 这条结果来自哪个更新源（[`update_source_label`] 的原话，如「官网（https://…）」）。
+    /// 界面直接展示：用户点「立即更新」前就该知道包是从哪来的，而不是装完才发现换了条线。
+    pub source: String,
 }
 
 /// 最近一次更新检查的结果快照（供「上次检查了什么」展示）。
@@ -133,6 +194,13 @@ pub struct UpdateStatus {
     pub error: Option<String>,
     /// 当前应用版本（无论有没有查过都给，界面至少能显示自己的版本）。
     pub current_version: String,
+    /// 发行线标识（[`CHANNEL`]）：`selfhost` = 官网版，`oss` = 开源版。
+    pub channel: String,
+    /// 发行线 + 更新源的人话（如「官网版 · 更新来自 官网（https://…）」）。
+    pub channel_desc: String,
+    /// 检测到「上次运行的是另一条线」时的提示；没换过为 None。
+    /// 非空说明这台机器被跨线覆盖过，界面必须显著提示——云服务接入可能已经悄悄失效。
+    pub channel_switch_note: Option<String>,
 }
 
 /// 最近一次检查的结果（进程内，重启即清空——它只是「本次运行期间查过什么」的备忘）。
@@ -158,24 +226,37 @@ fn remember(result: Result<UpdateInfo, String>) {
 #[tauri::command]
 pub fn update_status() -> UpdateStatus {
     let current_version = env!("CARGO_PKG_VERSION").to_string();
+    // 发行线三件套与「上次查了什么」无关，无论哪个分支都一样，先算好
+    let channel = CHANNEL.to_string();
+    let channel_desc = format!("{} · 更新来自 {}", channel_label(), update_source_label());
+    let channel_switch_note = channel_switch_note();
     match LAST_CHECK.lock().ok().and_then(|g| g.clone()) {
         Some((at, Ok(info))) => UpdateStatus {
             checked_at: at,
             info: Some(info),
             error: None,
             current_version,
+            channel,
+            channel_desc,
+            channel_switch_note,
         },
         Some((at, Err(e))) => UpdateStatus {
             checked_at: at,
             info: None,
             error: Some(e),
             current_version,
+            channel,
+            channel_desc,
+            channel_switch_note,
         },
         None => UpdateStatus {
             checked_at: 0,
             info: None,
             error: None,
             current_version,
+            channel,
+            channel_desc,
+            channel_switch_note,
         },
     }
 }
@@ -273,6 +354,7 @@ fn fetch_selfhost(ep: &str) -> Result<UpdateInfo, String> {
         // 「这个版本没有提供更新说明」，而不是编一段出来。
         release_notes: String::new(),
         installer_url: Some(format!("{ep}/download/{file}")),
+        source: update_source_label(),
     })
 }
 
@@ -405,13 +487,124 @@ fn fetch_github(current: &str) -> Result<UpdateInfo, String> {
         release_url: release.html_url,
         release_notes: release.body,
         installer_url,
+        source: update_source_label(),
     })
+}
+
+// ==================== 跨线门禁 ====================
+
+/// 本发行线允许的 URL 前缀（下载与跳转共用）。
+///
+/// - 官网线：只认内置端点自己（`https://…:端口/`），它既托管官网页也托管 `/download/`；
+/// - 开源线：只认本发布仓库的 release 地址。
+///
+/// 刻意**不**把两条都列进去：这个函数的全部意义就是「另一条线的地址在这里必须匹配不上」。
+fn allowed_url_prefixes() -> Vec<String> {
+    match selfhost_endpoint() {
+        Some(ep) => vec![format!("{ep}/")],
+        None => {
+            let (owner, repo) = update_repo();
+            vec![format!("https://github.com/{owner}/{repo}/releases/")]
+        }
+    }
+}
+
+/// 门禁：`url` 必须属于**本发行线**，否则拒绝并说清楚为什么。
+///
+/// # 为什么这道必须有
+///
+/// [`download_update`] 与 [`open_release_page`] 的 url 都是前端传进来的。正常路径上它来自
+/// [`check_blocking`] 挑好的那一条，可这两个命令本身并不知道这件事——只要有任何一处
+/// （旧版前端、被改的页面、将来某个复用它的功能）传进另一条线的地址，官网版就会去下
+/// GitHub 的开源包**并执行它**，装完端点就没了。这正是要根除的「交叉」。
+fn ensure_channel_url(url: &str, what: &str) -> Result<(), String> {
+    let u = url.trim();
+    // 前缀匹配挡不住 `…/releases/../../别的仓库` 这种写法：前缀是对的，实际指向别处。
+    // 合法的更新地址里不会出现 `..`，直接拒掉最省事。
+    if !u.contains("..") && allowed_url_prefixes().iter().any(|p| u.starts_with(p.as_str())) {
+        return Ok(());
+    }
+    let allowed = allowed_url_prefixes().join(" 或 ");
+    // 日志留一行：真触发了说明有路径在串线，得能查
+    ilog!("[iTools] 拒绝跨发行线的{what}：{u}（本机是{}，只接受 {allowed}）", channel_label());
+    Err(format!(
+        "拒绝{what}：这个地址不属于当前的{}更新源。
+         本机允许的来源是 {allowed}。
+         官网版与开源版是两条独立的发行线，装错线会让云服务接入失效——所以这里直接拦下。",
+        channel_label()
+    ))
+}
+
+// ==================== 发行线记录（跨线覆盖检测） ====================
+
+/// 记录发行线的文件名（放在用户数据目录，两条线共用同一个数据目录，正好用来比对）。
+const CHANNEL_FILE: &str = "release-channel";
+
+/// 「上次运行的发行线与这次不同」时给用户的提示；相同或首次运行为 `None`。
+static CHANNEL_SWITCH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+/// 启动时调用：把本次的发行线记下来，并与上次比对。
+///
+/// 被跨线覆盖是**静默**的——安装程序不会说什么，界面也一切正常，只是云端悄悄「未接入」了。
+/// 所以这里必须留下痕迹：日志一行 + 一句能让用户自己恢复的提示（界面会显示它）。
+pub fn init_channel_record() {
+    let note = read_and_write_channel();
+    if let Some(n) = &note {
+        ilog!("[iTools] ⚠ 发行线发生变化：{n}");
+    }
+    let _ = CHANNEL_SWITCH.set(note);
+}
+
+/// 读上次的发行线、写入本次，返回需要提示用户的话。
+fn read_and_write_channel() -> Option<String> {
+    let root = crate::paths::data_root();
+    let path = root.join(CHANNEL_FILE);
+    let prev = std::fs::read_to_string(&path).ok().map(|s| s.trim().to_string());
+    // 写在读之后：失败不影响功能，只是下次比对不上，不值得打断启动
+    let _ = std::fs::create_dir_all(&root);
+    let _ = std::fs::write(&path, CHANNEL);
+
+    match prev.as_deref() {
+        // 首次运行 / 记录还没建立：没有可比对的历史，不编故事
+        None | Some("") => None,
+        Some(p) if p == CHANNEL => None,
+        Some("selfhost") => Some(
+            "这台机器上次运行的是**官网版**，现在这份是**开源版**。             开源版不含云服务地址，账号登录、数据同步与插件市场都会显示「云端未接入」。             要恢复请到官网重新下载安装（开源版的自动更新只会一直给你开源版）。"
+                .to_string(),
+        ),
+        Some("oss") => Some(
+            "这台机器上次运行的是开源版，现在这份是官网版，云服务已接入。".to_string(),
+        ),
+        Some(other) => Some(format!("上次运行的发行线记录是「{other}」，本次是「{CHANNEL}」。")),
+    }
+}
+
+/// 供界面读取的「跨线覆盖」提示（[`init_channel_record`] 还没跑时为 `None`）。
+pub fn channel_switch_note() -> Option<String> {
+    CHANNEL_SWITCH.get().cloned().flatten()
+}
+
+/// 启动日志：把发行线与更新源如实写下来。
+///
+/// ⚠ 这行同时是 [`CHANNEL_MARK`] 进入二进制的唯一保证（发布脚本靠 grep 它做反向校验），
+/// **别把它删了或改成不引用常量的写法**。
+pub fn log_channel() {
+    ilog!(
+        "[iTools] 发行线：{}（{}），更新源：{}",
+        channel_label(),
+        CHANNEL_MARK,
+        update_source_label()
+    );
 }
 
 /// 命令：在系统默认浏览器打开 release 下载页。
 /// 前端拿到 `UpdateInfo.releaseUrl` 后调用，避免在应用 webview 内导航到外链。
+///
+/// URL 必须属于本发行线（见 [`ensure_channel_url`]）——这个命令底层是 `opener::open`，
+/// 不设门禁等于把「用默认程序打开任意 URL」开放给调用方。
 #[tauri::command]
 pub fn open_release_page(url: String) -> Result<(), String> {
+    ensure_channel_url(&url, "打开下载页")?;
     opener::open(&url).map_err(|e| format!("打开下载页失败: {e}"))
 }
 
@@ -468,6 +661,10 @@ pub async fn download_update(url: String) -> Result<String, String> {
 /// Content-Length 一致。这道后缀检查独立于 [`check_blocking`] 里的附件筛选——
 /// 本命令的 url 由前端传入，不能假定它一定来自我们自己挑出来的那一条。
 fn download_blocking(url: &str) -> Result<String, String> {
+    // 发行线门禁排在最前：下错线的包会被紧接着的 launch_installer_and_quit 执行掉，
+    // 装完就是另一条线的客户端了（官网版的端点随之消失）。
+    ensure_channel_url(url, "下载安装包")?;
+
     // 后缀门禁只看 URL（剥掉 ?query / #fragment 之后），**不拿远端文件名落盘**。
     //
     // 曾经是 `url.rsplit('/').next()` 直接当文件名 join 到临时目录——那是错的：
@@ -598,7 +795,53 @@ fn launch_blocking(path: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_valid_installer, safe_installer_filename, version_gt, FALLBACK_INSTALLER_FILE};
+    use super::{
+        ensure_channel_url, is_valid_installer, safe_installer_filename, selfhost_endpoint,
+        version_gt, CHANNEL, CHANNEL_MARK, FALLBACK_INSTALLER_FILE,
+    };
+
+    /// 发行线指纹必须与 [`CHANNEL`] 一致，且格式就是发布脚本 grep 的那个串。
+    ///
+    /// `scripts/publish.sh` 与 `.github/workflows/release.yml` 都在裸 exe 里搜它做反向校验，
+    /// 格式一改两条流水线同时失效——而它们失效的表现是「照常发布」，不是报错。
+    #[test]
+    fn channel_mark_is_the_string_publish_scripts_grep() {
+        assert_eq!(CHANNEL_MARK, format!("ITOOLS_RELEASE_CHANNEL={CHANNEL}"));
+        assert!(CHANNEL == "selfhost" || CHANNEL == "oss", "只有这两条线：{CHANNEL}");
+        // 发行线的判据必须与实际的更新源判据同源，否则界面说的和实际走的会分叉
+        assert_eq!(CHANNEL == "selfhost", selfhost_endpoint().is_some());
+    }
+
+    /// **另一条线的地址必须下不动**——这是「两条发行线不交叉」最后也是最硬的一道。
+    ///
+    /// 用例对两条线都成立：本次构建是哪条线，就断言另一条线的地址被拒。
+    #[test]
+    fn cross_channel_urls_are_rejected() {
+        const GH: &str =
+            "https://github.com/jimhy/iTools/releases/download/v1.0.0/iTools_1.0.0_x64-setup.exe";
+        const SELF: &str = "https://example.invalid:7101/download/iTools-latest-setup.exe";
+
+        if CHANNEL == "oss" {
+            assert!(ensure_channel_url(GH, "下载").is_ok(), "本线的地址不该被拦");
+            assert!(ensure_channel_url(SELF, "下载").is_err(), "官网线的地址必须拒");
+        } else {
+            // 官网线：GitHub 的包一律拒（装上它端点就没了）
+            assert!(ensure_channel_url(GH, "下载").is_err(), "开源线的地址必须拒");
+        }
+
+        // 两条线都必须拒的：空、他人域名、前缀伪装、路径穿越、本地文件
+        for bad in [
+            "",
+            "https://evil.example.com/iTools-setup.exe",
+            // 前缀伪装：github.com.evil.com 不是 github.com
+            "https://github.com.evil.com/jimhy/iTools/releases/x-setup.exe",
+            // 前缀对但穿到别处
+            "https://github.com/jimhy/iTools/releases/../../evil/x-setup.exe",
+            "file:///C:/Windows/Temp/x-setup.exe",
+        ] {
+            assert!(ensure_channel_url(bad, "下载").is_err(), "「{bad}」应被拒");
+        }
+    }
 
     /// 服务端给的文件名最终会被拼进下载 URL、下下来、然后**被执行**。
     /// 所以这里两个方向都钉住：正常名字要原样用，任何带路径意味的都必须退回固定名。

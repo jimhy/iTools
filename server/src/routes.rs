@@ -15,7 +15,7 @@
 //! - `GET  /api/plugins/submissions/{id}` Bearer                                  → 单条详情（含裁决原文）
 //! - `GET  /api/market/index`           **公开**（限流 + ETag）                    → 市场索引
 //! - `GET  /api/market/package/{name}`  **公开**                                  → 已上线插件包 zip
-//! - `POST /api/market/revoke`          Bearer（限维护者）                         → 下架 / 恢复
+//! - `POST /api/market/revoke`          Bearer（作者本人或维护者）                 → 下架 / 恢复
 //!
 //! 鉴权：会话令牌走 `Authorization: Bearer <token>`。数据按 (用户, 命名空间) 隔离，last-write-wins。
 
@@ -721,15 +721,15 @@ async fn one_submission(
     }
 }
 
-/// 下架 / 恢复一个插件（仅维护者）。
+/// 下架 / 恢复一个插件（作者本人或维护者）。
+///
+/// 鉴权在 [`crate::market::MarketService::set_revoked`] 里：作者只能动自己的插件，
+/// 且**收不回维护者下的架**。这里只做参数校验与错误码映射。
 async fn market_revoke(State(st): State<Arc<AppState>>, headers: HeaderMap, body: Bytes) -> Response {
     let username = match authenticate(&st, &headers).await {
         Ok(u) => u,
         Err(res) => return res,
     };
-    if !st.market.is_admin(&username) {
-        return error_response(StatusCode::FORBIDDEN, "只有维护者可以下架插件");
-    }
     let body = json_body(&body);
     let name = field_str(&body, "name").trim().to_string();
     let revoked = body.get("revoked").and_then(Value::as_bool).unwrap_or(true);
@@ -741,10 +741,18 @@ async fn market_revoke(State(st): State<Arc<AppState>>, headers: HeaderMap, body
     if revoked && reason.is_empty() {
         return error_response(StatusCode::BAD_REQUEST, "下架必须给出原因（会展示给已安装的用户）");
     }
-    match st.market.set_revoked(&name, revoked, &reason).await {
-        Ok(true) => Json(json!({ "ok": true })).into_response(),
-        Ok(false) => error_response(StatusCode::NOT_FOUND, "市场里没有这个插件"),
-        Err(e) => {
+    if reason.chars().count() > 500 {
+        return error_response(StatusCode::BAD_REQUEST, "下架原因太长（最多 500 字）");
+    }
+    match st.market.set_revoked(&username, &name, revoked, &reason).await {
+        Ok(()) => Json(json!({ "ok": true })).into_response(),
+        Err(crate::market::RevokeError::NotFound) => {
+            error_response(StatusCode::NOT_FOUND, "市场里没有这个插件")
+        }
+        Err(crate::market::RevokeError::Forbidden(msg)) => {
+            error_response(StatusCode::FORBIDDEN, &msg)
+        }
+        Err(crate::market::RevokeError::Server(e)) => {
             tracing::error!("[market] 下架失败：{e}");
             error_response(StatusCode::INTERNAL_SERVER_ERROR, "服务端内部错误")
         }

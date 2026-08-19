@@ -133,6 +133,25 @@ export async function renderAccount(root: HTMLElement, ctx: AdminCtx): Promise<v
           "当前版本未配置云端服务，账号与数据仅保存在本地、离线可用。接入云端后即可登录并跨设备同步。",
         ),
       );
+      // 「云端未接入」最常见的两种成因是不同的事，用户分不清就只能瞎猜：
+      // ① 本来就是开源版（GitHub 下载 / 自己编译）——正常，填个服务器地址即可；
+      // ② 官网版被开源包顶掉了（旧客户端从 GitHub 更新会这样）——要回官网重装才恢复。
+      // 发行线信息只有后端知道，异步补一行，如实说明当前这份是哪条线。
+      const channelLine = h("div", { class: "info-box-detail", text: "正在确认安装来源…" });
+      root.append(h("div", { class: "info-box" }, channelLine));
+      void api
+        .updateStatus()
+        .then((st) => {
+          channelLine.textContent =
+            st.channel === "oss"
+              ? `当前安装的是「${st.channelDesc}」。开源版不含内置服务器地址，需要自己在「设置 → 网络 → 服务器地址」填一台。` +
+                "如果你原本用的是官网版，说明安装包被开源包覆盖过，要恢复云服务请到官网重新下载安装。"
+              : `当前安装的是「${st.channelDesc}」，但没有读到可用的服务器地址，请检查「设置 → 网络」。`;
+        })
+        .catch(() => {
+          // 读不到就说读不到，不编一个来源出来
+          channelLine.textContent = "没能确认当前安装来源（开源版 / 官网版）。";
+        });
     }
     root.append(list);
   }
