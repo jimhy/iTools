@@ -75,6 +75,7 @@ publish_site() {
   scp -O -P "$NAS_PORT" \
     "$ROOT/website/index.html" \
     "$ROOT/website/ai-plugin.html" \
+    "$ROOT/website/api.html" \
     "$ROOT/website/styles.css" \
     "$NAS_HOST:$NAS_SITE_DIR/"
   echo "    页面已传"

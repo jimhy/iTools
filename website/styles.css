@@ -500,3 +500,134 @@ footer { padding: 38px 0; border-top: 1px solid var(--line); }
   html { scroll-behavior: auto; }
   *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
 }
+
+/* ==========================================================================
+   插件能力页（api.html）
+   --------------------------------------------------------------------------
+   沿用二级页的既定结构：深色 Hero + 浅色正文（与 ai-plugin.html 一致），
+   这样从首页点进来不会觉得换了个站。这一页独有的两样东西：
+   1) 等宽字体的 API 名 —— 全站唯一用到 mono 的地方，给「技术规格」一点质感；
+   2) 权限色标 —— 琥珀=需授权、绿=开箱即用，扫一眼就能看清信任边界在哪。
+   ========================================================================== */
+
+:root { --mono: ui-monospace, "SF Mono", "Cascadia Mono", Consolas, "Liberation Mono", monospace; }
+
+.api-page { background: #f6f7fb; }
+.api-page code { font-family: var(--mono); }
+
+.api-header { position: absolute; color: white; }
+.api-header nav { color: rgba(255, 255, 255, 0.64); }
+.api-header nav a:hover { color: white; }
+.api-header .header-download { border-color: rgba(255, 255, 255, 0.15); color: white; background: rgba(255, 255, 255, 0.08); }
+
+/* ---------- Hero ---------- */
+.api-hero { position: relative; overflow: hidden; padding: 148px 0 96px; color: white; background: #0d1120; }
+.api-hero::before {
+  content: ""; position: absolute; inset: 0;
+  background-image: linear-gradient(rgba(255, 255, 255, 0.028) 1px, transparent 1px), linear-gradient(90deg, rgba(255, 255, 255, 0.028) 1px, transparent 1px);
+  background-size: 62px 62px;
+  -webkit-mask-image: radial-gradient(ellipse 80% 60% at 30% 20%, #000 20%, transparent 78%);
+  mask-image: radial-gradient(ellipse 80% 60% at 30% 20%, #000 20%, transparent 78%);
+}
+.api-hero::after {
+  content: ""; position: absolute; width: 620px; height: 620px; right: -80px; top: -160px; border-radius: 50%;
+  background: radial-gradient(circle, rgba(80, 112, 255, 0.2), rgba(164, 80, 223, 0.08) 46%, transparent 70%); filter: blur(10px);
+}
+.api-hero-inner { position: relative; z-index: 1; max-width: 780px; }
+.api-page .back-link { display: block; color: #7f8ba8; }
+.api-page .back-link:hover { color: white; }
+.api-hero .eyebrow { border-color: rgba(255, 255, 255, 0.12); color: #c3cbe4; background: rgba(255, 255, 255, 0.05); }
+.api-hero h1 { margin: 22px 0 22px; font-size: clamp(46px, 5.4vw, 76px); line-height: 1.04; letter-spacing: -0.075em; }
+.api-hero h1 em { color: transparent; background: var(--gradient); background-clip: text; -webkit-background-clip: text; font-style: normal; }
+.api-lead { max-width: 620px; margin: 0 0 38px; color: rgba(226, 231, 245, 0.76); font-size: 18px; line-height: 1.78; }
+.api-lead code { padding: 2px 7px; border-radius: 7px; background: rgba(255, 255, 255, 0.09); font-size: 15px; }
+
+.api-stats { display: flex; flex-wrap: wrap; gap: 44px; margin: 0 0 40px; }
+.api-stats div { display: flex; flex-direction: column; gap: 4px; }
+.api-stats dt { font-size: 46px; font-weight: 780; letter-spacing: -0.06em; line-height: 1; color: transparent; background: var(--gradient); background-clip: text; -webkit-background-clip: text; }
+.api-stats dd { margin: 0; color: rgba(197, 205, 226, 0.66); font-size: 13px; letter-spacing: 0.04em; }
+
+.api-hero-actions { display: flex; flex-wrap: wrap; gap: 12px; }
+.api-cta { display: inline-flex; align-items: center; gap: 12px; min-height: 66px; padding: 12px 18px; border-radius: 17px; color: white; background: rgba(255, 255, 255, 0.07); border: 1px solid rgba(255, 255, 255, 0.12); transition: transform 180ms ease, background 180ms ease, border-color 180ms ease; }
+.api-cta:hover { transform: translateY(-3px); background: rgba(255, 255, 255, 0.12); border-color: rgba(255, 255, 255, 0.24); }
+.api-cta i { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 11px; background: var(--gradient); font-style: normal; font-size: 15px; }
+.api-cta > span { display: flex; flex-direction: column; gap: 3px; }
+.api-cta strong { font-size: 15px; }
+.api-cta small { color: rgba(255, 255, 255, 0.56); font-size: 11px; }
+.api-cta b { margin-left: 4px; font-weight: 500; opacity: 0.6; }
+.api-start .api-cta { color: var(--ink); background: white; border-color: rgba(19, 25, 41, 0.1); box-shadow: 0 12px 28px rgba(56, 65, 118, 0.08); }
+.api-start .api-cta small { color: var(--muted); }
+.api-start .api-cta:hover { background: white; border-color: rgba(91, 92, 220, 0.3); }
+
+/* ---------- 段落引导语 ---------- */
+.section-lead { max-width: 660px; margin: 0 0 52px; color: var(--muted); font-size: 17px; line-height: 1.78; }
+.section-lead code, .limit-list code, .start-steps code { padding: 2px 6px; border-radius: 6px; background: rgba(19, 25, 41, 0.055); font-family: var(--mono); font-size: 0.92em; }
+
+/* ---------- 授权模型 ---------- */
+.api-trust { background: white; }
+.trust-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 18px; }
+.trust-card { padding: 28px 26px; border: 1px solid rgba(19, 25, 41, 0.08); border-radius: 22px; background: #fafbfe; transition: opacity 520ms ease var(--d, 0ms), transform 520ms cubic-bezier(0.16, 1, 0.3, 1) var(--d, 0ms); }
+.js .trust-card, .js .cap-card, .js .limit-list li { opacity: 0; transform: translateY(14px); }
+.trust-card.in { opacity: 1; transform: none; }
+.trust-card i { display: block; margin-bottom: 16px; font-family: var(--mono); font-style: normal; font-size: 12px; font-weight: 700; letter-spacing: 0.1em; color: transparent; background: var(--gradient); background-clip: text; -webkit-background-clip: text; }
+.trust-card h3 { margin: 0 0 10px; font-size: 17px; letter-spacing: -0.02em; }
+.trust-card p { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.8; }
+
+/* ---------- 能力卡片 ---------- */
+.api-group.guarded { background: white; }
+.cap-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+.cap-card { display: flex; flex-direction: column; padding: 26px 24px; border: 1px solid rgba(19, 25, 41, 0.08); border-radius: 22px; background: white; transition: opacity 520ms ease var(--d, 0ms), transform 520ms cubic-bezier(0.16, 1, 0.3, 1) var(--d, 0ms), box-shadow 180ms ease, border-color 180ms ease; }
+.cap-card.in { opacity: 1; transform: none; }
+.cap-card:hover { border-color: rgba(91, 92, 220, 0.26); box-shadow: 0 16px 34px rgba(56, 65, 118, 0.08); }
+.api-group.guarded .cap-card { background: #fafbfe; }
+.cap-card.wide { grid-column: span 2; }
+.cap-card.accent { border-color: rgba(91, 92, 220, 0.22); background: linear-gradient(150deg, rgba(93, 108, 235, 0.055), rgba(169, 76, 222, 0.035) 60%, transparent); }
+.cap-card > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
+.cap-card h3 { margin: 0; font-size: 17px; letter-spacing: -0.025em; }
+.cap-card > p { margin: 0 0 16px; color: var(--muted); font-size: 14px; line-height: 1.8; }
+.cap-card > p strong { color: #2f3646; font-weight: 650; }
+
+/* 权限色标：琥珀 = 要用户点头，绿 = 装上就能用 */
+.perm { display: inline-block; padding: 5px 9px; border-radius: 8px; border: 1px solid rgba(191, 128, 26, 0.24); color: #9a6410; background: rgba(240, 173, 44, 0.12); font-family: var(--mono); font-size: 11px; font-weight: 600; letter-spacing: -0.01em; white-space: nowrap; }
+.perm-open { border-color: rgba(24, 138, 92, 0.2); color: #167a52; background: rgba(35, 173, 116, 0.1); font-family: inherit; letter-spacing: 0.02em; }
+
+.api-list { margin: auto 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 9px; }
+.api-list li { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.api-list code { padding: 4px 8px; border-radius: 7px; border: 1px solid rgba(19, 25, 41, 0.07); background: rgba(19, 25, 41, 0.038); font-size: 12px; letter-spacing: -0.01em; color: #39415a; }
+.api-note { color: #8b93a6; font-size: 11.5px; }
+
+/* ---------- 边界 ---------- */
+.api-limits { background: #0d1120; color: white; }
+.api-limits .kicker { color: #9aa3c0; }
+.api-limits .section-lead { color: rgba(214, 220, 238, 0.7); }
+.limit-list { max-width: 900px; margin: 0; padding: 0; list-style: none; counter-reset: lim; }
+.limit-list li { position: relative; padding: 22px 0 22px 56px; border-top: 1px solid rgba(255, 255, 255, 0.08); color: rgba(206, 213, 234, 0.72); font-size: 15px; line-height: 1.82; counter-increment: lim; transition: opacity 520ms ease var(--d, 0ms), transform 520ms cubic-bezier(0.16, 1, 0.3, 1) var(--d, 0ms); }
+.limit-list li.in { opacity: 1; transform: none; }
+.limit-list li::before { content: counter(lim, decimal-leading-zero); position: absolute; left: 0; top: 24px; font-family: var(--mono); font-size: 12px; font-weight: 700; color: transparent; background: var(--gradient); background-clip: text; -webkit-background-clip: text; }
+.limit-list strong { display: block; margin-bottom: 4px; color: white; font-weight: 650; font-size: 15.5px; }
+.limit-list code { padding: 2px 6px; border-radius: 6px; background: rgba(255, 255, 255, 0.09); font-family: var(--mono); font-size: 0.9em; color: #dfe5f7; }
+
+/* ---------- 怎么开始 ---------- */
+.api-start { background: white; }
+.api-start-grid { display: grid; grid-template-columns: 0.85fr 1.15fr; gap: 60px; align-items: start; }
+.start-steps { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 14px; }
+.start-steps li { display: flex; gap: 16px; padding: 22px 24px; border: 1px solid rgba(19, 25, 41, 0.08); border-radius: 20px; background: #fafbfe; }
+.start-steps span { display: grid; place-items: center; flex: 0 0 30px; height: 30px; border-radius: 10px; color: white; background: var(--gradient); font-size: 13px; font-weight: 700; }
+.start-steps strong { display: block; margin-bottom: 6px; font-size: 15px; }
+.start-steps p { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.78; }
+
+/* ---------- 响应式 ---------- */
+@media (max-width: 980px) {
+  .trust-grid { grid-template-columns: repeat(2, 1fr); }
+  .cap-grid { grid-template-columns: repeat(2, 1fr); }
+  .api-start-grid { grid-template-columns: 1fr; gap: 36px; }
+}
+@media (max-width: 760px) {
+  .api-header { height: 70px; }
+  .api-hero { padding: 118px 0 72px; }
+  .api-stats { gap: 28px; }
+  .api-stats dt { font-size: 36px; }
+  .trust-grid, .cap-grid { grid-template-columns: 1fr; }
+  .cap-card.wide { grid-column: auto; }
+  .limit-list li { padding-left: 42px; }
+}

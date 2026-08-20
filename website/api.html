@@ -1,0 +1,411 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="iTools 插件能力总览：173 个 window.itools API、20 项可声明权限。文件、进程、设备、本地服务全部开放，且每一项都由用户按插件授权、用时可见、事后可查。"
+    />
+    <meta name="theme-color" content="#f7f8fb" />
+    <title>插件能力 — iTools 能开到什么程度</title>
+    <link rel="icon" href="./public/itools-icon.png" />
+    <link rel="stylesheet" href="./styles.css" />
+    <script>
+      // 同步打标记：只有 JS 可用时才启用「先隐藏再浮现」。
+      // 否则一旦 JS 没跑起来，装饰性动画会把整页内容永久藏起来——
+      // 动画可以没有，内容不能看不见。
+      document.documentElement.classList.add("js");
+    </script>
+  </head>
+  <body class="api-page">
+    <header class="site-header api-header">
+      <div class="container header-inner">
+        <a class="wordmark" href="./index.html" aria-label="返回 iTools 首页">
+          <img src="./public/itools-icon.png" alt="" width="40" height="40" />
+          <span>iTools</span>
+        </a>
+        <nav aria-label="能力页导航">
+          <a href="#trust">授权模型</a>
+          <a href="#open">开箱即用</a>
+          <a href="#guarded">需授权能力</a>
+          <a href="#limits">边界</a>
+        </nav>
+        <a class="header-download" href="/download/iTools-latest-setup.exe">下载 iTools</a>
+      </div>
+    </header>
+
+    <main id="top">
+      <!-- ============ Hero ============ -->
+      <section class="api-hero" aria-labelledby="api-title">
+        <div class="container">
+          <div class="api-hero-inner">
+          <a class="back-link" href="./index.html">← 返回首页</a>
+          <div class="eyebrow"><span></span>插件能力</div>
+          <h1 id="api-title">插件不只是<br />一个小面板。<em>是真软件。</em></h1>
+          <p class="api-lead">
+            读写文件、调起外部程序、拉起本地服务、取摄像头帧、录屏出 mp4——这些以前做不了的事，现在都在
+            <code>window.itools</code> 里。而每一项高危能力，都得由你按插件逐一点头。
+          </p>
+
+          <dl class="api-stats" aria-label="能力规模">
+            <div><dt>173</dt><dd>个 API</dd></div>
+            <div><dt>20</dt><dd>项可声明权限</dd></div>
+            <div><dt>92</dt><dd>项真机验收用例</dd></div>
+          </dl>
+
+          <div class="api-hero-actions">
+            <a class="api-cta" href="./ai-plugin.html"><i aria-hidden="true">✦</i><span><strong>让 AI 替你做一个</strong><small>说清用途即可，3 分钟教程</small></span><b aria-hidden="true">→</b></a>
+            <a class="api-cta ghost" href="#open"><span><strong>先看能做什么</strong><small>按能力分组的完整清单</small></span><b aria-hidden="true">↓</b></a>
+          </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 授权模型 ============ -->
+      <section class="section api-trust" id="trust" aria-labelledby="trust-title">
+        <div class="container">
+          <span class="kicker">授权模型</span>
+          <h2 id="trust-title">能力开得越多，<br />越不能让你失去控制权。</h2>
+          <p class="section-lead">
+            把口子开大很容易，难的是开大之后你还看得住。所以每一项高危能力都同时受这四条约束——
+            它们不是加分项，是能力开放的前提。
+          </p>
+
+          <div class="trust-grid">
+            <article class="trust-card">
+              <i aria-hidden="true">01</i>
+              <h3>默认全部禁用</h3>
+              <p>插件必须在 <code>plugin.json</code> 里<strong>明确声明</strong>要用哪几项能力，再由你在「插件管理」里逐项打开。没声明的、没授权的，调用一律被拒——不是提示，是真的拿不到。</p>
+            </article>
+            <article class="trust-card">
+              <i aria-hidden="true">02</i>
+              <h3>用的时候你看得见</h3>
+              <p>只要有插件正在用摄像头、麦克风或屏幕，托盘就常驻显示「谁正在用什么」，旁边一个「停止」可以立刻掐断。授权那一刻的同意，不等于此后每一刻都被蒙在鼓里。</p>
+            </article>
+            <article class="trust-card">
+              <i aria-hidden="true">03</i>
+              <h3>事后查得到</h3>
+              <p>高危能力的每次调用都写进审计日志，在插件详情页可以直接翻。哪个插件、什么时候、用了什么——不用你去猜。</p>
+            </article>
+            <article class="trust-card">
+              <i aria-hidden="true">04</i>
+              <h3>拿不到的东西就是拿不到</h3>
+              <p>文件访问只能落在<strong>你亲自选中</strong>的目录里，且每次操作都重新校验路径；托管的 ffmpeg / adb 只能按名字调用，插件拿不到可执行文件的真实路径。</p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 开箱即用 ============ -->
+      <section class="section api-group" id="open" aria-labelledby="open-title">
+        <div class="container">
+          <span class="kicker">无需授权</span>
+          <h2 id="open-title">装上就能用的部分。</h2>
+          <p class="section-lead">
+            这些能力不碰你的文件、设备和其它程序，所以不需要单独授权，插件写了就能调。
+            大部分工具类插件到这里就够用了。
+          </p>
+
+          <div class="cap-grid">
+            <article class="cap-card">
+              <header><h3>生命周期与界面</h3><span class="perm perm-open">开箱即用</span></header>
+              <p>插件被什么关键词唤起、带进来什么内容，都从 <code>onEnter</code> 拿；面板高度、提示、关闭都可自己控制。</p>
+              <ul class="api-list">
+                <li><code>onEnter</code><code>onExit</code><code>hide</code><code>exit</code><code>setHeight</code><code>showToast</code></li>
+                <li><code>redirect</code><code>createWindow</code><code>closeWindow</code></li>
+                <li><code>setFeature</code><code>removeFeature</code><code>getFeatures</code><span class="api-note">动态增删自己的关键词</span></li>
+              </ul>
+            </article>
+
+            <article class="cap-card">
+              <header><h3>数据存储</h3><span class="perm perm-open">开箱即用</span></header>
+              <p>按插件物理隔离，A 插件读不到 B 插件的任何一条。要跨设备就用 <code>data</code>，它走账号同步。</p>
+              <ul class="api-list">
+                <li><code>db.*</code><span class="api-note">本机键值</span></li>
+                <li><code>data.*</code><span class="api-note">本地优先 + 云同步</span></li>
+                <li><code>sqlite.*</code><span class="api-note">真 SQLite，可建表可查询</span></li>
+                <li><code>crypto.*</code><span class="api-note">加密存储，放 token 密钥</span></li>
+                <li><code>attach.*</code><span class="api-note">附件（图片等二进制）</span></li>
+                <li><code>settings.*</code><code>account.*</code></li>
+              </ul>
+            </article>
+
+            <article class="cap-card">
+              <header><h3>剪贴板与图像</h3><span class="perm perm-open">开箱即用</span></header>
+              <p>读写剪贴板文本与图片，缩放裁剪转码压缩，以及 OCR 取字、把图钉在桌面上。</p>
+              <ul class="api-list">
+                <li><code>copyText</code><code>readText</code><code>readImage</code><code>writeImage</code><code>saveImage</code></li>
+                <li><code>image.resize</code><code>crop</code><code>convert</code><code>compress</code><code>info</code></li>
+                <li><code>ocr</code><span class="api-note">图片取字</span></li>
+                <li><code>createPin</code><span class="api-note">贴图到桌面</span></li>
+              </ul>
+            </article>
+
+            <article class="cap-card">
+              <header><h3>系统信息与屏幕几何</h3><span class="perm perm-open">开箱即用</span></header>
+              <p>只读的机器信息与坐标换算，不涉及截屏内容，所以不需要授权。</p>
+              <ul class="api-list">
+                <li><code>sys.info</code><code>sys.usage</code><code>sys.getPath</code></li>
+                <li><code>listDisplays</code><span class="api-note">多屏坐标与缩放</span></li>
+                <li><code>screen.toDip</code><code>toPhysical</code><code>rectToDip</code><code>rectToPhysical</code><code>cursorPoint</code></li>
+              </ul>
+            </article>
+
+            <article class="cap-card">
+              <header><h3>通知</h3><span class="perm perm-open">开箱即用</span></header>
+              <p>真·系统通知，不是页面里的假弹层。可以带动作按钮，点击有回调。</p>
+              <ul class="api-list">
+                <li><code>notifyShow</code><code>onNotifyClick</code><code>onNotifyAction</code></li>
+              </ul>
+            </article>
+
+            <article class="cap-card accent">
+              <header><h3>和 AI 一起工作</h3><span class="perm perm-open">开箱即用</span></header>
+              <p>插件可以把自己的能力<strong>暴露成 AI 能调的工具</strong>，也可以把结果直接推进主搜索框——边打字边出结果。</p>
+              <ul class="api-list">
+                <li><code>registerTool</code><span class="api-note">插件能力变成 MCP 工具，AI 可直接调用</span></li>
+                <li><code>onMainPush</code><span class="api-note">结果注入主搜索框</span></li>
+              </ul>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 需授权 ============ -->
+      <section class="section api-group guarded" id="guarded" aria-labelledby="guarded-title">
+        <div class="container">
+          <span class="kicker">需要你逐项授权</span>
+          <h2 id="guarded-title">能真正改变你电脑的部分。</h2>
+          <p class="section-lead">
+            下面每一张卡片右上角那个标签，就是插件必须在 <code>plugin.json</code> 里声明、并由你在插件管理里打开的权限 id。
+            没开的时候，插件调用会被直接拒绝。
+          </p>
+
+          <div class="cap-grid">
+            <article class="cap-card">
+              <header><h3>执行外部程序</h3><span class="perm">runCommand</span></header>
+              <p>拉起任意程序并拿到 <strong>stdout / stderr / 退出码</strong>，长任务可以流式收输出、随时掐断。中文输出自动按 GBK 探测解码。</p>
+              <ul class="api-list"><li><code>exec</code><code>execStream</code><code>execKill</code><code>execQuit</code></li></ul>
+            </article>
+
+            <article class="cap-card">
+              <header><h3>联网与下载</h3><span class="perm">network</span></header>
+              <p>发 HTTP 请求（可取二进制），或把大文件下载落盘并带进度。</p>
+              <ul class="api-list"><li><code>fetch</code><code>download</code><code>downloadCancel</code></li></ul>
+            </article>
+
+            <article class="cap-card wide">
+              <header><h3>文件读写（你选中即授权）</h3><span class="perm">fs-user-scope</span></header>
+              <p>
+                插件弹一个系统对话框，<strong>你亲自选中的那个目录或文件</strong>才成为它的可访问范围，之后可以枚举、读写、算哈希、压缩解压、监听变化。
+                授权会持久保存，也可以随时撤销。
+              </p>
+              <ul class="api-list">
+                <li><code>fs.pickDir</code><code>fs.pickFile</code><code>fs.listScopes</code><code>fs.revokeScope</code></li>
+                <li><code>fs.list</code><code>fs.stat</code><code>fs.hash</code><code>fs.read</code><code>fs.readChunk</code><code>fs.write</code></li>
+                <li><code>fs.zipCreate</code><code>fs.unzip</code><code>fs.watchStart</code><code>fs.watchStop</code><code>fs.getFileIcon</code></li>
+              </ul>
+            </article>
+
+            <article class="cap-card">
+              <header><h3>系统位置与回收站</h3><span class="perm">fs-named-path</span><span class="perm">fs-trash</span></header>
+              <p>访问「临时目录 / 下载 / 浏览器缓存」这类<strong>命名位置</strong>并统计占用，把文件送进回收站（可还原，不是真删）。磁盘清理类工具靠它。</p>
+              <ul class="api-list"><li><code>paths.resolve</code><code>paths.scan</code><code>trash</code><code>showItemInFolder</code></li></ul>
+            </article>
+
+            <article class="cap-card">
+              <header><h3>屏幕捕获</h3><span class="perm">screen-capture</span></header>
+              <p>整屏截图、框选截图、屏幕取色，以及录制 <strong>mp4</strong>（编码走宿主托管的 ffmpeg，插件不用自己带）。</p>
+              <ul class="api-list">
+                <li><code>captureFull</code><code>captureRegion</code><code>screen.pickColorAt</code></li>
+                <li><code>record.videoStart</code><code>record.videoStop</code><span class="api-note">mp4 录屏</span></li>
+                <li><code>startGifRecord</code><code>stopGifRecord</code><span class="api-note">GIF 录屏</span></li>
+              </ul>
+            </article>
+
+            <article class="cap-card">
+              <header><h3>麦克风与系统内录</h3><span class="perm">audio-capture</span></header>
+              <p>录麦克风，或直接录<strong>系统正在播放的声音</strong>（回环声卡），不用装虚拟声卡。</p>
+              <ul class="api-list">
+                <li><code>startAudioRecord</code><code>stopAudioRecord</code></li>
+                <li><code>record.loopbackStart</code><code>record.loopbackStop</code><span class="api-note">系统内录</span></li>
+              </ul>
+            </article>
+
+            <article class="cap-card">
+              <header><h3>摄像头</h3><span class="perm">camera</span></header>
+              <p>枚举摄像头、取单帧，或开一路预览流持续收帧。取帧走 Media Foundation，常见 USB 摄像头的 MJPG / YUY2 / NV12 都能自动转换。</p>
+              <ul class="api-list"><li><code>camera.list</code><code>camera.grab</code><code>camera.streamStart</code><code>camera.streamStop</code></li></ul>
+            </article>
+
+            <article class="cap-card">
+              <header><h3>模拟键鼠输入</h3><span class="perm">input-inject</span></header>
+              <p>向<strong>其它程序</strong>输入文本、粘贴内容、敲快捷键、移动点击鼠标。按输入法原理送字，中文可用。</p>
+              <ul class="api-list">
+                <li><code>input.typeString</code><code>pasteText</code><code>pasteFile</code><code>pasteImage</code><code>keyTap</code></li>
+                <li><code>input.mouseMove</code><code>mouseClick</code><code>mouseDoubleClick</code><code>mouseRightClick</code></li>
+              </ul>
+            </article>
+
+            <article class="cap-card">
+              <header><h3>剪贴板监听</h3><span class="perm">clipboard-watch</span></header>
+              <p>剪贴板一变就回调。剪贴板历史类插件的基础——配合后台常驻，关着面板也在记。</p>
+              <ul class="api-list"><li><code>clipboard.watchStart</code><code>clipboard.watchStop</code><code>clipboard.onChange</code></li></ul>
+            </article>
+
+            <article class="cap-card">
+              <header><h3>桌面窗口管理</h3><span class="perm">window-manage</span></header>
+              <p>枚举其它程序的窗口，聚焦、移动、改大小、最小化最大化、置顶、关闭。窗口整理类工具靠它。</p>
+              <ul class="api-list"><li><code>win.list</code><code>getForeground</code><code>focus</code><code>move</code><code>resize</code><code>setRect</code><code>minimize</code><code>maximize</code><code>restore</code><code>setTopmost</code><code>close</code></li></ul>
+            </article>
+
+            <article class="cap-card">
+              <header><h3>本地服务与局域网发现</h3><span class="perm">local-server</span></header>
+              <p>在本机开一个 HTTP 服务把选中目录共享出去——手机扫一下就能传文件；配合局域网广播自动发现对端。</p>
+              <ul class="api-list"><li><code>serve.start</code><code>serve.stop</code><code>serve.list</code><code>lan.announce</code><code>lan.discover</code></li></ul>
+            </article>
+
+            <article class="cap-card">
+              <header><h3>进程 · 软件 · 启动项 · 电源</h3><span class="perm">process-manage</span><span class="perm">system-read</span><span class="perm">system-manage</span></header>
+              <p>看进程并结束它、列出已安装软件、管理开机启动项、锁屏关机重启休眠。三项能力分属三个权限，各授各的。</p>
+              <ul class="api-list">
+                <li><code>proc.list</code><code>proc.kill</code></li>
+                <li><code>installedApps</code></li>
+                <li><code>startup.list</code><code>startup.setEnabled</code><code>startup.remove</code><code>power.lock</code><code>power.sleep</code><code>power.shutdown</code><code>power.restart</code></li>
+              </ul>
+            </article>
+
+            <article class="cap-card accent">
+              <header><h3>宿主托管的外部程序</h3><span class="perm">runtime</span></header>
+              <p>
+                ffmpeg、adb、yt-dlp 由 iTools 统一下载、<strong>校验 SHA-256</strong> 后管理，插件按名字调用即可——
+                几十上百 MB 的东西不用塞进插件包，插件也拿不到它们的真实路径。ffmpeg 的进度还被解析成结构化对象直接给你。
+              </p>
+              <ul class="api-list"><li><code>runtime.list</code><code>ensure</code><code>exec</code><code>execStream</code><code>kill</code><code>quit</code><code>remove</code></li></ul>
+            </article>
+
+            <article class="cap-card">
+              <header><h3>后台常驻与定时任务</h3><span class="perm">background</span></header>
+              <p>随 iTools 启动就在后台跑，面板关着也在工作；可以注册定时任务。剪贴板历史、监控提醒类插件需要它。</p>
+              <ul class="api-list"><li><code>schedule.add</code><code>schedule.remove</code><code>schedule.list</code><code>schedule.onFire</code></li></ul>
+            </article>
+
+            <article class="cap-card">
+              <header><h3>全局热键与插件托盘</h3><span class="perm">hotkey</span><span class="perm">tray</span></header>
+              <p>注册只属于这个插件的全局快捷键；在系统托盘放一个自己的图标与菜单。</p>
+              <ul class="api-list"><li><code>registerHotkey</code><code>unregisterHotkey</code><code>onHotkey</code><code>tray.set</code><code>tray.remove</code><code>tray.onClick</code><code>tray.onMenu</code></li></ul>
+            </article>
+
+            <article class="cap-card">
+              <header><h3>上下文感知</h3><span class="perm">context-read</span></header>
+              <p>读取「唤起 iTools 之前你正在用的那个窗口」是什么、浏览器地址栏是什么、资源管理器停在哪个目录——插件据此判断你想干什么。</p>
+              <ul class="api-list"><li><code>context.activeWindow</code><code>context.browserUrl</code><code>context.folderPath</code></li></ul>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 边界 ============ -->
+      <section class="section api-limits" id="limits" aria-labelledby="limits-title">
+        <div class="container">
+          <span class="kicker">边界</span>
+          <h2 id="limits-title">做不到的，也一并写清楚。</h2>
+          <p class="section-lead">
+            能力清单容易写得漂亮，真正有用的是知道它在什么情况下不工作。下面每一条都是真机验收里实际撞到过的。
+          </p>
+          <ul class="limit-list">
+            <li>
+              <strong>锁屏时，屏幕与输入相关能力一律失败。</strong>
+              截屏、录屏、取色、鼠标移动、弹系统对话框在锁屏后全部拿不到句柄——这是 Windows 的会话隔离，不是 iTools 的限制。
+              后台常驻插件必须处理这类失败，不能假设屏幕随时可用。
+            </li>
+            <li>
+              <strong>模拟输入要求目标是前台窗口。</strong>
+              而且对以管理员权限运行的窗口无效（Windows UIPI 拦截），普通权限的程序碰不到高权限程序。
+            </li>
+            <li>
+              <strong>执行外部程序不经过 shell。</strong>
+              参数逐个传给目标程序，所以 <code>&amp;</code>、<code>|</code>、<code>&gt;</code> 这些 shell 符号不会生效——要管道请自己起 <code>cmd /c</code>。
+            </li>
+            <li>
+              <strong>文件访问不能靠猜路径。</strong>
+              插件写一个绝对路径进去是没用的，必须由你在对话框里亲自选中；而且每次读写都会重新解析真实路径，防止授权后被替换成软链接绕过。
+            </li>
+            <li>
+              <strong>托管运行时必须先下载。</strong>
+              ffmpeg 约 160 MB，首次使用需要 <code>runtime.ensure</code> 下载并校验哈希；校验不通过绝不落盘，宁可装不上也不放行来路不明的可执行文件。
+            </li>
+            <li>
+              <strong>摄像头录像不由 iTools 直接提供。</strong>
+              要录摄像头请用 <code>camera.streamStart</code> 取帧后交给托管的 ffmpeg——<code>record.videoStart</code> 走的正是这条路。
+            </li>
+          </ul>
+        </div>
+      </section>
+
+      <!-- ============ 怎么开始 ============ -->
+      <section class="section api-start" aria-labelledby="start-title">
+        <div class="container api-start-grid">
+          <div>
+            <span class="kicker">怎么开始</span>
+            <h2 id="start-title">三步，<br />从想法到能用。</h2>
+            <p class="section-lead">
+              不会写代码也能做——把想解决的问题说给 AI 听，它会按规范生成、运行并调试。
+            </p>
+            <a class="api-cta" href="./ai-plugin.html"><i aria-hidden="true">✦</i><span><strong>看 AI 创建教程</strong><small>约 3 分钟</small></span><b aria-hidden="true">→</b></a>
+          </div>
+          <ol class="start-steps">
+            <li><span>1</span><div><strong>声明能力</strong><p>在 <code>plugin.json</code> 的 <code>permissions</code> 里写上要用的权限 id，比如 <code>["runCommand", "fs-user-scope"]</code>。</p></div></li>
+            <li><span>2</span><div><strong>用户授权</strong><p>在「插件管理」里，这个插件下会出现对应的开关。你打开哪一项，它才拿得到哪一项。</p></div></li>
+            <li><span>3</span><div><strong>直接调用</strong><p>页面里 <code>await itools.fs.pickDir()</code> 就能用了。没授权的调用会抛出明确错误，不会静默失败。</p></div></li>
+          </ol>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <div class="container footer-inner">
+        <a class="wordmark" href="./index.html"><img src="./public/itools-icon.png" alt="" width="34" height="34" /><span>iTools</span></a>
+        <p>为专注工作而生的 Windows 效率启动器。</p>
+        <a href="./ai-plugin.html">AI 创建插件教程</a>
+      </div>
+    </footer>
+
+    <script>
+      // 能力卡片逐个浮现。降级策略：不支持 IntersectionObserver 的浏览器直接显示全部内容
+      // ——动画是锦上添花，绝不能因为它让内容看不见。
+      (() => {
+        const items = document.querySelectorAll(".cap-card, .trust-card, .limit-list li");
+        if (!("IntersectionObserver" in window) || matchMedia("(prefers-reduced-motion: reduce)").matches) {
+          items.forEach((el) => el.classList.add("in"));
+          return;
+        }
+        const io = new IntersectionObserver(
+          (entries) => {
+            entries.forEach((e) => {
+              if (!e.isIntersecting) return;
+              e.target.classList.add("in");
+              io.unobserve(e.target);
+            });
+          },
+          { rootMargin: "0px 0px -8% 0px", threshold: 0.05 }
+        );
+        items.forEach((el, i) => {
+          el.style.setProperty("--d", (i % 6) * 55 + "ms");
+          io.observe(el);
+        });
+
+        // 兜底：锚点跳转或快速滚动时，观察器可能一次都没采样到中间这批元素，
+        // 它们就会永久停在 opacity:0。真机上点导航「边界」跳过去时就撞到了这个。
+        // 所以给一个硬性时限——到点无条件全显，动画没播到不要紧，内容必须在。
+        setTimeout(() => {
+          items.forEach((el) => {
+            el.style.setProperty("--d", "0ms");
+            el.classList.add("in");
+          });
+        }, 4000);
+      })();
+    </script>
+  </body>
+</html>
