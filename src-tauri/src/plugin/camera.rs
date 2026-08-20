@@ -129,7 +129,12 @@ pub struct CameraDevice {
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct GrabOptions {
-    /// 期望的采集分辨率；缺省用设备默认分辨率。设备不支持该分辨率会直接报错，不做静默降级。
+    /// 期望的采集分辨率；缺省用设备默认分辨率。**`width` 与 `height` 必须同时给才生效**。
+    ///
+    /// 设备不支持所请求的分辨率时会**静默退化**到设备默认分辨率（只要 RGB32、不挑尺寸），
+    /// 不报错——用户传了一个这台摄像头不支持的尺寸，不该让整次取帧直接失败。
+    /// 代价是返回值里没有宽高字段，实际分辨率要自己解码图片才知道；预览流的 `onFrame`
+    /// 则会如实带上协商到的 `width` / `height`。
     pub width: Option<u32>,
     pub height: Option<u32>,
     /// 输出格式："png"（默认，无损）或 "jpeg"（有损、体积更小）。
@@ -732,8 +737,9 @@ mod mf {
     }
 
     /// 打开设备并把首路视频流的输出格式设为 `MFVideoFormat_RGB32`（内存布局为 BGRX，见模块
-    /// 头「已知取舍」）；`want_w`/`want_h` 都给出时会一并请求该分辨率，设备不支持会直接报错，
-    /// 不做静默降级。调用方负责在用完后对返回的 `source` 调用 `Shutdown()` 释放设备。
+    /// 头「已知取舍」）；`want_w`/`want_h` 都给出时会一并请求该分辨率，**设备不支持则退一步
+    /// 只要 RGB32、由设备给默认分辨率**（见下方 fallback 分支），不让整次取帧失败。
+    /// 调用方负责在用完后对返回的 `source` 调用 `Shutdown()` 释放设备。
     pub(super) fn open_reader(act: &IMFActivate, want_w: Option<u32>, want_h: Option<u32>) -> Result<OpenedCamera, String> {
         // SAFETY: ActivateObject 打开设备，返回值归调用方所有，调用方需在用完后调用
         // source.Shutdown()（本函数出错分支已经这样做；成功分支的释放责任交给上层调用方）。

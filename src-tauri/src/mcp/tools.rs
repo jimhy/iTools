@@ -66,17 +66,28 @@ const DOC_DEV: &str = include_str!("../../../doc/插件系统/插件开发规范
 const DOC_CENTER: &str = include_str!("../../../doc/插件系统/开发者中心.md");
 const DOC_DIST: &str = include_str!("../../../doc/插件系统/插件分发规范.md");
 
+// ---- 完整 API 参考与清单规范：**没装 skill 的 AI 只能从这里拿到它们** ----
+//
+// 「开发规范」那份自己写着「完整且最新的 API 与权限清单以 skills/ 下这两份为准」，
+// 可 skills/ 是随包资源、不在 AI 的工作目录里，它读不到——于是 AI 手上只有覆盖
+// 一小部分能力的那份，写出来的插件用不上摄像头、录屏、runtime 这些后加的能力，
+// 甚至会告诉用户「iTools 不支持」。所以这两份也必须由 MCP 直接供出来。
+const DOC_API: &str = include_str!("../../../skills/itools-plugin-dev/references/window-itools-api.md");
+const DOC_MANIFEST: &str = include_str!("../../../skills/itools-plugin-dev/references/plugin-spec.md");
+
 /// 文档 id → (展示名, 正文)。id 用中文是刻意的：模型看参数说明就知道该要哪份。
 fn doc_of(name: &str) -> Option<(&'static str, &'static str)> {
     match name.trim() {
         "开发规范" | "plugin-dev" => Some(("插件开发规范", DOC_DEV)),
+        "API 参考" | "API参考" | "api" => Some(("window.itools 完整 API 参考", DOC_API)),
+        "清单规范" | "manifest" => Some(("plugin.json 清单字段与权限表", DOC_MANIFEST)),
         "开发者中心" | "dev-center" => Some(("开发者中心（调试与提审）", DOC_CENTER)),
         "分发规范" | "distribution" => Some(("插件分发规范", DOC_DIST)),
         _ => None,
     }
 }
 
-const DOC_NAMES: &[&str] = &["开发规范", "开发者中心", "分发规范"];
+const DOC_NAMES: &[&str] = &["开发规范", "API 参考", "清单规范", "开发者中心", "分发规范"];
 
 // ==================== 工具清单 ====================
 
@@ -86,16 +97,17 @@ pub fn list() -> Vec<Value> {
     vec![
         json!({
             "name": "read_docs",
-            "description": "读 iTools 插件开发规范原文（Markdown）。**装了 itools-plugin-dev skill 的话规范摘要已在你上下文里，\
-                通常不必调**；没装、或需要逐字原文与边角细节时再调。",
+            "description": "读插件开发文档原文。**没装 itools-plugin-dev skill 必先读「API 参考」**——\
+                window.itools 全部 API 的唯一完整来源，不读会漏掉摄像头/录屏/运行时等大半能力。\
+                装了 skill 按需再调。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "doc": {
                         "type": "string",
                         "enum": DOC_NAMES,
-                        "description": "要读哪一份：「开发规范」= 怎么写插件（最常用）；\
-                            「开发者中心」= 调试环境与提审流程；「分发规范」= 上架与更新策略。"
+                        "description": "「开发规范」= 怎么写插件；「API 参考」= 全部 API 签名与限制（用高危能力必读）；\
+                            「清单规范」= 清单字段与权限表；「开发者中心」= 调试提审；「分发规范」= 上架更新。"
                     }
                 },
                 "required": ["doc"]
@@ -527,9 +539,59 @@ mod tests {
     #[test]
     fn docs_accept_english_aliases() {
         assert!(doc_of("plugin-dev").is_some());
+        assert!(doc_of("api").is_some());
+        assert!(doc_of("manifest").is_some());
         assert!(doc_of("dev-center").is_some());
         assert!(doc_of("distribution").is_some());
         assert!(doc_of("不存在的文档").is_none());
+    }
+
+    /// MCP 供出的「API 参考」必须真的覆盖每一类能力。
+    ///
+    /// # 为什么值得专门守这一条
+    ///
+    /// 没装 skill 的 AI 只能从 `read_docs` 拿文档。它拿到什么，就以为平台**只有**什么——
+    /// 拿不到摄像头那一节，用户说「做个录屏插件」它就会如实回答「iTools 不支持」，
+    /// 而不是去查。这不是查得到查不到的问题，是会让 AI 得出**相反结论**的问题。
+    ///
+    /// 这条曾经真的发生过：摄像头、mp4 录屏、系统内录、截屏、OCR 这些能力上线后，
+    /// 给 AI 看的那份 API 参考里 `camera` 出现 **0 次**。所以这里按能力逐个点名，
+    /// 谁把某一节删了或改了名字，测试当场变红。
+    #[test]
+    fn api_reference_covers_every_capability_family() {
+        let (_, api) = doc_of("API 参考").expect("API 参考必须能取到");
+        for probe in [
+            "camera.grab",          // 摄像头
+            "record.videoStart",    // mp4 录屏
+            "record.loopbackStart", // 系统内录
+            "captureFull",          // 截屏
+            "itools.ocr",           // 离线 OCR
+            "runtime.ensure",       // 宿主托管运行时
+            "fs.pickDir",           // 用户选择即授权的文件访问
+            "execStream",           // 执行外部程序
+            "serve.start",          // 本地服务
+            "input.typeString",     // 输入注入
+            "clipboard.watchStart", // 剪贴板监听
+            "win.list",             // 窗口管理
+            "schedule.add",         // 定时任务
+            "registerTool",         // 暴露为 MCP 工具
+        ] {
+            assert!(
+                api.contains(probe),
+                "API 参考里找不到 `{probe}`——没装 skill 的 AI 会因此认定平台不支持这项能力"
+            );
+        }
+
+        // 清单规范那份要能回答「这项能力该声明哪个权限」，权限表缺一项就等于那项能力用不了
+        let (_, manifest) = doc_of("清单规范").expect("清单规范必须能取到");
+        for perm in [
+            "runCommand", "network", "screen-capture", "audio-capture", "camera", "hotkey",
+            "fs-user-scope", "fs-named-path", "fs-trash", "context-read", "input-inject",
+            "clipboard-watch", "window-manage", "local-server", "process-manage",
+            "system-read", "system-manage", "runtime", "background", "tray",
+        ] {
+            assert!(manifest.contains(perm), "清单规范的权限表里缺 `{perm}`");
+        }
     }
 
     #[test]

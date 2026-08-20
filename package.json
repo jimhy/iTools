@@ -8,8 +8,10 @@
     "build": "tsc && npm run check:contract && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "check": "tsc --noEmit && npm run check:contract",
-    "check:contract": "node scripts/check-contract.mjs"
+    "check": "tsc --noEmit && npm run check:contract && npm run check:dts",
+    "check:contract": "node scripts/check-contract.mjs",
+    "gen:dts": "node scripts/gen-itools-dts.mjs",
+    "check:dts": "node scripts/gen-itools-dts.mjs --check"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.1.1"

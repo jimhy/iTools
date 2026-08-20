@@ -138,7 +138,8 @@ curl.exe --noproxy "*" -s -X POST http://127.0.0.1:7345/mcp `
 
 ## 四、window.itools API（面板里可用）
 
-完整签名见 `references/window-itools-api.md` 与 `assets/itools.d.ts`。常用：
+完整签名见 `references/window-itools-api.md`（**173 个 API 的唯一完整来源**，含每一项的真实限制与错误文案）。
+没装本 skill 时，同一份内容可经开发者中心 MCP 的 `read_docs({doc: "API 参考"})` 拿到。常用：
 
 | 分类 | 方法 |
 |---|---|
@@ -157,6 +158,8 @@ curl.exe --noproxy "*" -s -X POST http://127.0.0.1:7345/mcp `
 | 全局热键（授权 `hotkey`） | `registerHotkey(accel,code?)` · `unregisterHotkey(accel)` · `onHotkey(cb)` |
 | 录音（授权 `audio-capture`） | `startAudioRecord()` · `stopAudioRecord()`→ArrayBuffer(WAV) |
 | 录屏（授权 `screen-capture`） | `startGifRecord()` · `stopGifRecord()`→ArrayBuffer(GIF) |
+| **摄像头**（授权 `camera`） | `camera.list()` · `camera.grab(deviceId,opts?)`→base64（**不带 data URI 前缀**）· `camera.streamStart(deviceId,opts?,handlers)`→streamId（预览流，**fps 上限 15、建议不超 640×480**）· `camera.streamStop(id)`。⚠️ **不提供录像接口**，要录像用预览帧喂托管 ffmpeg |
+| **mp4 录屏 / 系统内录**（授权 `screen-capture` / `audio-capture`） | `record.videoStart(opts?,onProgress)`→recordId · `record.videoStop(id)`→**mp4 绝对路径**（编码走托管 ffmpeg，**必须先 `runtime.ensure("ffmpeg")`**）· `record.loopbackStart()`/`loopbackStop()`→WAV（录系统正在播放的声音，不用装虚拟声卡） |
 | 高危（需授权，见第六节） | `runCommand(program, args?)` · `fetch(url, init?)` |
 | UI/平台 | `showToast(msg)`（同步）· `platform.{isWindows,isMacOS,isLinux,isDev}` |
 | **执行程序拿输出**（授权 `runCommand`） | `exec(prog,args,opts?)`→`{code,stdout,stderr,truncated}` · `execStream(...)` + `execKill/execQuit`（GBK 自动解码） |

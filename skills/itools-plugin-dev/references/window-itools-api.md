@@ -560,6 +560,527 @@ itools.onEnter((info) => { /* ... */ });
 
 > 值得注意：`registerTool` 触发的后台拉起**不要求** `plugin.json` 声明 `"background": true`——宿主在外部 AI 调用时会按需临时把插件拉起来，这一点与「随 iTools 启动」开关无关。
 
+## 摄像头（`camera`，需 `camera` 授权）
+
+设备枚举、单帧抓拍、低帧率预览流。基于 Media Foundation 实现，**仅 Windows**——非 Windows 平台 `list` / `grab` / `streamStart` 一律报错 `"摄像头能力仅支持 Windows"`，不是返回空数组。**不提供录像接口**（`camera.rs` 明确取舍：项目里没有视频编码器依赖，宁可不做也不给一个产出坏文件的假接口）；要录像得自己拉预览帧喂给 `itools.runtime` 托管的 ffmpeg。
+
+授权是两道门：`plugin.json` 的 `permissions` 里必须声明 `"camera"`，且用户在「插件管理」里授权；任一不满足都返回 `"插件未获授权使用摄像头（请在「插件管理」里授权 camera）"`。调用窗口没绑定插件会话时报 `"没有正在运行的插件"`。
+
+- `itools.camera.list(): Promise<Array<{ deviceId: string; name: string; formats: Array<{ width: number; height: number; fps: number | null }> }>>` — 列出系统当前可见的摄像头；`deviceId` 是 Media Foundation 的符号链接（不是友好名字），`grab` / `streamStart` 都靠它定位设备，`name` 读不到时是空字符串 `""`，没有摄像头就返回 `[]` 而不报错。
+  - ⚠️ **`formats` 是尽力而为**：枚举原生格式必须真正把设备打开一次，设备正被别的程序占用就打不开，此时该设备的 `formats` 诚实返回 `[]`（`deviceId` / `name` 仍然正常）。
+  - ⚠️ 每台设备最多枚举 64 条格式（`MAX_FORMATS`），按 `(宽, 高, 帧率)` 去重；`fps` 由设备上报的分数四舍五入得到，取不到或算出 0 时是 `null`，不编造。
+  - ⚠️ 这一次调用会对**每台**设备做一遍「打开 → 读格式 → 关闭」，设备多时明显变慢，期间会短暂占用设备。拿不到符号链接的设备直接跳过，不会出现在结果里。
+
+- `itools.camera.grab(deviceId: string, opts?: { width?: number; height?: number; format?: "png" | "jpeg" | "jpg"; quality?: number }): Promise<string>` — 抓一帧静态图，返回图片字节的标准 base64（**不带** `data:image/...;base64,` 前缀，前缀自己拼）。
+  - `format` 默认 `"png"`（无损）；`"jpeg"` / `"jpg"` 走 JPEG，`quality` 默认 90、夹到 1~100。**其它任意值（如 `"webp"`）会静默按 PNG 处理**，不报错。
+  - 返回值里**没有宽高字段**：实际分辨率是设备协商结果，要知道只能自己解码图片。
+  - ⚠️ **分辨率是「请求」不是保证，且 `width` 与 `height` 必须同时给才生效**（只给一个会被完全忽略）。设备不支持所请求的分辨率时，实现会退一步只要 RGB32、由设备给默认分辨率——**静默退化，不报错**。（`camera.rs` 里 `GrabOptions::width` 的注释写的是「不做静默降级」，与实现不符，以实现为准。）
+  - ⚠️ 每次调用固定读 3 帧、只保留最后一次成功的那帧（丢弃刚开机的自动曝光/白平衡帧）。单次读帧碰到空样本最多重试 60 次、每次 sleep 20ms（≈1.2 秒），所以最坏情况一次 `grab` 会阻塞数秒。
+  - ⚠️ 抓完立刻 `Shutdown` 释放设备，**因此托盘的「正在使用摄像头」指示器（每秒轮询一次）通常来不及显示 `grab`**——`camera.rs` 模块头写明这是刻意取舍。
+  - ⚠️ 代码里对 `width`/`height` 和返回 base64 的大小**都没有上限**，高分辨率 PNG 会是极大的字符串，按需自己控制。
+  - 典型错误：`"deviceId 不能为空"`、`"找不到摄像头设备（deviceId=…，可能已拔出或被系统重新枚举，试试重新调用摄像头列表）"`、`"打开摄像头失败（可能被其它程序占用）: …"`、`"设置摄像头输出格式失败（该设备可能不支持直采 RGB，或不支持所选分辨率）: …"`、`"摄像头连续 60 次未返回帧数据（设备可能被其它程序独占）"`。
+
+- `itools.camera.streamStart(deviceId: string, opts?: { width?: number; height?: number; fps?: number; quality?: number }, handlers?: { onFrame?: (p: { streamId: string; b64: string; width: number; height: number }) => void; onStopped?: (reason: string) => void }): Promise<string>` — 启动预览流，持续把 JPEG 帧推给 `onFrame`，返回 `streamId`（纳秒时间戳 hex + `-` + 自增计数 hex）供 `streamStop` 使用。
+  - `onFrame` 的 `b64` **始终是 JPEG**（预览流没有 PNG 选项），无 data URI 前缀；`width`/`height` 是设备实际协商到的分辨率，不一定等于你请求的。回调按 `streamId` 过滤，只收本流的帧。
+  - `onStopped` 只拿到一个字符串 `reason`（就是读帧失败的错误文案，如 `"摄像头数据流已结束"`）。
+  - ⚠️ **`fps` 硬上限 15**（`MAX_STREAM_FPS`），默认 10，传入值夹到 1~15；`quality` 默认 70，夹到 1~100。
+  - ⚠️ **建议分辨率不超过 640×480**：每帧要走「MF 出图 → JPEG → base64 → 拼 JS 字符串 → `webview.eval` 注入」，1280×720 起单帧字符串十几万字符，10fps 会明显拖慢插件窗口。高分辨率场景请改用 `grab` 按需抓单帧。这是如实的能力边界，不是待优化的 bug。
+  - ⚠️ 分辨率规则与 `grab` 完全相同：`width`/`height` 同时给才生效，设备不支持就静默退化到设备默认分辨率（以 `onFrame` 里的 `width`/`height` 为准）。
+  - ⚠️ 节流是**丢帧式**的：没到下一个出帧时间点的帧直接丢弃（连 JPEG 编码都不做），不会攒帧。JPEG 编码失败只跳过该帧并写宿主日志，**不通知插件**。
+  - ⚠️ 帧只推给**发起调用的那个窗口**（`plugin` / `plugin-dev` / `plugin-bg-<id>`），别的窗口收不到。
+  - ⚠️ **`onStopped` 只代表「意外结束」**：主动 `streamStop`、托盘一键掐断、宿主切换插件窗口或关闭后台常驻实例，走的都是静默退出分支，**不会**触发 `onStopped`。
+  - ⚠️ 桥接层的事件回调注册后**永不注销**：每次 `streamStart` 都会往同一个通道再压一份回调，反复启停回调数量只增不减（靠 `streamId` 过滤所以不会串流，但会白白累积）。
+  - ⚠️ 代码里没有「每个插件最多几路流」的限制，同时开多路要自己节制。
+  - 启动阶段的错误除与 `grab` 相同的那套打开/协商失败文案外，还有 `"打开摄像头超时"`（等待设备就绪超过 8 秒）与 `"预览流线程提前退出"`；**运行阶段的失败不 reject，走 `onStopped`**。
+
+- `itools.camera.streamStop(streamId: string): Promise<void>` — 停掉一路自己开的预览流，resolve 值为空。
+  - ⚠️ **没有帧数、没有时长、没有停止原因**——这些信息代码里根本不收集，要统计帧数得自己在 `onFrame` 里累加。
+  - ⚠️ 只是把停止标志置位并从注册表摘除，worker 线程在**下一轮循环**才真正退出并释放设备（一次读帧最长约 1.2 秒），调用返回时设备可能还没释放完。
+  - ⚠️ 控制类命令也复核权限：`camera` 授权若在流运行期间被用户撤销，`streamStop` 会直接以未授权报错，**插件自己停不掉这路流**，只能靠托盘一键掐断、切换插件窗口或关闭后台实例来收摊。
+  - 错误：`"该预览流不存在或已结束"`（没存在过 / 已停过 / 已因读帧出错自行结束）、`"该预览流不属于本插件"`（归属校验用完整会话身份 = 插件 id + dev 标志，调试会话与同名正式插件互相停不掉）。
+
+⚠️ **隐私指示器无法规避**：只要有预览流在跑，托盘 tooltip 就会显示 `iTools — <插件id> 正在使用摄像头`，菜单里出现「⚠ …（点击停止）」，插件没有任何接口能隐藏或阻止它；用户点一下会掐断**当前所有**敏感能力使用（麦克风 / 录屏 / 摄像头 / 录屏录音），不只是你这一路。此外宿主在「插件窗口被换成另一个插件」和「关闭后台常驻实例」两处会强制停掉该会话名下所有预览流。
+
+⚠️ **每次权限判定都会写审计**：无论放行还是拒绝都记一条（同插件同能力 5 秒内的连续调用合并计数），用户在插件管理里能看到你调了多少次摄像头。
+
+```js
+// 1) 列设备
+const devs = await itools.camera.list();
+if (!devs.length) throw new Error("没有可用摄像头");
+const cam = devs[0];
+console.log(cam.name, cam.formats.map(f => `${f.width}x${f.height}@${f.fps ?? "?"}`).join(", "));
+
+// 2) 单帧抓拍：返回裸 base64，前缀自己拼
+const b64 = await itools.camera.grab(cam.deviceId, { width: 640, height: 480, format: "jpeg", quality: 85 });
+document.querySelector("#shot").src = "data:image/jpeg;base64," + b64;
+
+// 3) 预览流：fps 上限 15，分辨率别超过 640x480
+const img = document.querySelector("#preview");
+let frames = 0; // 想统计帧数只能自己数
+const sid = await itools.camera.streamStart(
+  cam.deviceId,
+  { width: 640, height: 480, fps: 10, quality: 70 },
+  {
+    onFrame: (p) => { frames++; img.src = "data:image/jpeg;base64," + p.b64; }, // p:{streamId,b64,width,height}
+    onStopped: (reason) => console.warn("预览意外结束：", reason),               // 主动停/被掐断不触发
+  }
+);
+
+setTimeout(async () => {
+  try {
+    await itools.camera.streamStop(sid); // resolve 值为空
+    console.log("已停止，共收到", frames, "帧");
+  } catch (e) {
+    console.error(e); // 例如 "该预览流不存在或已结束"
+  }
+}, 5000);
+```
+
+## mp4 录屏（`record.video*`，需 `screen-capture` 授权）
+
+正式版录像：真 h264/mp4、可选混入系统声音与麦克风。视频编码外包给宿主托管的 ffmpeg，所以实际要用的插件通常要同时声明 `screen-capture` + `runtime`（带音频再加 `audio-capture`）；权限必须先写进 `plugin.json` 的 `permissions`，再由用户在「插件管理」里授权，缺任一都会被拒（未声明还会额外记一条审计）。
+
+- `itools.record.videoStart(opts?: { area?: { x: number; y: number; w: number; h: number }; displayId?: number; hwnd?: number; fps?: number; includeSystemAudio?: boolean; includeMic?: boolean }, onProgress?: (p: { recordId: string; elapsedMs: number; frames: number; sizeBytes: number }) => void): Promise<string>` — 开始录制并返回 `recordId`（形如 `rec-<纳秒时间戳16进制>-<自增计数16进制>`），录制期间约每 500ms 回调一次进度。
+- `itools.record.videoStop(recordId: string): Promise<string>` — 停止录制，等 ffmpeg 收尾（有音频时再混流一遍），返回最终 mp4 的**绝对路径字符串**（不是文件数据）。
+
+⚠️ 必须先 `itools.runtime.ensure("ffmpeg")`（那条 API 需 `runtime` 授权），否则 videoStart 直接报「未找到宿主托管的 ffmpeg，请先调用 itools.runtime.ensure('ffmpeg') 安装后再开始录制」，不会先录一半才发现编码不了。
+
+⚠️ `includeSystemAudio` / `includeMic` 任一为 `true` 时**还需** `audio-capture`，只有 `screen-capture` 会报「录屏+录音需要同时授权 screen-capture 与 audio-capture（请在「插件管理」里补授权 audio-capture）」。
+
+⚠️ `fps` 缺省 15，被夹在 1~30：传 60 会被**静默**压到 30，传 0 抬到 1，都不报错。
+
+⚠️ 输出宽高强制向下取偶（H.264 的 yuv420p 要求偶数），1921 宽的区域实际录成 1920；取偶后不足 2 像素报「录制区域过小（不足 2x2 像素）」。
+
+⚠️ `area` 是相对**所选显示器左上角**的局部像素坐标，不是虚拟桌面全局坐标——写成全局坐标会报「录制区域超出显示器边界（显示器 {W}x{H}）」。`displayId` 取自 `itools.listDisplays()`，`hwnd` 取自 `itools.win.list()`；给了 `hwnd` 就忽略 `area`/`displayId`。
+
+⚠️ 窗口（`hwnd`）录制是退化路径：xcap 只给显示器提供事件驱动的 `video_recorder()`，窗口只能定时轮询 `capture_image()`，CPU 更高；目标窗口被遮挡/最小化导致抓取失败时实现选择**体面结束录制**（不重试、不报错），你会得到一段提前结束的视频。
+
+⚠️ 没有 `duration`/`maxSeconds` 参数，视频侧也没有时长上限——必须插件自己调 `videoStop`。但音频采集线程上限 3600 秒，超过 1 小时后音频线程自行退出、视频继续；混流带 `-shortest`，最终 mp4 会被截到较短那条流的长度。
+
+⚠️ 音视频弱同步（实现方写明的已知边界，不是罕见 bug）：`-framerate` 是名义帧率，取不到新帧就复用上一帧；音频是独立线程实时采样、事后与视频 `-shortest` 对齐混流。系统卡顿丢帧或采样率漂移时，几十分钟以上的长录制可能音画轻微不同步。音频还全程缓存在内存（`Vec<i16>`），不分段写盘。
+
+⚠️ `onProgress` 的桥接是**只加不减的全局监听，且不按 recordId 过滤**：每次 `videoStart` 都往回调数组里 push 一个，从不移除；同时录多路时每个回调都会收到**所有**录制的进度。必须自己比对 `p.recordId`。
+
+⚠️ `sizeBytes` 是对静默视频文件（有音频时是 `_tmp_video_*.mp4` 临时文件）做实时 `stat` 的读数，取不到为 0；ffmpeg 自己有编码/写盘缓冲，这是近似值，不代表「已安全落盘」。`frames` 是已写入 ffmpeg 标准输入的帧数，含「取不到新帧时复用上一帧」的那些。
+
+⚠️ 落盘在 `%LOCALAPPDATA%\itools\plugin-recordings\record_<YYYYmmdd_HHMMSS>_<recordId>.mp4`（debug 构建是 `itools-dev`），时间戳取本地时区。**插件读不回来**：`itools.fs.*` 对 iTools 数据根是硬黑名单（「禁止访问 iTools 自身的数据目录（会破坏插件间数据隔离），请重新选择其它文件夹或文件」），即使用户在对话框里亲自选中也会被拒；`itools.readFile` 只认插件自己的沙盒。可用的路子是 `itools.openPath(filePath)`——无需授权，扩展名白名单含 `mp4`（也含 `wav`/`gif`）。把文件搬到用户目录的通路**未确认**。
+
+⚠️ `videoStop` 无权限门禁，只做归属校验（插件 id + `dev` 标志都要对得上，同名的调试会话与正式会话是两个归属者）。等待预算：等 ffmpeg 收尾最多 120 秒（超时报「等待 ffmpeg 收尾超时」并 kill），混流最多 600 秒；join/编码/混流全在 blocking 线程池，不冻结 UI，但 Promise 会真的挂那么久。
+
+⚠️ 混流失败时**故意不删中间产物**，错误信息里带上保留下来的无声视频与 wav 路径（「ffmpeg 混流音频失败（退出码 …）……已保留无声视频与音频原始文件：…」），不让已录内容凭空丢失。
+
+⚠️ 录制期间托盘显示「屏幕录制（mp4）」并可一键掐断（算在 `screen-capture` 名下）。被掐断时只置停止标志并 `kill` ffmpeg，会话仍留在状态表里——之后调 `videoStop` 拿到的是「ffmpeg 视频编码失败（退出码 …）：…」而不是文件路径。插件被禁用、被卸载、被切换走时同样强制掐断；但**撤销授权本身不会中断进行中的录制**，只影响下一次调用。
+
+⚠️ 锁屏时 `videoStart` 报「创建屏幕捕获会话失败: 拒绝访问」（真机验收实测）。这是 Windows 会话隔离的正常行为——后台常驻插件不能假设屏幕能力随时可用。
+
+```js
+// plugin.json: "permissions": ["screen-capture", "runtime"]（要声音再加 "audio-capture"）
+async function recordScreen() {
+  // 1) 确保宿主已装 ffmpeg（首次会真下载约 167 MB；已装则立即返回）
+  await itools.runtime.ensure("ffmpeg", p => {
+    console.log("ffmpeg", p.received, "/", p.total, p.done ? "done" : "");
+  });
+
+  // 2) 开录：主显示器全屏、15fps、混入系统声音
+  let myId = null;
+  myId = await itools.record.videoStart(
+    { fps: 15, includeSystemAudio: true },
+    p => {
+      if (myId && p.recordId !== myId) return;   // 回调不按 id 过滤，自己比对
+      console.log(p.elapsedMs + "ms", p.frames + "帧", p.sizeBytes + "B");
+    }
+  );
+
+  // 3) 5 秒后停止，拿到最终 mp4 的绝对路径
+  await new Promise(r => setTimeout(r, 5000));
+  const filePath = await itools.record.videoStop(myId);
+  console.log("录像已保存:", filePath);
+
+  // 4) 插件读不到这个目录，但可以交给系统播放器打开
+  await itools.openPath(filePath);
+}
+recordScreen().catch(e => console.error("录屏失败:", e));
+```
+
+## 系统内录（`record.loopback*`，需 `audio-capture` 授权）
+
+录「电脑正在播放的声音」，走 WASAPI 回环：把**默认输出设备**当输入设备打开。与麦克风录音（`startAudioRecord`）是两条独立的通路和两张独立的状态表。
+
+- `itools.record.loopbackStart(): Promise<null>` — 开始系统内录；resolve 即表示声卡流已建好并开始采样（内部最长等 5 秒设备就绪）。
+- `itools.record.loopbackStop(): Promise<string>` — 停止并返回 **base64 编码的 WAV 字符串**（RIFF/PCM/16-bit）。
+
+⚠️ **返回的是裸 base64 字符串，不是 ArrayBuffer**——本组 API 里最容易踩的坑：桥接层这一路没有接解码，而同文件的 `stopAudioRecord` / `stopGifRecord` 都接了。要二进制得自己 `atob`，或直接拼 `data:audio/wav;base64,` 用。
+
+⚠️ 必须存在活动的**渲染**端点（扬声器/耳机），否则报「找不到系统扬声器/输出设备」；「有没有声音在播」不影响能否开始录。真机验收里这一项是当轮唯一的失败项——机器上 4 个活动音频端点全是麦克风、没有任何活动渲染端点，判为环境限制而非缺陷。
+
+⚠️ 时长上限 600 秒：到点采集线程自行退出，但会话仍在表里——之后 `loopbackStop` 仍能拿到前 600 秒的 WAV，不报错；**托盘的「系统内录（回环声卡）」指示器要等你调 stop 才消失**。
+
+⚠️ 全局单会话（跨插件）：整个宿主同一时刻只允许一路独立内录，第二个插件（或同一插件重复调用）报「已经在录系统声音了」。与 `record.videoStart({ includeSystemAudio: true })` 互不冲突——那一路是录制内部独立的音频线程，不占这张表。
+
+⚠️ 只录**默认输出设备**，采样率与声道数沿用 `default_output_config()`（不固定，常见 48000Hz / 2ch），无法选设备、无法调参数。没采到任何采样时 WAV 只有 44 字节的空头。
+
+⚠️ 音频全程缓存在内存，停止时才编码：10 分钟 48kHz 立体声 16bit 约 110 MB，再 base64 膨胀约 1/3 跨 IPC 传给前端——长内录的内存与传输开销是真实的。
+
+⚠️ 用户从托盘一键掐断后，采集立即停止、托盘指示器消失，但会话仍留在状态表里——之后 `loopbackStop` **仍会 resolve**，返回掐断前那段音频，不是报错。只有从没 start 过或已经 stop 过才报「当前没有系统内录」。
+
+⚠️ `loopbackStop` 无权限门禁，只做归属校验（插件 id + `dev` 标志）。锁屏时的表现**未确认**：真机验收的锁屏一组只覆盖了屏幕/输入/前台窗口类能力，没覆盖音频采集。
+
+```js
+// plugin.json: "permissions": ["audio-capture"]
+async function recordSystemSound() {
+  await itools.record.loopbackStart();                 // 返回 null
+  await new Promise(r => setTimeout(r, 5000));
+
+  const b64 = await itools.record.loopbackStop();      // string，不是 ArrayBuffer
+  const bin = atob(b64);
+  const u8 = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+
+  if (u8.byteLength <= 44) {
+    console.warn("只有 WAV 头，没采到声音");
+    return;
+  }
+  const a = document.createElement("audio");
+  a.controls = true;
+  a.src = URL.createObjectURL(new Blob([u8], { type: "audio/wav" }));
+  document.body.appendChild(a);
+}
+// 无渲染端点时：「找不到系统扬声器/输出设备」
+recordSystemSound().catch(e => console.error(e));
+```
+
+## GIF 录屏（`startGifRecord` / `stopGifRecord`，需 `screen-capture` 授权）
+
+宿主内自行编码的轻量版，用来「快速录一小段发群里」；要真帧率/真分辨率/带声音的正式录像用 `itools.record.videoStart`。
+
+- `itools.startGifRecord(): Promise<null>` — 开始录主屏 GIF（固定约 5fps、宽上限 640px、最多 150 帧）。
+- `itools.stopGifRecord(): Promise<ArrayBuffer>` — 停止并返回 GIF 二进制（无宽高/帧数等元数据，只有裸字节）。
+
+⚠️ **固定录主显示器**，没有 `displayId` / `area` / 窗口参数。
+
+⚠️ 150 帧硬上限 + 每帧 200ms 延迟 ⇒ 实际时长天花板约 30 秒。满帧后线程自行结束，之后 stop 仍能拿到 GIF，但**托盘的「屏幕录制」指示器要等你调 stop 才消失**。
+
+⚠️ 单帧按 640px 宽度上限等比缩小（宽度 ≤640 的屏保持原尺寸），所以 GIF 分辨率最高 640px 宽；无限循环、量化用的是最快/质量最低那一档。无声音、无 mp4。
+
+⚠️ `startGifRecord` 只负责起线程、立刻返回 Ok，**抓屏失败不会在这里报出来**：锁屏或截屏被拒时线程首帧就退出，错误在 `stopGifRecord` 处以「没有抓到任何帧」的形式浮现。
+
+⚠️ `stopGifRecord` 可能真的要等几秒：150 帧的 GIF 量化编码是 CPU 密集操作（跑在 blocking 线程池，不冻结 UI，但 Promise 会挂那么久）。数据以 base64 跨 IPC 传输，膨胀约 1/3；帧也全程缓存在内存。
+
+⚠️ 全局单会话（跨插件），已在录时报「已经在录屏了」。用户从托盘一键掐断后**已抓到的帧被直接丢弃**（不 join、不要编码结果），再调 `stopGifRecord` 得到「当前没有录屏」。
+
+⚠️ 只给内存里的 ArrayBuffer，没有落盘通路（与 `record.videoStop` 返回文件路径相反）；`stopGifRecord` 无权限门禁，只做归属校验。
+
+```js
+// plugin.json: "permissions": ["screen-capture"]
+async function gifDemo() {
+  await itools.startGifRecord();                 // 返回 null；固定主屏，约 5fps / 640px 宽
+  await new Promise(r => setTimeout(r, 5000));   // 最多约 30 秒（150 帧）
+
+  const buf = await itools.stopGifRecord();      // ArrayBuffer(GIF)
+  console.log("GIF 字节数:", buf.byteLength);
+  const img = document.createElement("img");
+  img.src = URL.createObjectURL(new Blob([buf], { type: "image/gif" }));
+  document.body.appendChild(img);
+}
+// 锁屏 / 截屏被拒时：「没有抓到任何帧」
+gifDemo().catch(e => console.error("GIF 录屏失败:", e));
+```
+
+## 麦克风录音（`startAudioRecord` / `stopAudioRecord`，需 `audio-capture` 授权）
+
+- `itools.startAudioRecord(): Promise<null>` — 开始录默认麦克风；内部等 cpal 建流并 play 成功才 resolve（最长 5 秒），所以 resolve 就意味着麦克风真的开起来了。
+- `itools.stopAudioRecord(): Promise<ArrayBuffer>` — 停止并返回 WAV 二进制（RIFF/PCM/16-bit）。
+
+⚠️ **设备坏掉不会报错，只会录出 44 字节的空 WAV 头**：真机验收里 C930c 麦克风故障时 `startAudioRecord` 正常成功、`stopAudioRecord` 只出 44 字节；A/B 用与 iTools 无关的 ffmpeg 直开同一设备同样录不出内容。插件必须自己判 `buf.byteLength <= 44`。
+
+⚠️ 时长上限 600 秒：到点线程退出但会话仍在表里，之后 stop 仍能拿到前 600 秒、不报错；**托盘的「麦克风」指示器要等你调 stop 才消失**。
+
+⚠️ 全局单会话（跨插件），已在录时报「已经在录音了」。与 `record.videoStart({ includeMic: true })` 互不冲突（那是录制内部独立的音频线程）。
+
+⚠️ 只录**默认输入设备**，采样率与声道沿用 `default_input_config()`（不固定），不能选设备、不能指定参数；返回值里没有单独的采样率/声道字段，要用就自己从 WAV 头读（偏移 22 = 声道数 u16LE，偏移 24 = 采样率 u32LE）。
+
+⚠️ 采样全程缓存在内存，停止时才编码，再以 base64 跨 IPC 传给前端（膨胀约 1/3）：10 分钟 44.1kHz 立体声在百 MB 量级。
+
+⚠️ 用户从托盘一键掐断后已采样的数据随线程退出被丢弃，再调 `stopAudioRecord` 得到「当前没有录音」——这是如实的，会话确实已被用户注销。
+
+⚠️ `stopAudioRecord` 无权限门禁，只做归属校验（插件 id + `dev` 标志）。锁屏时的表现**未确认**：真机验收的锁屏一组没覆盖麦克风采集。
+
+```js
+// plugin.json: "permissions": ["audio-capture"]
+async function micDemo() {
+  await itools.startAudioRecord();               // resolve 即表示麦克风真的开起来了
+  await new Promise(r => setTimeout(r, 5000));   // 上限 600 秒
+
+  const buf = await itools.stopAudioRecord();    // ArrayBuffer(WAV 16-bit PCM)
+  if (buf.byteLength <= 44) {
+    console.warn("只有 WAV 头，设备可能故障或被占用");
+    return;
+  }
+  const dv = new DataView(buf);
+  console.log("声道数:", dv.getUint16(22, true), "采样率:", dv.getUint32(24, true));
+
+  const a = document.createElement("audio");
+  a.controls = true;
+  a.src = URL.createObjectURL(new Blob([buf], { type: "audio/wav" }));
+  document.body.appendChild(a);
+}
+// 无设备时：「找不到麦克风输入设备」
+micDemo().catch(e => console.error("录音失败:", e));
+```
+
+## 屏幕截图（顶层 `itools.*`，需 `screen-capture` 授权）
+
+三个方法共用 `capture.rs::require_capture`：`plugin.json` 里声明了 `"permissions": ["screen-capture"]` **且**用户在「插件管理」里给本插件开过，缺一不可，否则报「插件未获授权截屏（请在「插件管理」里授权 screen-capture）」。窗口上没有正在运行的插件会话时报「没有正在运行的插件」。这组返回的所有坐标 / 尺寸都是**物理像素**（Win32 口径），不是插件页里的 CSS/DIP 坐标——换算用 `itools.screen.toDip` / `rectToDip`。
+
+- `itools.listDisplays(): Promise<Array<{ id: number; name: string; x: number; y: number; width: number; height: number; scale: number; is_primary: boolean }>>` — 列出所有显示器：`x`/`y` 是该屏左上角在虚拟桌面里的物理坐标（副屏摆在主屏左侧 / 上方时是负数），`scale` 是缩放因子（`1.0` = 100%，`1.5` = 150%），`id` 就是 `captureFull` 要的那个值。
+  ⚠️ 字段是下划线的 **`is_primary`**，不是 `isPrimary`（Rust 结构体只 `derive(Serialize)`，没有 `rename_all`），写成驼峰拿到的是 `undefined`。
+  ⚠️ 每个字段都是 `unwrap_or(默认值)` 静默降级：取不到就给 `0` / `""` / `1.0` / `false`，**不会报错**，所以拿到 `id === 0` 或 `width === 0` 得自己防。
+  ⚠️ 数组顺序就是系统枚举顺序，代码不做排序，**主屏不保证排第一**。
+- `itools.captureFull(displayId?: number | null): Promise<ArrayBuffer>` — 截某块屏的整屏，返回该屏的 PNG 字节（裸 `ArrayBuffer`，没有包装对象）。`displayId` 省略 / 传 `null` = 主屏（系统没给 `is_primary` 标记时退化为枚举到的第一块屏）。
+  ⚠️ 只能整屏截，**截不了局部**——要区域请用 `captureRegion`，或截完再 `itools.image.crop`。
+  ⚠️ 传了不存在的 id 报「找不到显示器 id=<n>」；一块屏都枚举不到报「未找到任何显示器」；抓屏本身失败报「截屏失败: <系统错误>」。
+  ⚠️ 锁屏 / 安全桌面下必失败，真机实测为「截屏失败: 句柄无效 (0x80070006)」——这是 Windows 会话隔离，不是 iTools 的限制。**后台常驻插件不能假设截屏随时可用**，必须处理这类失败。
+  ⚠️ 代码里**没有**任何体积 / 分辨率上限常量，但图片是经 base64 过 IPC 的，4K 整屏一张 PNG 的体积和耗时都不小。
+  ⚠️ 是否合成鼠标指针：**未确认**（直接调 xcap 的 `capture_image`，代码未做任何指针处理）。
+- `itools.captureRegion(opts?: { full?: boolean }): Promise<{ action: "copy" | "save" | "pin" | "ocr"; image: ArrayBuffer } | null>` — PixPin 风格的交互式区域截图：弹一个横跨**整个虚拟桌面**的原生 GDI 覆盖层，用户自己拖框选区、（可选）就地标注，再点悬浮工具栏上的 复制 / 保存 / 贴图 / OCR，Promise 才 resolve；`image` 是**已裁剪并合成好标注**的最终 PNG 字节。`opts.full = true` 则开局即选中整个虚拟桌面矩形并直接进编辑态。
+  ⚠️ **必须用户交互，无法静默截区域**。用户按 Esc 或右键（非文字输入态）取消 → resolve 成 **`null`**，不抛错。
+  ⚠️ **后端只把 `action` 回传，不替你执行动作**：拿到 `"copy"` 要自己调 `writeImage`，`"save"` 调 `saveImage`，`"pin"` 调 `createPin`，`"ocr"` 调 `ocr()`。（宿主自带的截图热键走的是另一条在 Rust 里落地动作的路径，插件路径不是。）
+  ⚠️ 同一时刻只允许一次：已有一次在跑时再调报「截图正在进行中」。
+  ⚠️ 覆盖层里可用的编辑能力：9 种标注工具（矩形 / 椭圆 / 箭头 / 直线 / 画笔 / 荧光笔 / 文字 / 序号 / 马赛克）、8 种颜色、线宽 1~12（默认 3）、撤销（每点一次弹掉最后一笔，**无重做**）；编辑态在选区内双击 = `copy`，Shift+双击 = `pin`。
+  ⚠️ 调用会先隐藏**发起调用的那个插件窗**（仅当它当时可见），返回后再 show + 聚焦；热键唤起时面板本就隐藏则全程不显示它。
+  ⚠️ 锁屏 / 安全桌面下不可用。非 Windows 平台退回 WebView 覆盖层，且只冻结「光标所在那块屏」（Windows 是整个虚拟桌面）。
+
+```js
+// plugin.json 需声明 "permissions": ["screen-capture"]
+const list = await itools.listDisplays();
+const main = list.find(d => d.is_primary) || list[0];   // 注意是 is_primary
+const png = await itools.captureFull(main.id);          // ArrayBuffer(PNG)
+document.querySelector("img").src =
+  URL.createObjectURL(new Blob([png], { type: "image/png" }));
+
+const r = await itools.captureRegion();                 // 传 { full: true } 则开局全选
+if (r) {                                                // null = 用户 Esc / 右键取消
+  if (r.action === "copy")      await itools.writeImage(r.image);
+  else if (r.action === "save") await itools.saveImage(r.image, "shot.png");
+  else if (r.action === "pin")  await itools.createPin(r.image, 0.9);
+  else if (r.action === "ocr")  console.log(await itools.ocr(r.image, "zh-Hans"));
+}
+```
+
+## 图片读写（顶层 `itools.*`，无需授权）
+
+读剪贴板、写剪贴板、另存为、读本地图片文件——都不设权限门禁（另存为的理由是「用户在对话框里显式选路径即授权」）。图片经 IPC 时统一走 base64 字符串而非 `Vec<u8>`：插件页 CSP 收紧后 Tauri IPC 退化为 postMessage，字节数组会被序列化成「数字数组」（体积 4×、极慢）。
+
+- `itools.readImage(): Promise<ArrayBuffer>` — 读剪贴板里的图片，返回 **PNG** 字节。
+  ⚠️ **拿不到原始格式**：不管用户复制的是 JPEG 还是别的，中间过了一遍 RGBA，出来一律是 PNG。
+  ⚠️ 剪贴板里没有图片会 reject「剪贴板没有图片: <底层原因>」——必须 `try/catch`。剪贴板里是文本请用 `itools.readText()`。
+- `itools.writeImage(data: ArrayBuffer | Uint8Array | string): Promise<void>` — 把图片写进剪贴板为**真实位图**（`arboard::ImageData` / RGBA），不是 base64 文本。输入接受 `ArrayBuffer` / `Uint8Array` / 裸 base64 / `data:` URL（前缀会被自动剥掉）。
+  ⚠️ 任何 image crate 能解的格式都收（png / jpeg / webp / bmp / gif / tiff / ico…），但**都会被解成 RGBA 再写，原格式与元数据全部丢失**。解不了的（如 SVG）报「图片解码失败: …」。
+- `itools.saveImage(data: ArrayBuffer | Uint8Array | string, defaultName?: string | null): Promise<string | null>` — 弹原生「另存为」对话框，返回用户选定的**绝对路径**；用户取消返回 `null`（不是错误）。默认目录是系统「图片」目录，默认文件名 `"iTools截图.png"`，过滤器写死「PNG 图片 / *.png」。
+  ⚠️ **完全不转码**：拿到什么字节就 `fs::write` 原样落盘。传一个 JPEG 进去会得到一个后缀 `.png`、内容却是 JPEG 的文件——要真 PNG 请先 `itools.image.convert`。
+  ⚠️ **必须用户交互**：锁屏 / 无交互桌面下对话框根本弹不出来（真机验收里 `fs.pickDir` 就是这个现象），调用会一直挂着。
+  ⚠️ 保存位置由用户在对话框里选，**不受插件沙盒限制**。
+- `itools.readLocalImage(path: string): Promise<ArrayBuffer>` — 读磁盘上的图片文件，返回**原始字节，原样读盘不转码**（读 `.jpg` 出来就是 JPEG 字节，这点与 `readImage` / `captureFull` 不同）。
+  ⚠️ 扩展名白名单（大小写不敏感）：**png / jpg / jpeg / gif / bmp / webp / svg / ico / tif / tiff**，且**只看扩展名不看真实内容**；不在白名单报「只支持读取图片文件（png/jpg/jpeg/gif/bmp/webp/svg/ico/tiff）」。
+  ⚠️ 单文件上限 **30 MB**，超限报「图片过大（>30MB）」。这个判断在 `fs::read` **之后**，超大文件仍会被完整读进内存一次才被拒。
+  ⚠️ 拒 UNC / 远程路径（以 `\\` 或 `//` 开头）；空路径报「路径为空」；路径不存在或是目录报「文件不存在」。
+  ⚠️ 传的是绝对路径且**不受插件沙盒限制**（磁盘任意位置的图片都能读），但纯只读，不落写入 / 执行面。
+  ⚠️ 白名单里的 **svg 能读出字节，但 `writeImage` / `createPin` / `ocr` 都解不了 SVG**（image crate 不支持），会报「图片解码失败」。
+
+```js
+// 无需权限声明
+const buf = await itools.readLocalImage("D:\\pics\\a.jpg");  // JPEG 原始字节
+await itools.writeImage(buf);                                // 写进剪贴板（转成 RGBA 位图）
+
+try {
+  const shot = await itools.readImage();                     // 回读，得到的是 PNG
+  const path = await itools.saveImage(shot, "屏幕截图.png");
+  console.log(path === null ? "用户取消了保存" : "已保存到 " + path);
+} catch (e) {
+  console.log(String(e));                                    // 「剪贴板没有图片: ...」
+}
+```
+
+## 离线 OCR 与贴图（顶层 `itools.*`，无需授权）
+
+`plugin_ocr` / `plugin_create_pin` 的签名里都没有 registry / settings 参数，实现体里没有任何授权检查：OCR 只对传进来的图片字节做本地识别、不读屏幕；贴图只是把你已经拿到的图片钉成浮窗。**任何插件都能不经授权造一个置顶贴图窗**。
+
+- `itools.ocr(data: ArrayBuffer | Uint8Array | string, lang?: string | null): Promise<string>` — 走 `Windows.Media.Ocr`（WinRT）识别图片里的文字，**完全离线、免费、不联网、不外发**，仅 Windows 可用（其他平台报「OCR 仅在 Windows 上可用」）。输入接受 `ArrayBuffer` / `Uint8Array` / 裸 base64 / `data:` URL。
+  ⚠️ **识别不到任何文字时返回空字符串 `""`，既不是 `null` 也不报错**——判空要用 `text.trim() === ""`。
+  ⚠️ 只返回整段文本，**不返回**文字框坐标、置信度、分行 / 分词结构（代码只取了 `OcrResult.Text()`）。
+  ⚠️ `lang` **没有内置白名单**，字符串原样丢给 `Language::CreateLanguage`：凡是系统装了对应 OCR 语言包的 BCP-47 标签都行（常见 `"zh-Hans"` / `"en"`）。标签本身非法报「不支持的 OCR 语言：<lang>」，标签合法但系统没装包报「系统未安装 <lang> 的 OCR 语言包」。**代码里没有枚举可用语言的 API**，装没装只能 try/catch。
+  ⚠️ 省略 `lang` / 传 `null` → 跟随系统用户配置语言；系统一个 OCR 包都没有时报「系统无可用 OCR 语言（请在 Windows 设置里安装语言的手写/OCR 组件）」。
+  ⚠️ 输入图片任一边超过 **4000 px** 会先等比降采样到 4000 再识别（WinRT OCR 单边上限约 10000px，超限会抛晦涩错误）——识别是在缩小后的图上做的。
+  ⚠️ 代码里没有输入体积上限常量。识别跑在 blocking 线程里，不阻塞 UI。
+- `itools.createPin(data: ArrayBuffer | Uint8Array | string, opacity?: number | null): Promise<string>` — 把图片钉成无边框、透明、置顶、不进任务栏、不可拉伸的浮窗，返回 `pinId`（进程内自增计数器的十进制字符串，从 `"0"` 起；对应窗口 label 是 `pin-<pinId>`）。
+  ⚠️ **拿到 `pinId` 后没有任何 API 能关掉 / 移动 / 缩放这张贴图**——`pin_close` / `pin_resize` / `pin_move` 只有贴图窗自己能调，`bridge.js` 根本没暴露。`pinId` 目前只能当标识符用，关窗只能靠用户操作。
+  ⚠️ `opacity` 取值 **0.1 ~ 1.0**，省略 / `null` = 1.0。**超范围不报错**，代码是 `clamp(0.1, 1.0)`：传 `0` 得到 0.1，传 `5` 得到 1.0。
+  ⚠️ 初始尺寸 = 图片原始像素当逻辑像素用；超过**主屏逻辑尺寸（`mon.size()` ÷ 缩放，是整屏不是工作区）的 80%** 则等比缩小；最小 24×24。
+  ⚠️ 用户可做的交互：按住拖动；滚轮缩放（倍率夹在 **0.15× ~ 6×**）；双击关闭；Ctrl+双击变缩略图（宽 92px），缩略图态双击还原；Esc 关闭；按 `1` 回原始大小；右键菜单被禁用。
+  ⚠️ 解不了的格式（如 SVG）报「图片解码失败: …」。图片字节常驻内存，窗口被销毁时才清掉；代码里**没有**「同时最多几张贴图」的上限。
+
+```js
+// 无需权限声明
+const buf = await itools.readImage();
+const text = await itools.ocr(buf, "zh-Hans");   // 省略第二参 = 跟随系统语言
+if (text.trim() === "") console.log("没识别到文字");
+else await itools.copyText(text);
+
+const pinId = await itools.createPin(buf, 0.9);  // opacity 0.1~1，越界自动 clamp
+console.log("pinId =", pinId);                   // 只能当标识符，插件关不掉（用户双击/Esc 自己关）
+```
+
+## 删除沙盒文件（`itools.removeFile`，无需授权）
+
+没有权限门禁（实现体不调 `plugin_granted`），但**强制沙盒**：只认当前插件会话自己的沙盒相对路径。与 `readFile` / `writeFile` 共用同一个沙盒根。
+
+- `itools.removeFile(path: string): Promise<void>` — 删除插件沙盒内的一个文件。`path` 必须是**相对路径**。
+  ⚠️ **文件不存在不是错误**：`NotFound` 被显式吞掉返回成功，接口是幂等的。
+  ⚠️ **只删文件，删不了目录**（用的是 `remove_file`），对目录会得到「删除文件失败: …」。
+  ⚠️ 路径校验只放行 `Normal` / `CurDir` 组件，下列一律拒绝并报「只能访问插件沙盒内的相对路径（禁绝对路径/盘符/根/..）」：空串、`C:foo` 这类盘符相对、`/foo` 或 `\foo` 这类根相对、任何含 `..` 的路径。
+  ⚠️ 沙盒根按会话分：正式会话是 `<数据根>/plugin-data/<插件id>/files/`（数据根 = `%LOCALAPPDATA%\itools`，debug 构建是 `itools-dev`），**调试会话是另一个根** `<数据根>/dev/plugin-data/<插件id>/files/`，两者互不可见。
+  ⚠️ `saveImage` / `readLocalImage` 能碰到的磁盘任意路径，`removeFile` **一概删不了**。要删沙盒外的东西请用 `itools.trash`（走回收站，需 `fs-trash` 授权）。
+
+```js
+// 无需权限声明
+await itools.writeFile("cache/last.json", JSON.stringify({ a: 1 }));
+await itools.removeFile("cache/last.json");   // 相对路径，限插件沙盒
+await itools.removeFile("cache/last.json");   // 再删一次也不报错（不存在视为成功）
+// await itools.removeFile("C:\\x.txt");      // ✗ 「只能访问插件沙盒内的相对路径…」
+```
+
+## 全局热键（顶层 `itools.*`，需 `hotkey` 授权）
+
+按下即唤起插件的系统级热键。注册与注销都要求 `plugin.json` 的 `permissions` 里声明 `hotkey`**且**用户在「插件管理」里授权，两者缺一即被拒。
+
+- `itools.registerHotkey(accelerator: string, code?: string | null): Promise<void>` — 把一个全局热键绑定到当前插件；`code` 填 `plugin.json` 里 `features[].code`，用于「按下时窗口里不是本插件」的情况下决定拉起哪个 feature，不传即为 `null`。
+  ⚠️ 写法：`+` 分隔，token 前后空格会被 trim，整体大小写不敏感（`"Alt + Space"` 合法）。修饰键 `ALT`/`OPTION`、`CTRL`/`CONTROL`、`SHIFT`、`CMD`/`COMMAND`/`SUPER`；iTools 额外把 `WIN`/`META` 归一成 `SUPER`（上游别名表里没有 `win`）；`CommandOrControl`/`CommandOrCtrl`/`CmdOrCtrl`/`CmdOrControl` 在 Windows 上等于 `CONTROL`。
+  ⚠️ 主键写 W3C code 名或短别名：`KeyA`–`KeyZ` 或 `A`–`Z`；`Digit0`–`Digit9` 或 `0`–`9`；`F1`–`F24`；`Escape`/`Esc`、`Space`、`Tab`、`Enter`、`Backspace`、`Delete`、`Insert`、`Home`、`End`、`PageUp`、`PageDown`、`CapsLock`、`NumLock`、`ScrollLock`、`PrintScreen`、`Pause`/`PauseBreak`；`ArrowUp`/`Up` 等四个方向键；`Numpad0`–`Numpad9`（`Num0`–`Num9`）与 `NumpadAdd`/`NumAdd`、`NumpadEnter`/`NumEnter` 等小键盘键；符号键 `` Backquote/` ``、`Minus`/`-`、`Equal`/`=`、`Comma`/`,`、`Period`/`.`、`Slash`/`/`、`Semicolon`/`;`、`Quote`/`'`、`BracketLeft`/`[`、`BracketRight`/`]`、`Backslash`/`\`；以及 `AudioVolumeUp`/`VolumeUp` 等音量键与 `MediaPlayPause`/`MediaTrackNext` 等媒体键。
+  ⚠️ 修饰键必须写在主键**之前**，且只能有一个主键：`"shift+KeyQ+alt"`、`"Ctrl+C+Shift"`、`"Ctrl+Shift+C+A"`、`"alt+"`（空 token）全部会得到「无效快捷键（需至少一个修饰键）：…」。
+  ⚠️ 无修饰键时**只放行 F1–F12**：`"f3"` 合法，`"space"`、`"a"`、`"F13"` 一律被拒（F13–F24 是合法主键，但必须配至少一个修饰键）。
+  ⚠️ 调试会话与正式插件互不抢占：跨边界注册同一个键直接报错，错误里会写清被哪一侧的哪个插件占着。同侧（都正式 / 都调试）是「后注册者胜出」——原插件不会收到任何通知，只在 iTools 日志里留一行换绑记录。
+  ⚠️ 绑定只活在 iTools 进程内存里。关掉调试窗口、在「插件管理」里停用插件，**都不会**注销已注册的热键；真正能释放的只有插件自己调 `unregisterHotkey`，或退出 iTools。
+  ⚠️ 与宿主热键的优先级：宿主截图热键 → 宿主贴图热键 → 插件热键 → 切换主搜索窗。此外，若该组合键已被宿主（主唤起 / 截图 / 贴图）注册，按 `tauri-plugin-global-shortcut` 2.3.2 + `global-hotkey` 0.8.0 的实现，`RegisterHotKey` 会以 `ERROR_HOTKEY_ALREADY_REGISTERED` 失败，插件这边拿到「注册热键失败（可能被系统或其它程序占用）：…」——此路径未在真机验证过。
+- `itools.unregisterHotkey(accelerator: string): Promise<void>` — 注销本插件注册的那个键；该键本就不在插件热键表里时也返回成功（幂等），且不会碰宿主或别的插件的注册。
+  ⚠️ 归属口径与注册完全一致（插件 id + 调试/正式标志都要相等）：同名的调试插件不能注销正式插件的键，反之亦然，会得到「该快捷键不属于本插件，拒绝注销」。
+  ⚠️ accelerator 的合法写法与 `registerHotkey` 同一套解析器，「无修饰键只允许 F1–F12」照样生效——所以 `unregisterHotkey("space")` 得到的是「无效快捷键」，不是幂等成功。
+- `itools.onHotkey(cb: (payload: { accelerator: string; code: string | null }) => void): void` — 同步注册回调，不是 Promise；`accelerator` 是注册时传的原始字符串（未规范化），`code` 是注册时传的那个值。
+  ⚠️ **不是每次按键都会触发**。只有「共享插件窗（`plugin`）或调试窗（`plugin-dev`）存在，且窗口里当前加载的正是本插件」时才推 `hotkey` 事件。否则：注册时带了 `code` 的，宿主改为把插件拉起来（正式插件走 `open_plugin`，`hidden=true`，面板不会弹出来；调试插件走调试窗口），插件收到的是 **`onEnter` 且 `info.query === "__hotkey__"`**；注册时 `code` 为 `null` 的，宿主回退到默认行为——只开关主搜索窗，插件什么也收不到。
+  ⚠️ 后台常驻实例（`plugin-bg-<id>`）和插件自开的独立窗口（`createWindow` 开的 `plugin-win-<id>-*`）**永远收不到 `hotkey` 事件**：分发只查那两个共享窗口的会话。后台常驻插件按下自己注册的热键，走的是「复用后台窗口 → 推一发 `enter` 事件」，因此要在 `onEnter` 里判断 `query`。
+  ⚠️ 推事件前宿主**有意不**显示/聚焦面板（隐藏窗口上照常执行），要不要显示由插件自己决定。
+  ⚠️ 事件无缓冲，注册 `cb` 之前推来的会直接丢弃；可多次调用叠加回调，没有取消订阅的接口；回调里抛出的异常会被事件总线吞掉并 `console.error("[iTools] 事件回调异常", e)`。
+
+```js
+itools.onEnter(async (info) => {
+  // 后台常驻/热键唤起路径：窗口里不是本插件时，热键走的是 onEnter 而不是 onHotkey
+  if (info.query === "__hotkey__") {
+    console.log("由热键唤起（面板未显示），code =", info.code);
+    return;
+  }
+  if (window.__hkDone) return; // onEnter 可能被多次调用，注册只做一次
+  window.__hkDone = true;
+  try {
+    // 主键写 KeyS 或 S 都行；无修饰键只有 F1–F12 才合法
+    await itools.registerHotkey("Alt+Shift+KeyS", "shot");
+  } catch (e) {
+    document.body.textContent = "热键注册失败：" + e; // e 就是后端返回的中文原因
+  }
+});
+
+itools.onHotkey((p) => {
+  console.log("热键触发", p.accelerator, p.code); // { accelerator: "Alt+Shift+KeyS", code: "shot" }
+});
+
+// 不主动注销的话，热键会一直活到 iTools 退出
+itools.onExit(() => { itools.unregisterHotkey("Alt+Shift+KeyS").catch(() => {}); });
+```
+
+## 鼠标注入（`input`，需 `input-inject` 授权）
+
+- `itools.input.mouseClick(x: number, y: number): Promise<void>` — 移动到 `(x, y)` 并单击左键。
+- `itools.input.mouseDoubleClick(x: number, y: number): Promise<void>` — 移动到 `(x, y)` 并双击左键。
+- `itools.input.mouseRightClick(x: number, y: number): Promise<void>` — 移动到 `(x, y)` 并单击右键。
+
+⚠️ 坐标是**屏幕物理像素、虚拟桌面坐标系**（Win32 那一套，可跨多显示器，原点可能为负），不是页面里的 CSS/DIP 坐标。有缩放的屏幕上两者不相等，必须先用 `itools.screen.toPhysical(x, y)`（返回四舍五入后的整数 `{ x, y }`，无需授权）换算；`itools.screen.cursorPoint()` 返回的已经是物理像素，可直接喂进来。
+⚠️ 越界坐标**被静默夹到虚拟桌面边缘，不会报错**（内部归一化到 `0..=65535` 后 clamp）。
+⚠️ Rust 侧参数是 `i32`，请自己先取整——带小数的坐标会在参数反序列化阶段失败，报错不是本模块的中文文案。
+⚠️ **调用前必须先 `await itools.hide()`**。本组 API 只把事件灌进 Windows 全局输入队列，它会打到 `GetForegroundWindow` 决定的那个窗口；iTools 自己还在前台时，点击就点在 iTools 身上。
+⚠️ 受 Windows UIPI 限制：iTools 未以管理员运行时，无法向更高完整性级别的窗口注入（以管理员身份运行的程序、UAC 提权对话框等），表现为静默失败或部分失败，报错是「输入注入被系统拒绝（已发送 n/m 个事件）：…」。这是系统强制安全边界，用户态绕不过去。
+⚠️ 事件在**同一次 `SendInput`** 里发出，`time` 全为 0，中间**没有任何 sleep**：单击/右键是 3 个事件（move + down + up），双击是 5 个（move + 两组 down/up）。按下时长与双击间隔都不可配置，目标程序认不认这个双击取决于系统的双击时间阈值（代码里没有读取或适配该阈值）。
+⚠️ 本组只有 `mouseMove` / `mouseClick` / `mouseDoubleClick` / `mouseRightClick` 四个：**没有** `mouseDown`/`mouseUp`（做不了拖拽）、没有滚轮、没有中键。右键菜单弹出来之后也只能继续用 `mouseClick`/`keyTap` 盲点。
+⚠️ 非 Windows 平台固定返回「输入注入仅在 Windows 上可用」。
+
+```js
+// 页面里的 DIP 坐标 → 物理像素 → 让出前台 → 点击
+const p = await itools.screen.toPhysical(1200, 640);
+await itools.hide();
+try {
+  await itools.input.mouseClick(p.x, p.y);
+} catch (e) {
+  console.error(e); // 目标是管理员窗口时，这里是 UIPI 的中文说明
+}
+```
+
+## 电源（`power`，需 `system-manage` 授权）
+
+- `itools.power.sleep(): Promise<void>` — 让整机进入睡眠（Win32 `SetSuspendState`，睡眠而非休眠）。
+  ⚠️ 三个参数写死、插件改不了：不休眠、不强制挂起有未保存数据的应用、不禁止唤醒事件。睡眠期间保电维持内存内容，不丢未保存数据，但外接设备/网络连接会短暂中断。
+  ⚠️ **没有任何确认对话框**，调了就睡。要确认得插件自己弹。
+  ⚠️ 失败时是「使系统进入睡眠失败（部分设备/驱动不支持挂起，或被系统电源策略阻止）」；非 Windows 固定返回「系统睡眠目前仅支持 Windows」。
+  ⚠️ 未确认：`SetSuspendState` 按 Win32 语义在系统恢复后才返回，实现跑在 `spawn_blocking` 上，因此这个 Promise 很可能要到设备被唤醒后才 resolve——仓库里没有验证过该时序，别依赖 resolve 时机。
+- `itools.power.restart(force?: boolean): Promise<void>` — 重启系统（`ExitWindowsEx(EWX_REBOOT)`），`force` 缺省 `false`。
+  ⚠️ `force` 只改一个标志位：`true` 时额外带 `EWX_FORCE`（**不是** `EWX_FORCEIFHUNG`），对没卡死的应用也照样强杀，**未保存的数据会丢失**。`false` 走正常关机流程，前台应用有「是否保存」的机会，但**某个应用阻塞也可能让重启被推迟或取消**。
+  ⚠️ resolve 只代表 `ExitWindowsEx` 调用成功（重启请求已发出），**不代表机器一定会重启**。
+  ⚠️ **没有确认对话框，也没有倒计时或取消接口**，iTools 不提供 abort。
+  ⚠️ 每次调用先启用 `SeShutdownPrivilege`；组策略剥夺该特权时会得到「启用系统特权「SeShutdownPrivilege」失败（当前账户策略可能不允许，关机/重启需要该特权）」。非 Windows 固定返回「关机/重启目前仅支持 Windows」。
+  ⚠️ `itools.power.shutdown(force?)` 是同一实现体（只把 `EWX_REBOOT` 换成 `EWX_SHUTDOWN`），`force` 语义完全一致。
+  ⚠️ 该命令对**后台常驻实例与插件独立窗口同样放行**（capability 覆盖 `plugin` / `plugin-bg-*` / `plugin-win-*`），后台插件也能把机器重启掉。
+
+```js
+// 两个动作都没有系统确认框，要确认只能自己弹
+if (confirm("确定让电脑睡眠？")) {
+  try {
+    await itools.power.sleep();
+  } catch (e) {
+    alert(e); // 例如「使系统进入睡眠失败（部分设备/驱动不支持挂起，或被系统电源策略阻止）」
+  }
+}
+
+// 默认非强制：给别的程序保存的机会（也因此可能被某个程序拦下来）
+// await itools.power.restart();
+// 强制重启：所有应用被强杀，未保存数据会丢
+// await itools.power.restart(true);
+```
+
+## 托管运行时收尾（`runtime`，需 `runtime` 授权）
+
+- `itools.runtime.quit(streamId: string): Promise<void>` — 请 `execStream` 拉起的那个子进程自己退出（Windows 上给它的进程组发 `CTRL_BREAK`）。除 `runtime` 授权外，还要求该 `streamId` 的归属会话与调用者一致（插件 id + 调试/正式标志都相等），否则「该执行会话不属于本插件」。
+  ⚠️ resolve 只表示**信号已发出**，不代表进程已经退出。真正的结束由等待线程（50ms 轮询）感知后推 `plugin-runtime-exit`，即 `execStream` 的 `handlers.onExit(code, timedOut)`；拿不到退出码时 `code` 为 `-1`，`timeoutMs` 到点被杀时 `timedOut` 为 `true`。
+  ⚠️ 「优雅」是有水分的：源码注释明说不保证程序真的会优雅处理——系统默认动作通常就是终止，只是给了它一个走清理路径的机会。要立即强杀用 `itools.runtime.kill(streamId)`（`TerminateProcess`，不给任何清理机会）。
+  ⚠️ `quit` / `kill` 都**不**从会话表里摘掉条目（移除与 exit 事件统一由等待线程完成），所以紧接着再 `quit` 一次通常也会成功；进程已经退出后再调，会得到「执行会话不存在或已结束」，或「附加目标进程控制台失败（pid=…，可能已退出）」。
+  ⚠️ 子进程的 stdin 是 `Stdio::null()`，插件**没有**任何写 stdin 的通道——ffmpeg 常用的「往 stdin 写 q」收尾在这里做不到，想让它正常写完文件尾只能靠 `quit`。
+  ⚠️ **流不会自动收尾**：插件被切走 / 关闭时，宿主会清理本地服务、摄像头、录屏录音、输入相关状态，但**清理名单里没有 runtime**。`execStream` 拉起的 ffmpeg/adb/yt-dlp 会一直跑到自己退出，插件必须自己在退出前 `quit`/`kill`，否则留下孤儿进程。
+  ⚠️ 只对 `execStream` 返回的 `streamId` 有效；一次性的 `itools.runtime.exec` 没有对应的 `quit`/`kill`。
+  ⚠️ `runtime` 权限只覆盖宿主清单里下载并校验过 SHA-256 的固定几个程序（ffmpeg / adb / yt-dlp），与 `runCommand` 是完全独立的两套授权，不共享。
+
+```js
+const id = await itools.runtime.execStream(
+  "ffmpeg",
+  ["-i", "in.mp4", "-c:v", "libx264", "out.mp4"],
+  { timeoutMs: 600000 },
+  {
+    onStderr: (s) => console.log(s),
+    onExit: (code, timedOut) => console.log("结束", code, timedOut),
+  }
+);
+
+// 优雅收尾：发 CTRL_BREAK，给 ffmpeg 一次写文件尾的机会（不保证它会理）
+await itools.runtime.quit(id);
+
+// 插件被关掉时流不会自动清理，必须自己收尾
+itools.onExit(() => { itools.runtime.kill(id).catch(() => {}); });
+```
+
 ## UI / 平台
 
 - `itools.showToast(msg: string): void` — 轻量提示（**同步，无需 await**）。
