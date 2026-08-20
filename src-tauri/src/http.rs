@@ -47,6 +47,26 @@ use ureq::{Agent, AgentBuilder};
 
 use crate::logging::ilog;
 
+/// 出站请求的**空闲**超时：连续这么久一个字节都收不到 / 发不出去，就判定链路已死并报错。
+///
+/// # 为什么必须显式设置
+///
+/// ureq 的默认值是 `timeout_connect: Some(30s)`、**`timeout_read: None`、`timeout_write: None`**
+/// ——「连不上」会超时，但「连上之后对端不再发数据」**永远不会**超时。
+///
+/// 这不是理论风险，是真机上抓到的：从 GitHub 下 167 MB 的 ffmpeg，连接建好、下了 28 MB
+/// 之后彻底僵住，进程卡在 `read()` 上 6 分钟纹丝不动（内存占用一个字节都不涨），而**同一时刻**
+/// curl 拉同一个 URL 只要 6.9 秒（24 MB/s）——网络本身完全正常，就是那条连接死了。
+/// 对用户来说这是「点了安装，进度条停住，永远不结束、也永远不报错」——比直接失败更糟，
+/// 因为没有任何信号告诉他该重试。
+///
+/// 取**空闲**超时而不是整体超时：大文件在慢网络上正常也可能要跑很久，给整体设上限必然误杀；
+/// 而「连续 60 秒一个字节都没有」，无论链路多慢都只能是死了。
+///
+/// ureq 的优先级是「调用点自己设的 `.timeout()`（整体上限）盖过这里的空闲超时」，
+/// 所以各调用点既有的超时语义（更新下载 600s、镜像竞速 5s …）原样不变。
+const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// 「测试」按钮的整体超时（秒）。短一些：这是个用户盯着看结果的按钮，
 /// 代理不通时最多让他等 8 秒，而不是跟着下载超时一起等 600 秒。
 const TEST_TIMEOUT_SECS: u64 = 8;
@@ -328,7 +348,13 @@ fn bypassed(url: &str) -> bool {
 /// 把本机地址也塞进代理——正是本模块要根除的故障。写死 false，与 feature 无关。
 fn direct_agent() -> &'static Agent {
     static A: OnceLock<Agent> = OnceLock::new();
-    A.get_or_init(|| AgentBuilder::new().try_proxy_from_env(false).build())
+    A.get_or_init(|| {
+        AgentBuilder::new()
+            .try_proxy_from_env(false)
+            .timeout_read(IDLE_TIMEOUT)
+            .timeout_write(IDLE_TIMEOUT)
+            .build()
+    })
 }
 
 /// 当前代理出口。`None` = 未开启 / 未配置 / 配置无效（此时一切请求走直连）。
@@ -359,7 +385,11 @@ fn build_agent(spec: &ProxySpec) -> Result<Agent, String> {
     let proxy = ureq::Proxy::new(spec.ureq_url()).map_err(|e| {
         redact_proxy_credentials(&format!("代理地址 {} 无法被解析：{e}", spec.display()))
     })?;
-    Ok(AgentBuilder::new().proxy(proxy).build())
+    Ok(AgentBuilder::new()
+        .proxy(proxy)
+        .timeout_read(IDLE_TIMEOUT)
+        .timeout_write(IDLE_TIMEOUT)
+        .build())
 }
 
 /// 按当前设置重建代理出口（**热生效**，无需重启）。
@@ -684,6 +714,36 @@ pub(crate) fn split_status_error(e: ureq::Error) -> Result<(u16, Option<String>)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---------- 空闲超时 ----------
+
+    /// 两条出站链路（直连 / 代理）都必须带上空闲超时。
+    ///
+    /// 为什么值得专门写一条：ureq 的默认是「读不设超时」，而这个默认值一旦生效，
+    /// 症状是**进程永远挂着**——既不报错也不结束，日志里什么都没有，最难排查的那一类。
+    /// 真机上已经吃过一次（下 ffmpeg 到 28 MB 处僵死 6 分钟以上）。谁把这两行删了或漏掉了
+    /// 代理那条，这条测试当场变红。
+    #[test]
+    fn both_agents_carry_idle_timeout() {
+        assert_eq!(
+            IDLE_TIMEOUT,
+            Duration::from_secs(60),
+            "空闲超时被改动了：改之前先想清楚「连续多久没有任何字节才算链路已死」"
+        );
+        // ureq 的 Agent 把整份配置打进 Debug 输出，据此断言配置真的落到了 Agent 上，
+        // 而不只是「代码里写了一行」。
+        let expect = format!("timeout_read: Some({IDLE_TIMEOUT:?})");
+        let expect_w = format!("timeout_write: Some({IDLE_TIMEOUT:?})");
+
+        let direct = format!("{:?}", direct_agent());
+        assert!(direct.contains(&expect), "直连 Agent 缺少读空闲超时：{direct}");
+        assert!(direct.contains(&expect_w), "直连 Agent 缺少写空闲超时：{direct}");
+
+        let spec = normalize_proxy("127.0.0.1:7897").expect("测试用代理地址应能解析");
+        let via_proxy = format!("{:?}", build_agent(&spec).expect("代理 Agent 应能构建"));
+        assert!(via_proxy.contains(&expect), "代理 Agent 缺少读空闲超时：{via_proxy}");
+        assert!(via_proxy.contains(&expect_w), "代理 Agent 缺少写空闲超时：{via_proxy}");
+    }
 
     // ---------- 地址规范化 ----------
 
