@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-crypto-keys"
+description = "Enables the plugin_crypto_keys command without any pre-configured scope."
+commands.allow = ["plugin_crypto_keys"]
+
+[[permission]]
+identifier = "deny-plugin-crypto-keys"
+description = "Denies the plugin_crypto_keys command without any pre-configured scope."
+commands.deny = ["plugin_crypto_keys"]

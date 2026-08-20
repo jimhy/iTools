@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-tool-result"
+description = "Enables the plugin_tool_result command without any pre-configured scope."
+commands.allow = ["plugin_tool_result"]
+
+[[permission]]
+identifier = "deny-plugin-tool-result"
+description = "Denies the plugin_tool_result command without any pre-configured scope."
+commands.deny = ["plugin_tool_result"]

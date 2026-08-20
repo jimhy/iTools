@@ -49,6 +49,11 @@
 | `path` | 路径框 + 「选择…」按钮 | string | `mode`: `"folder"`（默认）或 `"file"` |
 | `color` | 颜色选择器 | string（`#rrggbb`） | — |
 | `hotkey` | 快捷键录制框 | string（如 `"ctrl+shift+a"`） | — |
+| `password` | 凭据输入框（掩码显示 + 「显示」按钮可临时查看） | string | — |
+
+> ⚠️ `password` **只解决显示层面的遮挡**（旁人看屏幕时不会一眼读到），值仍按普通设置项存储，
+> 不是加密保管。别在插件说明里向用户暗示它是加密的。
+> 需要用户填第三方服务的 token / key（图床、WebDAV、代码托管等）时用它，别用 `text` 明文框。
 
 > `default` 要与值类型一致：`boolean` 项写 `true`/`false`，`number` 写数字，`select` 写某个 `option.value`。
 

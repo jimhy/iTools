@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-schedule-add"
+description = "Enables the plugin_schedule_add command without any pre-configured scope."
+commands.allow = ["plugin_schedule_add"]
+
+[[permission]]
+identifier = "deny-plugin-schedule-add"
+description = "Denies the plugin_schedule_add command without any pre-configured scope."
+commands.deny = ["plugin_schedule_add"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-proc-kill"
+description = "Enables the plugin_proc_kill command without any pre-configured scope."
+commands.allow = ["plugin_proc_kill"]
+
+[[permission]]
+identifier = "deny-plugin-proc-kill"
+description = "Denies the plugin_proc_kill command without any pre-configured scope."
+commands.deny = ["plugin_proc_kill"]

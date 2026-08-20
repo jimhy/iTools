@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-crypto-remove"
+description = "Enables the plugin_crypto_remove command without any pre-configured scope."
+commands.allow = ["plugin_crypto_remove"]
+
+[[permission]]
+identifier = "deny-plugin-crypto-remove"
+description = "Denies the plugin_crypto_remove command without any pre-configured scope."
+commands.deny = ["plugin_crypto_remove"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-sys-usage"
+description = "Enables the plugin_sys_usage command without any pre-configured scope."
+commands.allow = ["plugin_sys_usage"]
+
+[[permission]]
+identifier = "deny-plugin-sys-usage"
+description = "Denies the plugin_sys_usage command without any pre-configured scope."
+commands.deny = ["plugin_sys_usage"]

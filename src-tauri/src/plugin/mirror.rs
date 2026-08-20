@@ -1147,6 +1147,109 @@ pub fn config() -> MirrorConfig {
     ensure(false).cfg
 }
 
+/// 把一个 `https://github.com/...` 直链改写成「经各镜像」的形态，返回 `(主机, 改写后的 URL)`。
+///
+/// # 用途与既有 [`fetch`] 的分工
+///
+/// [`fetch`] 服务的是插件包下载，走的是 raw / archive 那两套**带占位符**的模板。
+/// 而宿主托管的运行时（ffmpeg / yt-dlp）拿到的是 **release 资产**直链，形态不同、也没有
+/// owner/repo/ref 可填，套不进那两个模板。本函数只做一件事：把镜像的**前缀**取出来重新拼。
+///
+/// # 前缀是从配置里**推导**出来的，不是假设出来的
+///
+/// 三家内置镜像的 `archive` 模板都长这样：
+/// `https://{mirror}/https://github.com/{owner}/{repo}/archive/{ref}.zip`
+/// ——`https://github.com/` 之前的那一段就是该镜像的通用前缀。所以这里从 [`MirrorEntry::archive`]
+/// 现场切出前缀，而不是写死 `https://{host}/`：服务端下发的镜像若用的是别的形态
+/// （比如 codeload 那种），切不出前缀就**跳过它**，绝不拿一个猜出来的地址去下可执行文件。
+///
+/// 前缀形态对 **release 资产**是本机实测确认过的（2026-08-20，直连无代理）：
+/// gh-proxy.com / ghfast.top / ghproxy.net 三家对同一个 ffmpeg 资产均返回 200，
+/// 其中 gh-proxy.com 实测 1.15 MB/s，而同一时刻直连 github.com 只有 56 KB/s。
+///
+/// 只返回 `healthy` 的条目，顺序沿用配置里的顺序（服务端已按探活延迟排过）。
+/// 非 github.com 的 URL（如 adb 来自 dl.google.com）返回空表——那些地方镜像帮不上忙。
+pub fn github_prefixed_urls(url: &str) -> Vec<(String, String)> {
+    // 先按地址短路再取配置：官网线的更新地址、Google CDN 上的 adb 都不是 GitHub，
+    // 没必要为它们去刷一次镜像配置（那可能是一次 5 秒超时的服务端请求）。
+    if !url.starts_with(GITHUB_PREFIX) {
+        return Vec::new();
+    }
+    prefixed_from(&config().mirrors, url)
+}
+
+/// 官方 GitHub 直链的前缀；镜像形态就是在它前面再套一层反代前缀。
+const GITHUB_PREFIX: &str = "https://github.com/";
+
+/// 一次 GitHub 下载该按什么顺序试哪些源，返回 `(来源展示名, URL)`；第一个是首选。
+///
+/// # 为什么顺序要看「有没有配代理」
+///
+/// 直连 github.com 在国内很多网络下不是「慢一点」，而是**连得上却几乎不走字节**，甚至下到一半僵死。
+/// 真机实测（2026-08-20 同机同时刻同一个 167 MB 资产）：
+///
+/// | 链路 | 速率 |
+/// |---|---|
+/// | 直连 github.com | 56 KB/s（且多次在 17~28 MB 处僵死） |
+/// | 经 gh-proxy.com（仍是直连出口） | 1.15 MB/s |
+/// | 经本机代理 | 22 MB/s |
+///
+/// 所以：**配了代理** → 官方优先、镜像兜底；**没配代理** → 镜像优先、官方兜底
+/// （把官方排前面只会让没代理的用户白等几十分钟）。
+/// 用户显式选了 [`Mode::Official`] 时**一个镜像都不给**——那是他划下的信任边界。
+///
+/// ⚠ **调用方必须自己保证「拿得到可信哈希」才用镜像**：镜像能篡改内容，唯一的防线是逐字节校验。
+/// 运行时下载的哈希来自内置清单；更新器的哈希来自官方源上的 `.sha256` 附件（**绝不经镜像取**）。
+/// 拿不到可信哈希时，调用方应当只用返回值里的官方那一项。
+pub fn download_sources(url: &str) -> Vec<(String, String)> {
+    order_sources(url, github_prefixed_urls(url), mode(), crate::http::proxy_configured())
+}
+
+/// [`download_sources`] 的纯排序逻辑（不读全局状态、不触网，因此能直接测）。
+fn order_sources(
+    url: &str,
+    mirrors: Vec<(String, String)>,
+    mode: Mode,
+    has_proxy: bool,
+) -> Vec<(String, String)> {
+    let official = (OFFICIAL_HOST.to_string(), url.to_string());
+    if matches!(mode, Mode::Official) || mirrors.is_empty() {
+        return vec![official];
+    }
+    let mut out = Vec::with_capacity(mirrors.len() + 1);
+    if has_proxy {
+        out.push(official);
+        out.extend(mirrors);
+    } else {
+        out.extend(mirrors);
+        out.push(official);
+    }
+    out
+}
+
+/// [`github_prefixed_urls`] 的纯逻辑部分（不碰全局配置、不触网，因此能直接测）。
+fn prefixed_from(mirrors: &[MirrorEntry], url: &str) -> Vec<(String, String)> {
+    const GH: &str = GITHUB_PREFIX;
+    if !url.starts_with(GH) {
+        return Vec::new();
+    }
+    mirrors
+        .iter()
+        .filter(|m| m.healthy)
+        .filter_map(|m| {
+            let idx = m.archive.find(GH)?;
+            if idx == 0 {
+                return None; // 模板本身就是官方直链，不构成镜像
+            }
+            let prefix = &m.archive[..idx];
+            if !prefix.starts_with("https://") || !prefix.ends_with('/') {
+                return None;
+            }
+            Some((m.host.clone(), format!("{prefix}{url}")))
+        })
+        .collect()
+}
+
 // ==================== 下载 ====================
 
 /// 一次下载请求。
@@ -1584,6 +1687,99 @@ pub async fn plugin_mirror_set_mode(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---------- 下载源顺序 ----------
+
+    const ASSET: &str = "https://github.com/BtbN/FFmpeg-Builds/releases/download/tag/x.zip";
+
+    fn two_mirrors() -> Vec<(String, String)> {
+        vec![
+            ("gh-proxy.com".into(), format!("https://gh-proxy.com/{ASSET}")),
+            ("ghfast.top".into(), format!("https://ghfast.top/{ASSET}")),
+        ]
+    }
+
+    /// 没配代理时**镜像必须排在官方前面**。
+    ///
+    /// 这不是风格偏好，是真机数据决定的：同一时刻同一个资产，直连 github.com 只有 56 KB/s
+    /// 且会在中途僵死，而经 gh-proxy.com 是 1.15 MB/s。把官方排前面 = 让没代理的用户
+    /// 先白等几十分钟再说。谁改了顺序，这条会拦住他。
+    #[test]
+    fn without_proxy_mirrors_come_first() {
+        let out = order_sources(ASSET, two_mirrors(), Mode::Auto, false);
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0].0, "gh-proxy.com");
+        assert_eq!(out[1].0, "ghfast.top");
+        assert_eq!(out.last().unwrap().0, OFFICIAL_HOST, "官方必须留作兜底，不能被镜像挤掉");
+        assert_eq!(out.last().unwrap().1, ASSET);
+    }
+
+    /// 配了代理时官方优先：代理链路实测 22 MB/s，没有理由绕道第三方。
+    #[test]
+    fn with_proxy_official_comes_first() {
+        let out = order_sources(ASSET, two_mirrors(), Mode::Auto, true);
+        assert_eq!(out[0].0, OFFICIAL_HOST);
+        assert_eq!(out.len(), 3, "镜像仍应保留作兜底");
+    }
+
+    /// 用户显式选「只走官方」时**一个镜像都不能用**——那是他明确划下的信任边界。
+    #[test]
+    fn official_mode_never_uses_mirrors() {
+        for has_proxy in [true, false] {
+            let out = order_sources(ASSET, two_mirrors(), Mode::Official, has_proxy);
+            assert_eq!(out, vec![(OFFICIAL_HOST.to_string(), ASSET.to_string())]);
+        }
+    }
+
+    /// 非 GitHub 的地址（adb 来自 dl.google.com）没有镜像可用，只剩官方一个候选。
+    #[test]
+    fn non_github_url_has_only_official() {
+        let url = "https://dl.google.com/android/repository/platform-tools_r37.0.1-win.zip";
+        let out = order_sources(url, Vec::new(), Mode::Auto, false);
+        assert_eq!(out, vec![(OFFICIAL_HOST.to_string(), url.to_string())]);
+    }
+
+    // ---------- release 资产的镜像前缀 ----------
+
+    /// 三家内置镜像都应能把一个 **release 资产**直链改写成经镜像的形态。
+    ///
+    /// 前缀是从每条的 `archive` 模板里现场切出来的，不是写死 `https://{host}/`——
+    /// 服务端若下发别的形态（如 codeload 那种），切不出来就该被跳过，
+    /// 绝不能拿一个猜出来的地址去下可执行文件。下面两条分别钉住这两种情况。
+    #[test]
+    fn builtin_mirrors_can_prefix_release_assets() {
+        let url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/tag/ffmpeg.zip";
+        let out = prefixed_from(&builtin_config().mirrors, url);
+        assert_eq!(out.len(), 3, "三家内置镜像都该给出候选：{out:?}");
+        for (host, mirrored) in &out {
+            assert_eq!(mirrored, &format!("https://{host}/{url}"));
+        }
+        assert_eq!(out[0].0, "gh-proxy.com");
+    }
+
+    /// 切不出前缀的模板、以及被探活判定为不健康的条目，都必须被跳过。
+    #[test]
+    fn unusable_or_unhealthy_mirrors_are_skipped() {
+        let url = "https://github.com/o/r/releases/download/t/a.zip";
+        let mut m = builtin_config().mirrors;
+        // 换成 codeload 形态：里面没有 https://github.com/，推不出通用前缀
+        m[0].archive = "https://gh-proxy.com/https://codeload.github.com/{owner}/{repo}/zip/{ref}".into();
+        m[1].healthy = false;
+        let out = prefixed_from(&m, url);
+        assert_eq!(out.len(), 1, "只该剩下第三家：{out:?}");
+        assert_eq!(out[0].0, "ghproxy.net");
+    }
+
+    /// 非 github.com 的地址一律没有镜像候选（adb 来自 dl.google.com，镜像帮不上忙）。
+    #[test]
+    fn non_github_urls_get_no_mirrors() {
+        let out = prefixed_from(
+            &builtin_config().mirrors,
+            "https://dl.google.com/android/repository/platform-tools_r37.0.1-win.zip",
+        );
+        assert!(out.is_empty(), "不该给非 GitHub 地址编出镜像：{out:?}");
+    }
+
 
     fn coord() -> GhCoord {
         GhCoord {

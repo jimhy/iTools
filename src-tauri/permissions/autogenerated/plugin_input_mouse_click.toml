@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-input-mouse-click"
+description = "Enables the plugin_input_mouse_click command without any pre-configured scope."
+commands.allow = ["plugin_input_mouse_click"]
+
+[[permission]]
+identifier = "deny-plugin-input-mouse-click"
+description = "Denies the plugin_input_mouse_click command without any pre-configured scope."
+commands.deny = ["plugin_input_mouse_click"]

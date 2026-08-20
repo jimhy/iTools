@@ -262,6 +262,19 @@ pub fn run() {
             app.manage(DataStore::load(db.clone()));
             // 「登录后自动同步」调度器：数据变更后防抖自动上行（受 sync_enabled + 登录态门禁）
             app.manage(sync::AutoSync::default());
+            // 插件流式执行（itools.execStream）的会话表：读线程、等待线程与 kill/quit
+            // 命令都要按 stream_id 找到同一个子进程句柄，故必须是全局托管状态。
+            app.manage(plugin::exec::ExecState::default());
+            // 插件 SQLite 的连接表：句柄要跨命令存活，且按会话身份校验归属。
+            app.manage(plugin::sqlite::SqliteState::default());
+            // 托管运行时（ffmpeg / adb）的流式执行会话表
+            app.manage(plugin::runtime_api::RuntimeExecState::default());
+            app.manage(plugin::store_api::ScheduleState::default());
+            app.manage(plugin::record_av::AudioLoopbackState::default());
+            app.manage(plugin::record_av::RecordVideoState::default());
+            // 插件托盘图标表。漏了它会让 plugin_tray_set 在运行期直接报
+            // 「state not managed」——编译期完全看不出来，只有真跑一次才暴露。
+            app.manage(plugin::notify_api::TrayState::default());
             // 统一 SQLite 库句柄：插件 KV 命令（plugin_db_*）注入它读写 plugin_kv 表
             app.manage(db);
             // 插件运行期注册表（open_plugin_window / plugin_* 命令依赖）。
@@ -314,6 +327,23 @@ pub fn run() {
                     .build(),
             )?;
             register_toggle_hotkey(app.handle(), &current.hotkey);
+
+            // 后台常驻插件：把用户开了「随 iTools 启动」的插件拉起来（隐藏窗口）。
+            //
+            // 必须放在全局快捷键插件装好之后——这些插件被拉起来的头一件事通常就是
+            // registerHotkey，快捷键插件还没装时注册会直接失败，用户看到的就是
+            // 「开了自启动，热键却不管用」。
+            //
+            // 用 spawn 而不是阻塞等待：建 webview 是异步的，卡在 setup 里会拖慢启动，
+            // 而且一个插件页加载慢不该让整个 iTools 起不来。
+            {
+                let handle = app.handle().clone();
+                let handle2 = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    plugin::commands::start_background_plugins(handle).await;
+                    plugin::store_api::start_scheduler(handle2).await;
+                });
+            }
             // 宿主内置截图热键（默认 ctrl+shift+a，可在设置里改；空 = 不注册）
             if !current.screenshot_hotkey.trim().is_empty() {
                 if let Err(e) =
@@ -456,10 +486,13 @@ pub fn run() {
             updater::download_update,
             updater::launch_installer_and_quit,
             plugin::commands::open_plugin_window,
+            plugin::commands::search_files,
+            plugin::commands::open_plugin_files,
             plugin::commands::plugin_take_enter,
             plugin::commands::rescan_plugins,
             plugin::commands::list_plugins,
             plugin::commands::set_plugin_enabled,
+            plugin::commands::set_plugin_background,
             plugin::commands::set_plugin_permission,
             plugin::commands::delete_plugin,
             plugin::install::plugin_install_preview,
@@ -514,6 +547,134 @@ pub fn run() {
             plugin::pin::pin_move,
             plugin::pin::pin_close,
             plugin::ocr::plugin_ocr,
+            plugin::camera::plugin_camera_list,
+            plugin::camera::plugin_camera_grab,
+            plugin::camera::plugin_camera_stream_start,
+            plugin::camera::plugin_camera_stream_stop,
+            plugin::record_av::plugin_audio_loopback_start,
+            plugin::record_av::plugin_audio_loopback_stop,
+            plugin::record_av::plugin_record_video_start,
+            plugin::record_av::plugin_record_video_stop,
+            plugin::indicator::plugin_active_uses,
+            plugin::indicator::plugin_stop_all_sensitive,
+            plugin::audit::plugin_audit_log,
+            plugin::audit::plugin_audit_clear,
+            plugin::main_push::plugin_register_main_push,
+            plugin::main_push::plugin_main_push_result,
+            plugin::main_push::search_push,
+            plugin::notify_api::plugin_notify_show,
+            plugin::notify_api::plugin_tray_set,
+            plugin::notify_api::plugin_tray_remove,
+            plugin::tool_bridge::plugin_register_tool,
+            plugin::tool_bridge::plugin_tool_result,
+            plugin::commands::plugin_redirect,
+            plugin::commands::plugin_create_window,
+            plugin::commands::plugin_close_window,
+            plugin::store_api::plugin_crypto_set,
+            plugin::store_api::plugin_crypto_get,
+            plugin::store_api::plugin_crypto_remove,
+            plugin::store_api::plugin_crypto_keys,
+            plugin::store_api::plugin_attach_put,
+            plugin::store_api::plugin_attach_get,
+            plugin::store_api::plugin_attach_remove,
+            plugin::store_api::plugin_attach_list,
+            plugin::store_api::plugin_schedule_add,
+            plugin::store_api::plugin_schedule_remove,
+            plugin::store_api::plugin_schedule_list,
+            plugin::archive_api::plugin_zip_create,
+            plugin::archive_api::plugin_unzip,
+            plugin::archive_api::plugin_fs_watch_start,
+            plugin::archive_api::plugin_fs_watch_stop,
+            plugin::archive_api::plugin_get_file_icon,
+            plugin::runtime_api::plugin_runtime_list,
+            plugin::runtime_api::plugin_runtime_ensure,
+            plugin::runtime_api::plugin_runtime_exec,
+            plugin::runtime_api::plugin_runtime_exec_stream,
+            plugin::runtime_api::plugin_runtime_exec_kill,
+            plugin::runtime_api::plugin_runtime_exec_quit,
+            plugin::runtime_api::plugin_runtime_remove,
+            plugin::sysmanage::plugin_proc_list,
+            plugin::sysmanage::plugin_proc_kill,
+            plugin::sysmanage::plugin_installed_apps,
+            plugin::sysmanage::plugin_startup_list,
+            plugin::sysmanage::plugin_startup_remove,
+            plugin::sysmanage::plugin_startup_set_enabled,
+            plugin::sysmanage::plugin_power_lock,
+            plugin::sysmanage::plugin_power_sleep,
+            plugin::sysmanage::plugin_power_shutdown,
+            plugin::sysmanage::plugin_power_restart,
+            plugin::input_api::plugin_input_type_string,
+            plugin::input_api::plugin_input_paste_text,
+            plugin::input_api::plugin_input_paste_image,
+            plugin::input_api::plugin_input_paste_file,
+            plugin::input_api::plugin_input_key_tap,
+            plugin::input_api::plugin_input_mouse_move,
+            plugin::input_api::plugin_input_mouse_click,
+            plugin::input_api::plugin_input_mouse_double_click,
+            plugin::input_api::plugin_input_mouse_right_click,
+            plugin::input_api::plugin_clipboard_watch_start,
+            plugin::input_api::plugin_clipboard_watch_stop,
+            plugin::window_api::plugin_win_list,
+            plugin::window_api::plugin_win_get_foreground,
+            plugin::window_api::plugin_win_focus,
+            plugin::window_api::plugin_win_move,
+            plugin::window_api::plugin_win_resize,
+            plugin::window_api::plugin_win_set_rect,
+            plugin::window_api::plugin_win_minimize,
+            plugin::window_api::plugin_win_maximize,
+            plugin::window_api::plugin_win_restore,
+            plugin::window_api::plugin_win_close,
+            plugin::window_api::plugin_win_set_topmost,
+            plugin::serve_api::plugin_serve_start,
+            plugin::serve_api::plugin_serve_stop,
+            plugin::serve_api::plugin_serve_list,
+            plugin::serve_api::plugin_lan_announce,
+            plugin::serve_api::plugin_lan_discover,
+            plugin::commands::plugin_set_feature,
+            plugin::commands::plugin_remove_feature,
+            plugin::commands::plugin_get_features,
+            plugin::sqlite::plugin_sqlite_open,
+            plugin::sqlite::plugin_sqlite_exec,
+            plugin::sqlite::plugin_sqlite_query,
+            plugin::sqlite::plugin_sqlite_batch,
+            plugin::sqlite::plugin_sqlite_close,
+            plugin::context::plugin_context_active_window,
+            plugin::context::plugin_context_browser_url,
+            plugin::context::plugin_context_folder_path,
+            plugin::image_api::plugin_image_resize,
+            plugin::image_api::plugin_image_crop,
+            plugin::image_api::plugin_image_convert,
+            plugin::image_api::plugin_image_compress,
+            plugin::image_api::plugin_image_info,
+            plugin::image_api::plugin_screen_cursor_point,
+            plugin::image_api::plugin_screen_pick_color_at,
+            plugin::image_api::plugin_screen_to_dip,
+            plugin::image_api::plugin_screen_to_physical,
+            plugin::image_api::plugin_screen_rect_to_dip,
+            plugin::image_api::plugin_screen_rect_to_physical,
+            plugin::sysinfo::plugin_sys_info,
+            plugin::sysinfo::plugin_sys_usage,
+            plugin::sysinfo::plugin_sys_get_path,
+            plugin::sysinfo::plugin_show_item_in_folder,
+            plugin::exec::plugin_exec,
+            plugin::exec::plugin_exec_stream,
+            plugin::exec::plugin_exec_kill,
+            plugin::exec::plugin_exec_quit,
+            plugin::paths_api::plugin_paths_resolve,
+            plugin::paths_api::plugin_paths_scan,
+            plugin::paths_api::plugin_trash,
+            plugin::fs_api::plugin_pick_dir,
+            plugin::fs_api::plugin_pick_file,
+            plugin::fs_api::plugin_fs_list_scopes,
+            plugin::fs_api::plugin_fs_revoke_scope,
+            plugin::fs_api::plugin_fs_list,
+            plugin::fs_api::plugin_fs_stat,
+            plugin::fs_api::plugin_fs_hash,
+            plugin::fs_api::plugin_fs_read,
+            plugin::fs_api::plugin_fs_read_chunk,
+            plugin::fs_api::plugin_fs_write,
+            plugin::net::plugin_download,
+            plugin::net::plugin_download_cancel,
             plugin::audio::plugin_start_audio_record,
             plugin::audio::plugin_stop_audio_record,
             plugin::record::plugin_start_gif_record,
@@ -706,7 +867,22 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     let admin_item = MenuItem::with_id(app, "admin", "管理中心", true, None::<&str>)?;
     let reload_item = MenuItem::with_id(app, "reload_plugins", "重新加载插件", true, None::<&str>)?;
     let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show_item, &admin_item, &reload_item, &quit_item])?;
+    // 敏感能力指示器：平时禁用且文案为「无」，有插件在用摄像头/麦克风/屏幕时由
+    // spawn_sensitive_indicator 改成「⚠ XX 正在使用摄像头（点击停止）」并启用。
+    //
+    // 为什么必须有这一项：授权开关只在授权那一刻征求过同意，之后插件什么时候真的开了摄像头、
+    // 录了多久，用户完全看不见——只能一刀切撤销授权，而且根本不知道什么时候该撤。
+    let sensitive_item = MenuItem::with_id(
+        app,
+        "sensitive_stop",
+        "敏感能力：当前无使用",
+        false,
+        None::<&str>,
+    )?;
+    let menu = Menu::with_items(
+        app,
+        &[&sensitive_item, &show_item, &admin_item, &reload_item, &quit_item],
+    )?;
 
     let mut builder = TrayIconBuilder::new()
         .tooltip("iTools")
@@ -719,6 +895,11 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
                 }
             }
             "admin" => open_admin(app),
+            // 一键掐断所有正在进行的摄像头 / 麦克风 / 屏幕使用
+            "sensitive_stop" => {
+                plugin::indicator::stop_all_sensitive(app);
+                ilog!("[iTools] 用户从托盘掐断了全部敏感能力使用");
+            }
             "reload_plugins" => {
                 if let (Some(reg), Some(st)) = (
                     app.try_state::<plugin::PluginRegistry>(),
@@ -756,6 +937,8 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
         builder = builder.icon(icon.clone());
     }
 
-    builder.build(app)?;
+    let tray = builder.build(app)?;
+    // 指示器的刷新循环：把托盘 tooltip 与那条菜单项跟着实际使用状态走。
+    plugin::indicator::spawn_indicator(app.clone(), tray, sensitive_item);
     Ok(())
 }

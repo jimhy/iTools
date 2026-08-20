@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-win-list"
+description = "Enables the plugin_win_list command without any pre-configured scope."
+commands.allow = ["plugin_win_list"]
+
+[[permission]]
+identifier = "deny-plugin-win-list"
+description = "Denies the plugin_win_list command without any pre-configured scope."
+commands.deny = ["plugin_win_list"]

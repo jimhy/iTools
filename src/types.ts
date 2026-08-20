@@ -100,6 +100,9 @@ export interface AppSettings {
   proxy_address: string;
   local_launch_items: LaunchItem[];
   disabled_plugins: string[];
+  /** 开了「随 iTools 启动」的插件 id（仅对清单声明了 background 的插件有效）。
+   *  **后端独占字段**：由 `set_plugin_background` 命令维护，整包保存时被 `preserve_backend_owned` 还原。 */
+  background_plugins: string[];
   plugin_permissions: Record<string, string[]>;
   /** 插件窗口尺寸记忆：插件 id → [宽, 高]（逻辑像素）。
    *  **后端独占字段**：由插件窗口 resize / 关闭时的 `SettingsStore::set_plugin_window` 写入。
@@ -364,6 +367,10 @@ export interface PluginInfo {
   has_readme: boolean;
   /** 是否有 settings.json（详情页「设置」tab 是否可用） */
   has_settings: boolean;
+  /** 清单是否声明支持后台常驻（决定「随 iTools 启动」开关显不显示） */
+  background: boolean;
+  /** 用户是否为本插件开启了「随 iTools 启动」 */
+  background_enabled: boolean;
   /** Git 安装来源；手工放入 plugins 目录或随包内置则为 null（无法自动更新） */
   source: GitSource | null;
   /** 是否随安装包分发的内置插件 */
@@ -374,6 +381,8 @@ export interface PluginInfo {
 export type SettingsItemType =
   | "text"
   | "textarea"
+  /** 凭据输入：掩码显示 + 可临时查看。注意只是**显示**层面的遮挡，值仍按普通设置项存储 */
+  | "password"
   | "number"
   | "boolean"
   | "select"
@@ -933,4 +942,19 @@ export interface MarketView {
   /** 这批数据已过新鲜期（默认 1 小时）→ 前端应在后台静默 marketList(true) 再重绘。
    *  与 origin 是两件事：origin 说数据从哪来，stale 说该不该更新。 */
   stale: boolean;
+}
+
+/** 一条高危能力审计记录，与 Rust 侧 `plugin::audit::AuditEntry`（camelCase）一致。
+ *  同一插件同一能力的连续调用会被合并计数，故有 firstAt/lastAt/count 三个字段。 */
+export interface AuditEntry {
+  pluginId: string;
+  /** 是否调试会话（调试插件与同名正式插件分开记） */
+  dev: boolean;
+  /** 能力标识，如 runCommand / camera */
+  permission: string;
+  firstAt: number;
+  lastAt: number;
+  count: number;
+  /** 本次判定是否放行。**被拒的也会记**——插件反复尝试未授权能力是要给用户看的信号 */
+  granted: boolean;
 }

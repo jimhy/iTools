@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-paths-scan"
+description = "Enables the plugin_paths_scan command without any pre-configured scope."
+commands.allow = ["plugin_paths_scan"]
+
+[[permission]]
+identifier = "deny-plugin-paths-scan"
+description = "Denies the plugin_paths_scan command without any pre-configured scope."
+commands.deny = ["plugin_paths_scan"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-image-convert"
+description = "Enables the plugin_image_convert command without any pre-configured scope."
+commands.allow = ["plugin_image_convert"]
+
+[[permission]]
+identifier = "deny-plugin-image-convert"
+description = "Denies the plugin_image_convert command without any pre-configured scope."
+commands.deny = ["plugin_image_convert"]

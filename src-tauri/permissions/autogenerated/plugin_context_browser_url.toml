@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-context-browser-url"
+description = "Enables the plugin_context_browser_url command without any pre-configured scope."
+commands.allow = ["plugin_context_browser_url"]
+
+[[permission]]
+identifier = "deny-plugin-context-browser-url"
+description = "Denies the plugin_context_browser_url command without any pre-configured scope."
+commands.deny = ["plugin_context_browser_url"]

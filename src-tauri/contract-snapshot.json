@@ -35,6 +35,7 @@
     "background_dim",
     "background_enabled",
     "background_image",
+    "background_plugins",
     "custom_apps",
     "dev_plugin_dirs",
     "dev_plugin_permissions",
@@ -291,6 +292,8 @@
   ],
   "PluginInfo": [
     "author",
+    "background",
+    "background_enabled",
     "builtin",
     "cmds",
     "description",

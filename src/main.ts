@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 // release notes 是 Markdown，复用管理中心那份零依赖渲染器（无 innerHTML，无 XSS 面）
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { LogicalSize, LogicalPosition } from "@tauri-apps/api/dpi";
 import { listen } from "@tauri-apps/api/event";
 import type {
@@ -56,6 +57,8 @@ interface GridCell {
 let homeData: HomeData | null = null;
 let gridCells: GridCell[] = [];
 let gridSel = -1;
+/** 本次拖入主面板的文件真实路径；非空表示当前处于「拖放待选插件」状态。 */
+let droppedFiles: string[] = [];
 /** 最近一次搜索网格的数据（供展开/收起重渲染） */
 let lastGridItems: SearchItem[] = [];
 const sectionExpanded: Record<string, boolean> = {};
@@ -110,6 +113,10 @@ function armKeyAction(action: () => void): void {
  */
 async function hide(): Promise<void> {
   await appWindow.hide();
+  // 拖放态要一并退出：否则下次唤起还停在上一批文件的候选列表上，
+  // 输入框还是禁用的，用户会以为 iTools 卡死了
+  droppedFiles = [];
+  input.disabled = false;
   input.value = "";
   showHome();
 }
@@ -380,10 +387,19 @@ function execCell(index: number): void {
   if (cell.item) {
     // 插件：打开插件页面窗口（不走 execute 的外部打开分支）
     if (cell.item.kind === "plugin") {
-      invoke("open_plugin_window", {
-        target: cell.item.target,
-        query: input.value.trim(),
-      }).catch((err) => console.error("open_plugin_window failed", err));
+      // 拖放进来的一批文件：走 open_plugin_files，把**真实路径**交给插件
+      // （网页里的 File 对象拿不到路径，这是过去 files 触发做不了的根本原因）
+      if (droppedFiles.length > 0) {
+        const paths = droppedFiles.slice();
+        invoke("open_plugin_files", { target: cell.item.target, paths }).catch((err) =>
+          console.error("open_plugin_files failed", err),
+        );
+      } else {
+        invoke("open_plugin_window", {
+          target: cell.item.target,
+          query: input.value.trim(),
+        }).catch((err) => console.error("open_plugin_window failed", err));
+      }
       // 插件不经 execute，单独补记一次使用，使其进入「最近使用」
       invoke("record_usage", { item: cell.item }).catch((err) =>
         console.error("record_usage failed", err),
@@ -621,12 +637,78 @@ function renderSearchGrid(found: SearchItem[]): void {
 // ---------- 搜索 ----------
 
 /** 触发一次搜索（带防抖），空查询回到主面板 */
+// ---------- 拖放文件：交给声明了 files / img 触发的插件 ----------
+//
+// 为什么必须在原生层接：网页里的 File 对象**拿不到真实路径**（浏览器安全模型），
+// 而「用 adb 装这个 apk」「压缩这几个文件」这类插件要的正是路径。Tauri 的 OS 级
+// 拖放事件给的是真实路径，所以这条链路只能走原生。
+async function handleDroppedFiles(paths: string[]): Promise<void> {
+  droppedFiles = paths.slice();
+  if (droppedFiles.length === 0) return;
+  try {
+    const found = await invoke<SearchItem[]>("search_files", { paths: droppedFiles });
+    // 用文件名当提示文本，让用户看清自己拖进来的是什么
+    const names = droppedFiles.map((p) => p.split(/[\/]/).pop() ?? p);
+    input.value = names.length === 1 ? names[0] : `${names.length} 个文件`;
+    input.disabled = true; // 拖放态下输入框只作展示，避免用户以为能继续打字筛选
+    setMode("grid");
+    delete sectionExpanded["pl"];
+    delete sectionExpanded["sr"];
+    delete sectionExpanded["mr"];
+    items = [];
+    list.innerHTML = "";
+    if (found.length === 0) {
+      // 诚实告知：没有插件能处理这批文件，而不是显示一个空面板让用户以为在加载
+      pane.innerHTML = "";
+      const tip = document.createElement("div");
+      tip.className = "plugin-empty-title";
+      tip.textContent = "没有插件能处理这类文件";
+      pane.appendChild(tip);
+      return;
+    }
+    renderSearchGrid(found);
+  } catch (err) {
+    console.error("search_files failed", err);
+    clearDropState();
+  }
+}
+
+/** 退出拖放态，恢复正常搜索。 */
+function clearDropState(): void {
+  if (droppedFiles.length === 0 && !input.disabled) return;
+  droppedFiles = [];
+  input.disabled = false;
+  input.value = "";
+  showHome();
+}
+
+void getCurrentWebview().onDragDropEvent((event) => {
+  if (event.payload.type === "drop") {
+    void handleDroppedFiles(event.payload.paths);
+  }
+});
+
+/** 把插件注入的结果追加到当前网格；token 过期（用户已输入新内容）则整批丢弃。 */
+async function appendPushResults(query: string, token: number): Promise<void> {
+  try {
+    const pushed = await invoke<SearchItem[]>("search_push", { query });
+    if (token !== queryToken || pushed.length === 0) return;
+    if (mode !== "grid") return;
+    renderSearchGrid(lastGridItems.concat(pushed));
+  } catch (err) {
+    // 注入失败不该影响主搜索结果——静默记一条即可
+    console.error("search_push failed", err);
+  }
+}
+
 function scheduleSearch(): void {
   window.clearTimeout(debounceTimer);
   debounceTimer = window.setTimeout(runSearch, 120);
 }
 
 async function runSearch(): Promise<void> {
+  // 拖放态下输入框是禁用的展示文本，不该被当成搜索词
+  if (droppedFiles.length > 0) return;
   const query = input.value.trim();
   const token = ++queryToken;
   if (query.length === 0) {
@@ -654,6 +736,9 @@ async function runSearch(): Promise<void> {
       items = [];
       list.innerHTML = "";
       renderSearchGrid(found);
+      // 搜索结果注入：并发问一次已常驻的插件，拿到什么追加什么。
+      // 独立于主 search，慢插件不会拖住上面这一屏；宿主那边已限时 250ms。
+      void appendPushResults(query, token);
     }
   } catch (err) {
     console.error("search failed", err);
@@ -1266,6 +1351,12 @@ document.addEventListener("keydown", (e) => {
     case "Escape":
       e.preventDefault();
       if (e.repeat) break;
+      // 拖放态下 Esc 先退回正常搜索，而不是直接把面板收起来：
+      // 用户拖错了文件想重来，不该被整个关掉再重新唤起。
+      if (droppedFiles.length > 0) {
+        armKeyAction(() => clearDropState());
+        break;
+      }
       armKeyAction(() => void hide());
       break;
     default:

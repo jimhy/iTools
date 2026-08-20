@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-win-resize"
+description = "Enables the plugin_win_resize command without any pre-configured scope."
+commands.allow = ["plugin_win_resize"]
+
+[[permission]]
+identifier = "deny-plugin-win-resize"
+description = "Denies the plugin_win_resize command without any pre-configured scope."
+commands.deny = ["plugin_win_resize"]

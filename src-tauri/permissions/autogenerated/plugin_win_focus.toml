@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-win-focus"
+description = "Enables the plugin_win_focus command without any pre-configured scope."
+commands.allow = ["plugin_win_focus"]
+
+[[permission]]
+identifier = "deny-plugin-win-focus"
+description = "Denies the plugin_win_focus command without any pre-configured scope."
+commands.deny = ["plugin_win_focus"]

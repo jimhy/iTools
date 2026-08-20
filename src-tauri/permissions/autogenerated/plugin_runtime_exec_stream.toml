@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-runtime-exec-stream"
+description = "Enables the plugin_runtime_exec_stream command without any pre-configured scope."
+commands.allow = ["plugin_runtime_exec_stream"]
+
+[[permission]]
+identifier = "deny-plugin-runtime-exec-stream"
+description = "Denies the plugin_runtime_exec_stream command without any pre-configured scope."
+commands.deny = ["plugin_runtime_exec_stream"]

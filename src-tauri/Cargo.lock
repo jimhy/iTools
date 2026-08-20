@@ -2542,6 +2542,7 @@ dependencies = [
  "fasteval",
  "fuzzy-matcher",
  "image",
+ "notify-rust",
  "opener",
  "pinyin",
  "png 0.17.16",

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-register-main-push"
+description = "Enables the plugin_register_main_push command without any pre-configured scope."
+commands.allow = ["plugin_register_main_push"]
+
+[[permission]]
+identifier = "deny-plugin-register-main-push"
+description = "Denies the plugin_register_main_push command without any pre-configured scope."
+commands.deny = ["plugin_register_main_push"]

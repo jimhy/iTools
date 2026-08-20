@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-pick-dir"
+description = "Enables the plugin_pick_dir command without any pre-configured scope."
+commands.allow = ["plugin_pick_dir"]
+
+[[permission]]
+identifier = "deny-plugin-pick-dir"
+description = "Denies the plugin_pick_dir command without any pre-configured scope."
+commands.deny = ["plugin_pick_dir"]

@@ -3,6 +3,7 @@
 //! 安全：这些命令只对 label="plugin" 的窗口开放（见 `capabilities/plugin.json`）。
 //! writeFile 限定插件沙盒目录；runCommand 受全局开关 [`ALLOW_RUN_COMMAND`] 控制。
 
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -52,11 +53,18 @@ pub(crate) fn plugin_granted(
         )
     };
     if !declared {
+        // 清单里根本没声明也记一笔：插件试图用一个自己没声明的能力，
+        // 这比「声明了但用户没授权」更值得用户看见。
+        super::audit::record(session, perm, false);
         return false;
     }
-    table
+    let granted = table
         .get(&session.id)
-        .is_some_and(|v| v.iter().any(|p| p == perm))
+        .is_some_and(|v| v.iter().any(|p| p == perm));
+    // 审计钩子放在这里而不是各命令入口：这是所有高危能力的必经之路，
+    // 一处覆盖全部，也不会出现「新加了命令忘了加审计」的漏网。
+    super::audit::record(session, perm, granted);
+    granted
 }
 
 /// 打开（或复用）插件窗口，加载 `itplugin://` 下的插件页并注入 window.itools。
@@ -77,9 +85,27 @@ pub async fn open_plugin(
     query: String,
     hidden: bool,
 ) -> Result<(), String> {
-    let (raw_id, code) = target
+    open_plugin_inner(app, target, query, hidden, Vec::new()).await
+}
+
+/// [`open_plugin`] 的实现体，多一个 `files`：拖放触发时把真实文件路径带给插件。
+pub async fn open_plugin_inner(
+    app: AppHandle,
+    target: String,
+    query: String,
+    hidden: bool,
+    files: Vec<String>,
+) -> Result<(), String> {
+    let (raw_id, code_and_payload) = target
         .split_once('#')
         .ok_or_else(|| "非法插件目标（缺 #code）".to_string())?;
+    // 搜索结果注入的条目会把 payload 用 U+0001 附在 code 后面（见 main_push.rs），
+    // 这里拆出来当本次的 query 交给插件。普通目标不含该分隔符，行为与以前逐字节一致。
+    let (code, pushed_payload) = match code_and_payload.split_once('\u{1}') {
+        Some((c, p)) => (c, Some(p.to_string())),
+        None => (code_and_payload, None),
+    };
+    let query = pushed_payload.unwrap_or(query);
     // 主搜索里的调试插件带 `dev:` 前缀（见 dev::DEV_ID_PREFIX）：路由到**调试窗口**，
     // 绝不能落到正式窗口——否则调试插件会拿到正式插件的存储与授权。
     if let Some(dev_id) = raw_id.strip_prefix(crate::dev::DEV_ID_PREFIX) {
@@ -93,6 +119,30 @@ pub async fn open_plugin(
         .await;
     }
     let (plugin_id, code) = (raw_id, code);
+
+    // 该插件已有后台常驻实例：把那个窗口显示出来，而不是在共享的 `plugin` 窗口里再开一份。
+    // 同一插件跑两份会互相抢全局热键、并发写同一份 db/sqlite，是实打实的数据竞争。
+    // 复用时不重载页面——后台常驻插件很可能攒了内存状态（监听器、缓存），reload 会把它清掉；
+    // 改用事件总线推一发 enter，让插件页在保持状态的前提下重新走一遍 onEnter。
+    if let Some(win) = app.get_webview_window(&bg_label(plugin_id)) {
+        let kind = if files.is_empty() {
+            let registry = app.state::<PluginRegistry>();
+            registry.trigger_kind(plugin_id, code, &query)
+        } else {
+            "files".to_string()
+        };
+        let payload =
+            serde_json::json!({ "code": code, "type": kind, "query": query, "files": files });
+        let js = format!("window.__itoolsEmit && window.__itoolsEmit('enter', {payload})");
+        let _ = win.eval(&js);
+        if !hidden {
+            let _ = win.show();
+            let _ = win.unminimize();
+            let _ = win.set_focus();
+        }
+        return Ok(());
+    }
+
     let registry = app.state::<PluginRegistry>();
 
     // 取所需信息后尽快释放对 registry 的借用
@@ -103,14 +153,20 @@ pub async fn open_plugin(
     if !exists {
         return Err(format!("插件不存在或缺 index.html: {plugin_id}"));
     }
-    // 判定本次是被关键字还是 regex 命中，回传真实触发类型与 query
-    let kind = registry.trigger_kind(plugin_id, code, &query);
+    // 判定本次是被关键字还是 regex 命中，回传真实触发类型与 query。
+    // 拖放进来的一律是 "files"——这时根本没有 query 可供判定。
+    let kind = if files.is_empty() {
+        registry.trigger_kind(plugin_id, code, &query)
+    } else {
+        "files".to_string()
+    };
 
     let enter = EnterInfo {
         code: code.to_string(),
         kind,
         query: query.clone(),
         plugin_id: plugin_id.to_string(),
+        files: files.clone(),
     };
     // 存入本窗口的待取进入信息（同时留存一份供热更新重放 onEnter）
     registry.set_enter(PLUGIN_WINDOW_LABEL, enter);
@@ -118,6 +174,19 @@ pub async fn open_plugin(
     if let Some(win) = app.get_webview_window(PLUGIN_WINDOW_LABEL) {
         if let Some(prev) = registry.session_for(PLUGIN_WINDOW_LABEL) {
             if prev.id != plugin_id {
+                // 上一个插件被换下来了：它开的本地 HTTP 服务必须一起停掉。
+                // 不停的话端口一直开着、局域网里仍能访问它暴露的目录，而插件本身早已不在运行——
+                // 用户完全没有渠道感知到这件事，更谈不上关掉它。
+                super::serve_api::stop_all_for_session(&prev);
+                // 摄像头 / 录屏录音同理：插件被换下来了还开着摄像头，
+                // 用户既看不到是谁在用，也没有关掉它的入口。
+                super::camera::stop_all_for_session(&prev);
+                super::record_av::stop_all_for_session(&prev);
+                super::input_api::stop_all_for_session(&prev);
+                // 定时任务与托盘图标同理：插件换走了还留着定时器和一个点了没反应的托盘图标，
+                // 都是「插件已经不在了，痕迹还在」。
+                super::store_api::stop_for_session(&app, &prev);
+                super::notify_api::remove_for_session(&app, &prev);
                 let scale = win.scale_factor().unwrap_or(1.0);
                 if let Ok(sz) = win.inner_size() {
                     app.state::<SettingsStore>().set_plugin_window(
@@ -182,6 +251,384 @@ pub async fn open_plugin(
     Ok(())
 }
 
+/// 跳转到另一个插件的某个功能，并可带一段载荷。
+///
+/// `label` 的匹配口径：先按「插件 id#code」精确匹配；否则把它当搜索词，取命中的第一个插件命令。
+/// 后者是为了让插件能用人类可读的名字跳转（如 `redirect("翻译", text)`）而不必知道对方的 id。
+///
+/// 载荷经 `onEnter` 的 `info.query` 交给目标插件——**不新开一条通道**：目标插件本来就要处理
+/// query，多一条 payload 通道等于让每个插件都得多写一个分支。
+#[tauri::command]
+pub async fn plugin_redirect(
+    label: String,
+    payload: Option<String>,
+    app: AppHandle,
+    webview: tauri::Webview,
+) -> Result<(), String> {
+    let target = {
+        let registry = app.state::<PluginRegistry>();
+        let settings = app.state::<SettingsStore>();
+        let disabled = settings.get().disabled_plugins;
+        let cmds = registry.commands(&disabled);
+        // 1) 精确匹配 id#code
+        let exact = cmds.iter().find(|c| format!("{}#{}", c.plugin_id, c.code) == label);
+        // 2) 退化为按关键字/标题找第一个
+        let fuzzy = || {
+            let lower = label.to_lowercase();
+            cmds.iter().find(|c| {
+                c.keywords.iter().any(|k| k.to_lowercase() == lower)
+                    || c.title.to_lowercase() == lower
+                    || c.plugin_id.to_lowercase() == lower
+            })
+        };
+        let hit = exact.or_else(fuzzy).ok_or_else(|| format!("找不到可跳转的目标：{label}"))?;
+        format!("{}#{}", hit.plugin_id, hit.code)
+    };
+    // 调用方自己先隐去：跳转语义上是「我让位给它」
+    let _ = webview.window().hide();
+    open_plugin(app, target, payload.unwrap_or_default(), false).await
+}
+
+/// 插件开一个**独立窗口**（与主插件面板并存，可自行留在桌面上）。
+///
+/// `page` 是插件目录内的相对页面路径（如 `panel.html`），走与主面板同一个受限协议，
+/// 因此同样注入 `window.itools`、同样受 CSP 与 ACL 约束——不是一个能绕开沙盒的口子。
+#[tauri::command]
+pub async fn plugin_create_window(
+    page: String,
+    opts: Option<CreateWindowOptions>,
+    app: AppHandle,
+    webview: tauri::Webview,
+) -> Result<String, String> {
+    let session = {
+        let registry = app.state::<PluginRegistry>();
+        caller_session(&webview, &registry)?
+    };
+    if session.dev {
+        return Err("调试会话暂不支持独立窗口".to_string());
+    }
+    // 页面路径必须是插件目录内的相对路径：绝对路径/`..` 会跳出插件目录
+    let rel = sandbox_relative(&page)?;
+    let rel_str = rel.to_string_lossy().replace('\\', "/");
+    let opts = opts.unwrap_or_default();
+
+    // label 要稳定且唯一：同一插件多次开同名页面视为复用，避免点几次攒一堆窗口
+    let label = format!("plugin-win-{}-{}", session.id, sanitize_label(&rel_str));
+    if let Some(win) = app.get_webview_window(&label) {
+        let _ = win.show();
+        let _ = win.set_focus();
+        return Ok(label);
+    }
+
+    {
+        let registry = app.state::<PluginRegistry>();
+        // 独立窗口属于同一个插件会话：这样它调 plugin_* 时能被正确识别归属
+        registry.set_session(&label, session.clone());
+        registry.set_enter(
+            &label,
+            EnterInfo {
+                code: String::new(),
+                // 用 "detached" 而不是 "window"：cmds 里已有一个 {"type":"window"} 表示
+                // 「按前台窗口门控」，两者含义完全不同，同名必然被误读。
+                kind: "detached".to_string(),
+                query: opts.query.clone().unwrap_or_default(),
+                plugin_id: session.id.clone(),
+                files: Vec::new(),
+            },
+        );
+    }
+
+    let url_str = format!("http://itplugin.localhost/{}/{}", session.id, rel_str);
+    let url: tauri::Url = url_str.parse().map_err(|e| format!("URL 解析失败: {e}"))?;
+    let init = format!(
+        "window.__ITOOLS_DEV__={};
+{}",
+        cfg!(debug_assertions),
+        BRIDGE_JS
+    );
+    tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::External(url))
+        .title(opts.title.unwrap_or_else(|| session.id.clone()))
+        .inner_size(opts.width.unwrap_or(640.0), opts.height.unwrap_or(480.0))
+        .resizable(opts.resizable.unwrap_or(true))
+        .always_on_top(opts.always_on_top.unwrap_or(false))
+        .disable_drag_drop_handler()
+        .initialization_script(&init)
+        .on_navigation(|u| u.scheme() == "itplugin" || u.host_str() == Some("itplugin.localhost"))
+        .build()
+        .map_err(|e| e.to_string())?;
+    Ok(label)
+}
+
+/// 关闭插件自己开的独立窗口。只能关本会话开的，不能关别人的。
+#[tauri::command]
+pub fn plugin_close_window(
+    label: String,
+    app: AppHandle,
+    webview: tauri::Webview,
+    registry: State<'_, PluginRegistry>,
+) -> Result<(), String> {
+    let session = caller_session(&webview, &registry)?;
+    if !label.starts_with(&format!("plugin-win-{}-", session.id)) {
+        return Err("只能关闭本插件自己创建的窗口".to_string());
+    }
+    if let Some(win) = app.get_webview_window(&label) {
+        win.close().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// [`plugin_create_window`] 的可选项。
+#[derive(Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateWindowOptions {
+    pub title: Option<String>,
+    pub width: Option<f64>,
+    pub height: Option<f64>,
+    pub resizable: Option<bool>,
+    pub always_on_top: Option<bool>,
+    /// 交给该页面 `onEnter` 的 `info.query`。
+    pub query: Option<String>,
+}
+
+/// 把相对页面路径压成合法的窗口 label 片段（Tauri 的 label 不接受 `/`、`.` 等字符）。
+fn sanitize_label(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
+}
+
+// ==================== 动态指令（插件运行时增删自己的触发条目） ====================
+
+/// 新增/更新一条动态指令（同 `code` 覆盖）。
+///
+/// 用途：让用户能在插件里自定义条目而不必改 `plugin.json`——「网址快开」让用户自己加网址、
+/// 「常用文件夹」让用户自己加目录，加完立刻能在主搜索里搜到。
+///
+/// 动态指令与清单里的静态 feature 走**完全相同**的匹配规则（同一套 `expand_one`），
+/// 不存在「静态能搜到、动态搜不到」的差异。
+#[tauri::command]
+pub fn plugin_set_feature(
+    feature: super::Feature,
+    app: AppHandle,
+    webview: tauri::Webview,
+    registry: State<'_, PluginRegistry>,
+    settings: State<'_, SettingsStore>,
+) -> Result<(), String> {
+    let session = caller_session(&webview, &registry)?;
+    if session.dev {
+        // 调试会话的动态指令若落进正式插件的数据目录，会污染用户已装的那个同名插件。
+        return Err("调试会话暂不支持动态指令".to_string());
+    }
+    if feature.code.trim().is_empty() {
+        return Err("动态指令的 code 不能为空".to_string());
+    }
+    registry.set_dynamic_feature(&session.id, feature)?;
+    // 立刻刷新搜索索引，否则用户加完要等下次重扫才搜得到
+    let s = settings.get();
+    crate::dev::apply_plugin_search(&app, registry.commands(&s.disabled_plugins));
+    Ok(())
+}
+
+/// 删除一条动态指令。返回是否真的存在并被删除。
+#[tauri::command]
+pub fn plugin_remove_feature(
+    code: String,
+    app: AppHandle,
+    webview: tauri::Webview,
+    registry: State<'_, PluginRegistry>,
+    settings: State<'_, SettingsStore>,
+) -> Result<bool, String> {
+    let session = caller_session(&webview, &registry)?;
+    if session.dev {
+        return Err("调试会话暂不支持动态指令".to_string());
+    }
+    let removed = registry.remove_dynamic_feature(&session.id, &code)?;
+    if removed {
+        let s = settings.get();
+        crate::dev::apply_plugin_search(&app, registry.commands(&s.disabled_plugins));
+    }
+    Ok(removed)
+}
+
+/// 列出本插件的动态指令（可按 code 过滤）。
+#[tauri::command]
+pub fn plugin_get_features(
+    codes: Option<Vec<String>>,
+    webview: tauri::Webview,
+    registry: State<'_, PluginRegistry>,
+) -> Result<Vec<super::Feature>, String> {
+    let session = caller_session(&webview, &registry)?;
+    Ok(registry.dynamic_features(&session.id, codes.as_deref()))
+}
+
+/// 拖入文件后，列出能处理这批文件的插件（供主窗口渲染成搜索结果）。
+///
+/// 判定见 [`super::PluginCommand::matches_files`]：**所有**拖入文件都要满足插件声明的
+/// 扩展名要求才算命中，避免插件收到它处理不了的类型。
+#[tauri::command]
+pub fn search_files(
+    paths: Vec<String>,
+    registry: State<'_, PluginRegistry>,
+    settings: State<'_, SettingsStore>,
+) -> Vec<crate::search::SearchItem> {
+    if paths.is_empty() {
+        return Vec::new();
+    }
+    let disabled = settings.get().disabled_plugins;
+    registry
+        .commands(&disabled)
+        .into_iter()
+        .filter(|c| c.matches_files(&paths))
+        .map(|c| c.to_item())
+        .collect()
+}
+
+/// 打开插件并把拖入的文件路径交给它（`onEnter` 的 `info.files`，`info.type` 为 `"files"`）。
+#[tauri::command]
+pub async fn open_plugin_files(
+    app: AppHandle,
+    target: String,
+    paths: Vec<String>,
+) -> Result<(), String> {
+    open_plugin_inner(app, target, String::new(), false, paths).await
+}
+
+// ==================== 后台常驻插件（开机自启动） ====================
+
+/// 后台常驻插件的窗口 label 前缀：`plugin-bg-<插件id>`。
+///
+/// 为什么每个后台插件一个独立窗口，而不是复用那个共享的 `plugin` 窗口：共享窗口同一时刻
+/// 只能装一个插件页，一切换就把上一个卸载了——而后台常驻的意义恰恰是「一直活着」。
+/// 插件 id 的字符集受安装校验约束（小写字母数字连字符），拼进 label 是安全的。
+pub const BG_WINDOW_PREFIX: &str = "plugin-bg-";
+
+/// 某插件的后台窗口 label。
+pub fn bg_label(plugin_id: &str) -> String {
+    format!("{BG_WINDOW_PREFIX}{plugin_id}")
+}
+
+/// 启动一个插件的后台常驻实例（隐藏窗口）。已在跑则直接返回，不重复建窗。
+///
+/// 进入信息的 `type` 是 **`"background"`**：插件据此区分「我是被 iTools 开机拉起来的」
+/// 还是「用户主动唤起的」。后台启动时插件应当只做注册（热键、监听），**不要弹界面**——
+/// 窗口本来就是隐藏的，弹了用户也看不见，只会白占资源。
+pub async fn open_plugin_background(app: AppHandle, plugin_id: String) -> Result<(), String> {
+    let label = bg_label(&plugin_id);
+    if app.get_webview_window(&label).is_some() {
+        return Ok(());
+    }
+    // 取所需信息后尽快释放对 registry 的借用（后面要 await 建窗）
+    let (exists, code) = {
+        let registry = app.state::<PluginRegistry>();
+        let exists = registry
+            .plugin_dir(&plugin_id)
+            .map(|d| d.join("index.html").exists())
+            .unwrap_or(false);
+        (exists, registry.first_feature_code(&plugin_id).unwrap_or_default())
+    };
+    if !exists {
+        return Err(format!("插件不存在或缺 index.html: {plugin_id}"));
+    }
+
+    {
+        let registry = app.state::<PluginRegistry>();
+        registry.set_enter(
+            &label,
+            EnterInfo {
+                code,
+                kind: "background".to_string(),
+                query: String::new(),
+                plugin_id: plugin_id.clone(),
+                files: Vec::new(),
+            },
+        );
+        registry.set_session(
+            &label,
+            ActiveSession {
+                id: plugin_id.clone(),
+                dev: false,
+            },
+        );
+    }
+
+    let url_str = format!("http://itplugin.localhost/{plugin_id}/index.html");
+    let url: tauri::Url = url_str.parse().map_err(|e| format!("URL 解析失败: {e}"))?;
+    let init = format!(
+        "window.__ITOOLS_DEV__={};
+{}",
+        cfg!(debug_assertions),
+        BRIDGE_JS
+    );
+    tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::External(url))
+        .title(format!("{plugin_id} - iTools 后台"))
+        .inner_size(480.0, 320.0)
+        .visible(false)
+        // 后台实例不该出现在任务栏/Alt-Tab 里：用户没打开过它，看见一个空窗口只会困惑。
+        .skip_taskbar(true)
+        .disable_drag_drop_handler()
+        .initialization_script(&init)
+        .on_navigation(|u| u.scheme() == "itplugin" || u.host_str() == Some("itplugin.localhost"))
+        .build()
+        .map_err(|e| e.to_string())?;
+    ilog!("[iTools] 插件 {plugin_id} 已后台启动");
+    Ok(())
+}
+
+/// 关闭某插件的后台常驻实例（用户关掉自启动开关、禁用或删除插件时调用）。
+///
+/// 关窗会连带让它注册的全局热键失效——热键绑定表按会话身份存，窗口没了就没有接收方了。
+/// 这正是期望行为：关掉自启动就该彻底不占用热键。
+pub fn close_plugin_background(app: &AppHandle, plugin_id: &str) {
+    // 它注册给外部 AI 的 MCP 工具也要摘掉：插件都不在了，工具还挂在列表里的话，
+    // 外部 AI 调过来只会白白等一次超时。
+    super::tool_bridge::unregister_all(plugin_id);
+    // 搜索结果注入也要摘：插件不在了还留在就绪集合里，每次搜索都白等一次超时
+    super::main_push::unregister(plugin_id);
+    // 后台实例开的本地服务一并停掉（它多半正是靠后台常驻在提供服务的那一类插件）
+    let gone = ActiveSession {
+        id: plugin_id.to_string(),
+        dev: false,
+    };
+    super::serve_api::stop_all_for_session(&gone);
+    super::camera::stop_all_for_session(&gone);
+    super::record_av::stop_all_for_session(&gone);
+    super::input_api::stop_all_for_session(&gone);
+    super::store_api::stop_for_session(app, &gone);
+    super::notify_api::remove_for_session(app, &gone);
+    if let Some(win) = app.get_webview_window(&bg_label(plugin_id)) {
+        let _ = win.close();
+        ilog!("[iTools] 插件 {plugin_id} 的后台实例已关闭");
+    }
+}
+
+/// 启动时把所有「声明了 background 且用户开了自启动」的插件拉起来。
+///
+/// 逐个建窗，单个失败只记日志不中断——一个坏插件不该让其余后台插件都起不来。
+pub async fn start_background_plugins(app: AppHandle) {
+    let wanted: Vec<String> = {
+        let settings = app.state::<SettingsStore>();
+        let registry = app.state::<PluginRegistry>();
+        let s = settings.get();
+        // 两类：用户开了自启动开关的，以及声明了 mainPush 的（后者是功能前提，不需要开关）
+        let mut ids: Vec<String> = registry
+            .background_capable(&s.disabled_plugins)
+            .into_iter()
+            .filter(|id| s.background_plugins.iter().any(|b| b == id))
+            .collect();
+        for id in registry.auto_background(&s.disabled_plugins) {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+        ids
+    };
+    for id in wanted {
+        if let Err(e) = open_plugin_background(app.clone(), id.clone()).await {
+            ilog!("[iTools] 插件 {id} 后台启动失败: {e}");
+        }
+    }
+}
+
 /// 拉取本次进入信息（桥接脚本加载后调用一次，取走即清空）。规避 emit/监听的时序竞态。
 ///
 /// **按调用窗口取**：正式插件窗与调试插件窗可能同时在加载，共用一个槽会互相取走对方的上下文
@@ -217,7 +664,7 @@ pub fn list_plugins(
     settings: State<'_, SettingsStore>,
 ) -> Vec<super::PluginInfo> {
     let s = settings.get();
-    registry.list_infos(&s.disabled_plugins, &s.plugin_permissions)
+    registry.list_infos(&s.disabled_plugins, &s.plugin_permissions, &s.background_plugins)
 }
 
 /// 授予/撤销某插件的某高危能力（runCommand / network）。network 在下次打开插件页时经 CSP 生效。
@@ -249,10 +696,61 @@ pub fn set_plugin_enabled(
     let mut s = settings.get();
     s.disabled_plugins.retain(|n| n != &name);
     if !enabled {
-        s.disabled_plugins.push(name);
+        s.disabled_plugins.push(name.clone());
     }
     settings.set(s.clone());
     crate::dev::apply_plugin_search(&app, registry.commands(&s.disabled_plugins));
+
+    // 禁用要连带停掉后台常驻实例——「已禁用」的插件还在后台跑着、还占着全局热键，
+    // 是明显的表里不一。重新启用时若它本来就开着自启动，再拉起来。
+    if !enabled {
+        close_plugin_background(&app, &name);
+    } else if s.background_plugins.iter().any(|n| n == &name) && registry.declares_background(&name) {
+        let handle = app.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Err(e) = open_plugin_background(handle, name.clone()).await {
+                ilog!("[iTools] 插件 {name} 后台启动失败: {e}");
+            }
+        });
+    }
+}
+
+/// 开关某插件的「随 iTools 启动」。
+///
+/// 开 → 立刻把它的后台实例拉起来（不必等下次开机，否则用户点了开关看不到任何变化）；
+/// 关 → 立刻关掉后台实例，它注册的全局热键随之失效。
+///
+/// **只对清单声明了 `background` 的插件生效**：没声明的插件后台跑着也什么都不做，
+/// 给它开自启动就是个「开了没用」的假开关，所以这里直接拒绝并说明原因。
+#[tauri::command]
+pub async fn set_plugin_background(
+    name: String,
+    enabled: bool,
+    app: AppHandle,
+) -> Result<(), String> {
+    {
+        let registry = app.state::<PluginRegistry>();
+        if enabled && !registry.declares_background(&name) {
+            return Err(format!(
+                "插件 {name} 未声明支持后台常驻（plugin.json 的 background），不能设为随 iTools 启动"
+            ));
+        }
+    }
+    {
+        let settings = app.state::<SettingsStore>();
+        let mut s = settings.get();
+        s.background_plugins.retain(|n| n != &name);
+        if enabled {
+            s.background_plugins.push(name.clone());
+        }
+        settings.set(s);
+    }
+    if enabled {
+        open_plugin_background(app.clone(), name).await?;
+    } else {
+        close_plugin_background(&app, &name);
+    }
+    Ok(())
 }
 
 /// 删除一个插件：删其目录（校验在 plugins 根内）+ **删寄存副本** + 清理禁用清单 + **清授权**
@@ -307,8 +805,14 @@ pub fn delete_plugin(
     }
     // 目录已删 → 抹掉安装来源记录（用未 canonicalize 的原始根，与写入时同一路径形态）
     super::install::forget(&registry.root, &name);
+    // 后台常驻实例必须先关掉：插件目录都删了，它还开着窗、还占着注册过的全局热键，
+    // 用户会遇到「插件已卸载，热键却还被吞掉」。
+    close_plugin_background(&app, &name);
+    // 动态指令跟着插件走：不清的话插件卸载后它加的搜索条目还留在索引里
+    registry.clear_dynamic_features(&name);
     let mut s = settings.get();
     s.disabled_plugins.retain(|n| n != &name);
+    s.background_plugins.retain(|n| n != &name);
     s.plugin_permissions.remove(&name);
     settings.set(s);
     // 重扫 + 刷新搜索索引 + 广播 plugins-changed（与安装 / 更新同一条收尾路径）
@@ -502,7 +1006,7 @@ pub fn plugin_remove_file(
 
 /// 校验并返回一个沙盒内相对路径：拒绝空、驱动器前缀(C:)、根(/ 或 \\)、上级(..)——
 /// 只允许 Normal / CurDir 组件。修 Windows 下 is_absolute 不认根相对/盘符相对路径的绕过。
-fn sandbox_relative(path: &str) -> Result<&Path, String> {
+pub(crate) fn sandbox_relative(path: &str) -> Result<&Path, String> {
     let rel = Path::new(path);
     let ok = !path.is_empty()
         && rel.components().all(|c| {
@@ -689,18 +1193,36 @@ pub fn plugin_run_command(
 pub struct FetchResponse {
     pub status: u16,
     pub ok: bool,
+    /// 响应体。`base64 == false` 时是文本；`true` 时是 base64 编码的二进制。
     pub body: String,
+    /// `body` 是否为 base64 编码的二进制（调用方传 `responseType: "binary"` 时为 true）。
+    ///
+    /// 之所以用一个布尔标志而不是把二进制单独开一个返回结构：`fetch` 的既有调用方
+    /// （所有已上架插件）读的是 `r.body` 字符串，换结构会全部作废。加一个默认 false
+    /// 的字段，老插件行为逐字节不变，新插件按需取二进制。
+    pub base64: bool,
 }
+
+/// 二进制响应的体积上限（32 MB）。base64 后还要膨胀 4/3，且整体驻留内存，
+/// 没有上限的话一个大文件 URL 就能把插件窗口拖垮——要下大文件请用 `plugin_download`（落盘 + 进度）。
+const FETCH_BINARY_LIMIT: usize = 32 * 1024 * 1024;
 
 /// 受权限校验的联网代理：需【当前活动插件】已授权 network。只支持 http/https，返回文本。
 /// 联网授权在原生层门禁（不靠 CSP）——所有插件同源，CSP 会被同源 iframe 借道绕过；
 /// 这里按【调用窗口当前的插件会话】判定，即便被别的插件框入也按顶层插件的授权决定，杜绝借道。
+// 参数确实多（8 个），但这里的参数表**就是前端 IPC 契约本身**：前 5 个是插件真实要传的
+// fetch 选项，后 3 个是 Tauri 注入的 webview / registry / settings。把它们打包成结构体等于
+// 改动 `window.itools.fetch` 的调用形态并牵动 contract-snapshot，为一条风格 lint 不值当。
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn plugin_fetch(
     url: String,
     method: Option<String>,
     headers: Option<std::collections::HashMap<String, String>>,
     body: Option<String>,
+    // response_type: "binary" 时以 base64 返回二进制体，其余（含缺省）按文本返回。
+    // （函数参数上不能挂文档注释，故用行注释）
+    response_type: Option<String>,
     webview: tauri::Webview,
     registry: State<'_, PluginRegistry>,
     settings: State<'_, SettingsStore>,
@@ -714,7 +1236,42 @@ pub async fn plugin_fetch(
         return Err("fetch 只支持 http/https".to_string());
     }
     let method = method.unwrap_or_else(|| "GET".to_string()).to_uppercase();
+    let want_binary = response_type
+        .as_deref()
+        .is_some_and(|t| t.eq_ignore_ascii_case("binary"));
     tauri::async_runtime::spawn_blocking(move || -> Result<FetchResponse, String> {
+        // 把 ureq 的响应体按调用方要的形态取出来：文本直接 into_string，
+        // 二进制走 reader 并在 FETCH_BINARY_LIMIT 处截断报错（不是静默截断——
+        // 静默截断会让插件拿到半个文件却以为下全了）。
+        let take_body = |r: ureq::Response| -> Result<(String, bool), String> {
+            if !want_binary {
+                return r.into_string().map(|s| (s, false)).map_err(|e| e.to_string());
+            }
+            let mut buf = Vec::new();
+            // into_reader() 给的是 trait object，`.take()` 的方法解析会落到 `dyn Read` 上而它不是
+            // Sized，编译不过。这里手动分块读并即时判上限——比绕方法解析更直白，而且能在**超限的
+            // 那一刻**就停下，不必先把超出的部分也读进内存。
+            let mut src = r.into_reader();
+            let mut chunk = [0u8; 64 * 1024];
+            loop {
+                let n = src.read(&mut chunk).map_err(|e| e.to_string())?;
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+                if buf.len() > FETCH_BINARY_LIMIT {
+                    break;
+                }
+            }
+            if buf.len() > FETCH_BINARY_LIMIT {
+                return Err(format!(
+                    "响应体超过 {} MB 上限，请改用 itools.download 落盘下载",
+                    FETCH_BINARY_LIMIT / 1024 / 1024
+                ));
+            }
+            use base64::Engine as _;
+            Ok((base64::engine::general_purpose::STANDARD.encode(&buf), true))
+        };
         // 走统一出站出口（代理才可能真正生效）；原来的 20 秒整体超时改用**按请求**设置，
         // 与 AgentBuilder::timeout 语义相同（都是整次请求-响应的截止时间），行为不变。
         // 重定向次数等其余行为沿用 ureq 默认，与改造前一致。
@@ -732,20 +1289,23 @@ pub async fn plugin_fetch(
         match result {
             Ok(r) => {
                 let status = r.status();
-                let text = r.into_string().map_err(|e| e.to_string())?;
+                let (body, base64) = take_body(r)?;
                 Ok(FetchResponse {
                     status,
                     ok: (200..300).contains(&status),
-                    body: text,
+                    body,
+                    base64,
                 })
             }
             // 4xx/5xx：ureq 归为 Error::Status，但对调用方是正常响应
             Err(ureq::Error::Status(code, r)) => {
-                let text = r.into_string().unwrap_or_default();
+                // 错误体取不出来不该把整次调用变成 reject——调用方更需要看到状态码。
+                let (body, base64) = take_body(r).unwrap_or_default();
                 Ok(FetchResponse {
                     status: code,
                     ok: false,
-                    body: text,
+                    body,
+                    base64,
                 })
             }
             Err(e) => Err(e.to_string()),
@@ -1182,6 +1742,7 @@ mod tests {
             kind: "keyword".to_string(),
             query: String::new(),
             plugin_id: "demo".to_string(),
+            files: Vec::new(),
         };
         registry.set_enter(PLUGIN_WINDOW_LABEL, info("prod"));
         registry.set_enter(crate::dev::DEV_WINDOW_LABEL, info("dev"));

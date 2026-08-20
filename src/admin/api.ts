@@ -30,6 +30,7 @@ import type {
   PublishStatus,
   Preflight,
   Submission,
+  AuditEntry,
 } from "../types";
 
 // ---------- 启动竞态兜底 ----------
@@ -161,11 +162,18 @@ export const loadIcons = (paths: string[]) =>
 export const listPlugins = () => invoke<PluginInfo[]>("list_plugins");
 export const setPluginEnabled = (name: string, enabled: boolean) =>
   invoke<void>("set_plugin_enabled", { name, enabled });
+/** 开关某插件的「随 iTools 启动」。只对清单声明了 background 的插件有效，否则后端拒绝。 */
+export const setPluginBackground = (name: string, enabled: boolean) =>
+  invoke<void>("set_plugin_background", { name, enabled });
 export const setPluginPermission = (name: string, perm: string, granted: boolean) =>
   invoke<void>("set_plugin_permission", { name, perm, granted });
 export const deletePlugin = (name: string) =>
   invoke<void>("delete_plugin", { name });
 export const rescanPlugins = () => invoke<number>("rescan_plugins");
+/** 读高危能力审计记录（最近的在前）。不传 pluginId 则取全部。 */
+export const pluginAuditLog = (pluginId?: string, limit?: number) =>
+  invoke<AuditEntry[]>("plugin_audit_log", { pluginId: pluginId ?? null, limit: limit ?? null });
+export const pluginAuditClear = () => invoke<void>("plugin_audit_clear");
 
 // ---------- 从 Git 安装插件 / 插件更新 ----------
 /** 下载并解析 Git 仓库里的插件包，返回预览（**不落地**，暂存在后端，token 用于确认/取消）。 */

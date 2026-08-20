@@ -235,6 +235,7 @@ pub async fn open_dev_window(
         kind: kind.clone(),
         query: query.clone(),
         plugin_id: id.clone(),
+        files: Vec::new(),
     };
     let session = ActiveSession {
         id: id.clone(),

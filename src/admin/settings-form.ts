@@ -173,6 +173,30 @@ function renderItem(
       body = wrapControl(ta);
       break;
     }
+    case "password": {
+      // 凭据输入：掩码显示 + 可临时明文查看。
+      //
+      // 为什么单独给一种控件而不是让作者用 text：插件接第三方服务（图床、WebDAV、
+      // 代码托管、大模型等）时都要用户填 token/key，用 text 就是明文输入框，
+      // 旁人一眼看见。这与 iTools 是否提供某项具体能力无关，任何需要凭据的插件都会撞上。
+      //
+      // 注意这里只解决**显示**层面的暴露。值本身仍按普通设置项存储，
+      // 所以不要在文档里向作者暗示它是加密保管的——加密落盘是后续的事，
+      // 现在如实说明「只掩码显示」，不夸大。
+      const input = h("input", { type: "password", class: "settings-input" });
+      if (item.placeholder) input.placeholder = item.placeholder;
+      input.value = String(value ?? "");
+      input.autocomplete = "off";
+      input.addEventListener("change", () => save(item.key, input.value));
+      const eye = h("button", { class: "settings-pick-btn", text: "显示" });
+      eye.addEventListener("click", () => {
+        const masked = input.type === "password";
+        input.type = masked ? "text" : "password";
+        eye.textContent = masked ? "隐藏" : "显示";
+      });
+      body = wrapControl(input, eye);
+      break;
+    }
     default: {
       // text（及未知类型兜底）
       const input = h("input", { type: "text", class: "settings-input" });

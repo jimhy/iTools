@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-stop-all-sensitive"
+description = "Enables the plugin_stop_all_sensitive command without any pre-configured scope."
+commands.allow = ["plugin_stop_all_sensitive"]
+
+[[permission]]
+identifier = "deny-plugin-stop-all-sensitive"
+description = "Denies the plugin_stop_all_sensitive command without any pre-configured scope."
+commands.deny = ["plugin_stop_all_sensitive"]

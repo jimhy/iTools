@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-download"
+description = "Enables the plugin_download command without any pre-configured scope."
+commands.allow = ["plugin_download"]
+
+[[permission]]
+identifier = "deny-plugin-download"
+description = "Denies the plugin_download command without any pre-configured scope."
+commands.deny = ["plugin_download"]

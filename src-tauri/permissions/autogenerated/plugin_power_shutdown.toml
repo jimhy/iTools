@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-power-shutdown"
+description = "Enables the plugin_power_shutdown command without any pre-configured scope."
+commands.allow = ["plugin_power_shutdown"]
+
+[[permission]]
+identifier = "deny-plugin-power-shutdown"
+description = "Denies the plugin_power_shutdown command without any pre-configured scope."
+commands.deny = ["plugin_power_shutdown"]

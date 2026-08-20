@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-clipboard-watch-start"
+description = "Enables the plugin_clipboard_watch_start command without any pre-configured scope."
+commands.allow = ["plugin_clipboard_watch_start"]
+
+[[permission]]
+identifier = "deny-plugin-clipboard-watch-start"
+description = "Denies the plugin_clipboard_watch_start command without any pre-configured scope."
+commands.deny = ["plugin_clipboard_watch_start"]

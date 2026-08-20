@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-input-paste-text"
+description = "Enables the plugin_input_paste_text command without any pre-configured scope."
+commands.allow = ["plugin_input_paste_text"]
+
+[[permission]]
+identifier = "deny-plugin-input-paste-text"
+description = "Denies the plugin_input_paste_text command without any pre-configured scope."
+commands.deny = ["plugin_input_paste_text"]

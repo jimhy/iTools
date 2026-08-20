@@ -38,6 +38,35 @@ struct RecSession {
 pub struct RecordState {
     session: Mutex<Option<RecSession>>,
 }
+impl RecordState {
+    /// 当前是否有会话在跑，有则给出**完整会话身份**（id + dev）。理由同 `audio.rs`：
+    /// 指示器的「点击停止」靠 [`ActiveSession::same_as`] 找回会话，它同时比对 id 与 dev。
+    ///
+    /// 供运行时指示器用（见 `indicator.rs`）：屏幕录制（GIF）属于敏感能力，
+    /// 使用当下必须让用户看得见是谁在用，否则授权开关就成了一次性的空头承诺。
+    pub fn active_owner(&self) -> Option<ActiveSession> {
+        self.session
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|s: &RecSession| s.owner.clone()))
+    }
+
+    /// 用户从托盘「一键掐断」时调用：置停止标志并注销会话，立刻停止抓屏。
+    ///
+    /// 与 `audio.rs::force_stop` 同款取舍：不 join、不要编码结果，只求马上停止采集。
+    /// 已抓到的帧随线程退出被丢弃——用户按的是「停止」，不是「保存」。
+    pub fn force_stop(&self) -> bool {
+        let Ok(mut g) = self.session.lock() else {
+            return false;
+        };
+        let Some(s) = g.take() else {
+            return false;
+        };
+        s.stop.store(true, Ordering::Relaxed);
+        true
+    }
+}
+
 
 /// 开始录屏（主屏，GIF）。已在录则报错；自然满帧终止的旧会话会被回收后再启。需 screen-capture 授权。
 #[tauri::command]

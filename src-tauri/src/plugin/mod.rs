@@ -9,18 +9,40 @@
 //! 命令与窗口在 `plugin::commands`；注入 `window.itools` 的桥接脚本在 `plugin::commands::BRIDGE_JS`。
 
 pub mod audio;
+pub mod audit;
 pub mod capture;
 pub mod commands;
+pub mod indicator;
+pub mod record_av;
+pub mod camera;
+pub mod main_push;
+pub mod tool_bridge;
+pub mod archive_api;
+pub mod store_api;
+pub mod context;
+pub mod exec;
+pub mod fs_api;
 pub mod hotkey;
+pub mod image_api;
 pub mod install;
 pub mod market;
 pub mod mirror;
+pub mod net;
+pub mod notify_api;
 #[cfg(windows)]
 pub mod native_overlay;
 pub mod ocr;
+pub mod paths_api;
 pub mod pin;
 pub mod record;
+pub mod runtime_api;
 pub mod settings;
+pub mod sysmanage;
+pub mod serve_api;
+pub mod window_api;
+pub mod input_api;
+pub mod sqlite;
+pub mod sysinfo;
 pub mod watch;
 
 use std::collections::HashMap;
@@ -71,6 +93,22 @@ pub struct PluginManifest {
     pub permissions: Vec<String>,
     #[serde(default)]
     pub features: Vec<Feature>,
+    /// 声明本插件**支持后台常驻**：iTools 启动时就把它加载起来（隐藏窗口），
+    /// 让它能在用户没有唤起过的情况下注册全局热键、做后台监听。
+    ///
+    /// 为什么要声明而不是对所有插件都给开关：后台常驻要求插件是「没有界面也能工作」
+    /// 的设计（`onEnter` 收到 `type === "background"` 时只做注册、不弹 UI）。
+    /// 给一个没这么设计的插件开自启动，它后台跑着却什么也不做，纯占资源——
+    /// 那种开关就是「看着能用、开了没用」的欺骗性控件。所以只有声明了的插件才显示开关。
+    #[serde(default)]
+    pub background: bool,
+    /// 暴露给**外部 AI**（Claude Code / Cursor 等经 MCP 连进来的）的工具声明：
+    /// `{ "工具名": { "description": "...", "inputSchema": {...} } }`。
+    ///
+    /// 只声明不够，插件页还要在初始化时 `itools.registerTool(name, handler)` 才算就绪
+    /// （见 `tool_bridge.rs`）。两边都要有：只声明没人处理，只注册外部看不见。
+    #[serde(default)]
+    pub tools: std::collections::HashMap<String, serde_json::Value>,
     /// 「我的数据」页按什么口径数这个插件的数据（见 [`DataSet`]）。
     ///
     /// 不声明就只能按**存储键**计数——那是给开发者看的数字，对用户毫无意义：
@@ -125,18 +163,25 @@ fn default_logo() -> String {
 }
 
 /// 一个功能命令。`code` 插件内唯一，进入插件时回传给页面。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Feature {
     pub code: String,
     #[serde(default)]
     pub explain: String,
     #[serde(default)]
     pub cmds: Vec<Cmd>,
+    /// 该 feature 参与**搜索结果注入**：用户边打字时宿主会把 query 推给本插件，
+    /// 插件返回的条目直接出现在主搜索结果里（见 `main_push.rs`）。
+    ///
+    /// 声明了它的插件会被**自动后台常驻**——必须活着才能回应查询，
+    /// 要求用户先手动开自启动开关等于让这个功能默认失效。
+    #[serde(default, rename = "mainPush")]
+    pub main_push: bool,
 }
 
 /// 触发方式：字符串即关键字；对象带 `type` 为其它类型。
 /// 首期只实现【关键字】+【regex】触发；text/files/img 解析进清单但不参与匹配（向前兼容占位）。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum Cmd {
     /// 关键字直配，如 `"base64"`。
@@ -145,17 +190,41 @@ pub enum Cmd {
     Typed(TypedCmd),
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TypedCmd {
     #[serde(rename = "type")]
     pub kind: String,
     /// regex 源串（不带 `/.../` 包裹）。
     #[serde(rename = "match", default)]
     pub pattern: Option<String>,
-    /// files 类型的扩展名白名单（首期仅解析，files 触发后续再接）。
+    /// files 类型的扩展名白名单（不写表示接受任意扩展名）。
     #[serde(default)]
-    #[allow(dead_code)]
     pub ext: Vec<String>,
+    /// window 类型：进程可执行文件名（大小写不敏感精确匹配），如 `"chrome.exe"`。
+    #[serde(default)]
+    pub app: Option<String>,
+    /// window 类型：窗口标题的正则（`regex` 语法）。
+    #[serde(default)]
+    pub title: Option<String>,
+    /// window 类型：窗口类名（大小写不敏感精确匹配）。
+    #[serde(default)]
+    pub class: Option<String>,
+}
+
+/// `{"type":"window"}` 触发的一条匹配条件。
+///
+/// 语义是**门控**而不是独立触发方式：它决定这个 feature 在当前上下文下要不要出现，
+/// 出现之后仍按同一 feature 里的关键字 / regex / text 去匹配用户输入。
+/// 因此 window 必须与至少一种其它触发方式组合使用——只写 window 的 feature 会被跳过并告警。
+///
+/// 这么定的理由：如果允许「只有 window」也能命中，那它对**任意输入**都得出现，
+/// 等于一个只在特定软件下生效的 text 触发，会严重喧宾夺主；而真实需求
+/// （「在 Chrome 里唤起才出现『下载此页视频』」）本来就带关键字。
+#[derive(Debug, Clone)]
+pub struct WindowCond {
+    pub app: String,
+    pub title: Option<String>,
+    pub class: Option<String>,
 }
 
 // ==================== 加载 ====================
@@ -178,6 +247,13 @@ pub struct PluginCommand {
     pub regexes: Vec<regex::Regex>,
     /// text 类型：任意非空输入都命中（翻译/搜索类插件用），进入时 query 传给插件。
     pub any_text: bool,
+    /// window 类型的上下文门控条件（见 [`WindowCond`]）。非空时，只有当前活动窗口
+    /// 命中其中**任一**条件，本 feature 才参与匹配。
+    pub window_conds: Vec<WindowCond>,
+    /// files 类型：接受拖入的文件。`Some(exts)` 里为空 Vec 表示不限扩展名。
+    pub file_exts: Option<Vec<String>>,
+    /// img 类型：接受拖入的图片文件。
+    pub accepts_img: bool,
     /// 插件 logo 的 base64 data URL；无 logo 则 None（前端用兜底字形）。
     pub icon: Option<String>,
 }
@@ -186,6 +262,22 @@ impl PluginCommand {
     /// 查询是否命中：任一 regex 精确命中给高分；否则取关键字模糊匹配的最高分；
     /// text 类型对任意非空输入给一个很低的兜底分。均不中返回 None。
     pub fn match_score(&self, matcher: &SkimMatcherV2, query: &str) -> Option<i64> {
+        // window 门控：声明了 window 条件的 feature，只在当前活动窗口命中任一条件时才参与匹配。
+        //
+        // 「当前活动窗口」取的是**用户唤起 iTools 之前**的那个前台窗口（iTools 自己一唤起就
+        // 成了前台，直接读 GetForegroundWindow 只会读到自己）。这份快照由 context 模块的
+        // 后台轮询维护，读的是内存缓存，不会给每次按键带来系统调用开销。
+        //
+        // 注意这让 match_score 不再是纯函数——同样的 query 在不同前台窗口下结果不同。
+        // 这正是「上下文感知」想要的效果，但改动此处逻辑时要意识到这一点。
+        if !self.window_conds.is_empty() {
+            let hit = self.window_conds.iter().any(|c| {
+                context::window_matches(&c.app, c.title.as_deref(), c.class.as_deref())
+            });
+            if !hit {
+                return None;
+            }
+        }
         for re in &self.regexes {
             if re.is_match(query) {
                 return Some(REGEX_SCORE + query.len() as i64);
@@ -201,6 +293,32 @@ impl PluginCommand {
             best = Some(best.map_or(TEXT_SCORE, |b| b.max(TEXT_SCORE)));
         }
         best
+    }
+
+    /// 拖入的这批文件能否命中本 feature。
+    ///
+    /// 判定口径（故意从严）：**所有**拖入的文件都要满足扩展名要求，只要有一个不满足就不命中。
+    /// 反过来（任一命中即整批命中）会让插件收到一堆它处理不了的文件——插件按声明以为
+    /// 自己只会拿到 png，结果混进来一个 exe，要么报错要么误处理，都比不出现更糟。
+    pub fn matches_files(&self, paths: &[String]) -> bool {
+        if paths.is_empty() {
+            return false;
+        }
+        let ext_of = |p: &String| -> String {
+            std::path::Path::new(p)
+                .extension()
+                .map(|e| e.to_string_lossy().to_ascii_lowercase())
+                .unwrap_or_default()
+        };
+        if self.accepts_img && paths.iter().all(|p| IMAGE_EXTS.contains(&ext_of(p).as_str())) {
+            return true;
+        }
+        match &self.file_exts {
+            // 声明了 files 但没列扩展名 → 不限类型，任何文件都收
+            Some(exts) if exts.is_empty() => true,
+            Some(exts) => paths.iter().all(|p| exts.contains(&ext_of(p))),
+            None => false,
+        }
     }
 
     pub fn to_item(&self) -> SearchItem {
@@ -332,6 +450,9 @@ pub fn expand_one(
         let mut keywords = Vec::new();
         let mut regexes = Vec::new();
         let mut any_text = false;
+        let mut window_conds: Vec<WindowCond> = Vec::new();
+        let mut file_exts: Option<Vec<String>> = None;
+        let mut accepts_img = false;
         for cmd in &f.cmds {
             match cmd {
                 Cmd::Keyword(kw) => keywords.push(kw.clone()),
@@ -345,13 +466,37 @@ pub fn expand_one(
                 }
                 // text：任意输入命中（翻译/搜索类）
                 Cmd::Typed(t) if t.kind == "text" => any_text = true,
-                // files/img 首期不参与匹配
+                // window：上下文门控（见 WindowCond 的文档）
+                Cmd::Typed(t) if t.kind == "window" => {
+                    if t.app.is_none() && t.title.is_none() && t.class.is_none() {
+                        ilog!(
+                            "[iTools] 插件 {id} 的 feature {:?} 声明了 window 触发但 app/title/class 全空，该条件已忽略",
+                            f.code
+                        );
+                    } else {
+                        window_conds.push(WindowCond {
+                            app: t.app.clone().unwrap_or_default(),
+                            title: t.title.clone(),
+                            class: t.class.clone(),
+                        });
+                    }
+                }
+                // files：接受拖入的文件；ext 为空表示不限扩展名
+                Cmd::Typed(t) if t.kind == "files" => {
+                    let exts: Vec<String> =
+                        t.ext.iter().map(|e| e.trim_start_matches('.').to_ascii_lowercase()).collect();
+                    file_exts = Some(exts);
+                }
+                // img：只接受图片
+                Cmd::Typed(t) if t.kind == "img" => accepts_img = true,
                 Cmd::Typed(_) => {}
             }
         }
-        if keywords.is_empty() && regexes.is_empty() && !any_text {
+        // files / img 是**独立触发方式**（拖文件进来即命中），与 window 那种门控不同，
+        // 所以只声明了 files 的 feature 是合法的，不能按「无可用触发方式」跳过。
+        if keywords.is_empty() && regexes.is_empty() && !any_text && file_exts.is_none() && !accepts_img {
             ilog!(
-                "[iTools] 插件 {id} 的 feature {:?} 无可用触发方式已跳过（cmds 只支持裸字符串关键字、{{\"type\":\"regex\"}}、{{\"type\":\"text\"}}；{{\"type\":\"keyword\"}} 对象形态/files/img 不会被搜到）",
+                "[iTools] 插件 {id} 的 feature {:?} 无可用触发方式已跳过（cmds 只支持裸字符串关键字、{{\"type\":\"regex\"}}、{{\"type\":\"text\"}}；{{\"type\":\"window\"}} 只是上下文门控、必须搭配上述之一；{{\"type\":\"keyword\"}} 对象形态/files/img 不会被搜到）",
                 f.code
             );
             continue;
@@ -369,6 +514,9 @@ pub fn expand_one(
             keywords,
             regexes,
             any_text,
+            window_conds,
+            file_exts,
+            accepts_img,
             icon: logo.clone(),
         });
     }
@@ -512,7 +660,66 @@ pub struct EnterInfo {
     /// 当前插件 id（桥接层内部用于 `settings.onChange` 过滤；不透给业务 `onEnter` 回调）。
     #[serde(rename = "pluginId")]
     pub plugin_id: String,
+    /// files / img 触发时拖入的文件**真实绝对路径**；其它触发方式为空。
+    ///
+    /// 之所以能给真实路径：拖放是在原生层接住的，不经过网页的 File 对象
+    /// （网页里的 File 拿不到路径，这正是过去 files 触发做不了的原因）。
+    #[serde(default)]
+    pub files: Vec<String>,
 }
+
+/// 某插件动态指令的落盘路径：`<数据根>/plugin-data/<id>/dynamic-features.json`。
+///
+/// 跟着插件数据走而不是塞进全局设置：卸载插件时连同数据目录一起没了，
+/// 不会在设置文件里留下一堆已卸载插件的僵尸条目。
+fn dynamic_path(plugin_id: &str) -> PathBuf {
+    crate::paths::data_root()
+        .join("plugin-data")
+        .join(plugin_id)
+        .join("dynamic-features.json")
+}
+
+/// 写盘。目录不存在就建出来。
+fn save_dynamic(plugin_id: &str, list: &[Feature]) -> Result<(), String> {
+    let path = dynamic_path(plugin_id);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("创建插件数据目录失败: {e}"))?;
+    }
+    let json = serde_json::to_string_pretty(list).map_err(|e| format!("序列化失败: {e}"))?;
+    std::fs::write(&path, json).map_err(|e| format!("写入动态指令失败: {e}"))
+}
+
+/// 启动时把所有插件的动态指令读进内存。
+///
+/// 单个插件的文件坏了只跳过它并告警，不能让一份坏 json 把所有插件的动态指令都带走。
+fn load_all_dynamic() -> HashMap<String, Vec<Feature>> {
+    let mut out = HashMap::new();
+    let root = crate::paths::data_root().join("plugin-data");
+    let Ok(rd) = std::fs::read_dir(&root) else {
+        return out;
+    };
+    for entry in rd.flatten() {
+        let Some(id) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        let path = entry.path().join("dynamic-features.json");
+        if !path.exists() {
+            continue;
+        }
+        match std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str::<Vec<Feature>>(&t).ok()) {
+            Some(list) if !list.is_empty() => {
+                out.insert(id, list);
+            }
+            Some(_) => {}
+            None => ilog!("[iTools] 插件 {id} 的动态指令文件损坏，已跳过：{}", path.display()),
+        }
+    }
+    out
+}
+
+/// `{"type":"img"}` 认的图片扩展名。与 `plugin_read_local_image` / `image_api` 能解码的格式对齐；
+/// 列表之外的（如 psd、raw）不算图片——宁可不命中，也别让插件拿到一个它解不开的"图片"。
+const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "bmp", "webp", "ico", "tiff", "tif"];
 
 /// 一次插件运行**会话**：哪个插件 + 是不是调试会话。
 ///
@@ -566,6 +773,11 @@ pub struct PluginRegistry {
     /// 全局槽会被后打开的那个覆盖——那时调试窗的存储写入会落进正式库、正式插件也可能反过来
     /// 读到测试库。按窗口存则两边各说各话，隔离才成立。
     sessions: Mutex<HashMap<String, ActiveSession>>,
+    /// 动态指令：插件 id → 运行时增删的 feature 列表（见 [`Self::set_dynamic_feature`]）。
+    ///
+    /// 放内存而不是每次搜索去读文件：`commands()` 是搜索索引刷新的热路径，
+    /// 每刷一次就去磁盘读 N 个插件的 json 是不能接受的。改动时写盘 + 更新内存两头都做。
+    dynamic: RwLock<HashMap<String, Vec<Feature>>>,
 }
 
 impl PluginRegistry {
@@ -577,6 +789,7 @@ impl PluginRegistry {
             pending_enter: Mutex::new(HashMap::new()),
             last_enter: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
+            dynamic: RwLock::new(load_all_dynamic()),
         }
     }
 
@@ -626,6 +839,74 @@ impl PluginRegistry {
     }
 
     /// 某插件的目录（存在则返回其副本）。
+    /// 取某插件在 `plugin.json` 里对某个 MCP 工具的声明（没有则 None）。
+    pub fn tool_decl(&self, id: &str, tool: &str) -> Option<serde_json::Value> {
+        self.plugins
+            .read()
+            .ok()?
+            .iter()
+            .find(|p| p.manifest.name == id)
+            .and_then(|p| p.manifest.tools.get(tool).cloned())
+    }
+
+    /// 该插件是否有任一 feature 声明了 `mainPush`（搜索结果注入）。
+    pub fn declares_main_push(&self, id: &str) -> bool {
+        self.plugins.read().ok().is_some_and(|ps| {
+            ps.iter()
+                .any(|p| p.manifest.name == id && p.manifest.features.iter().any(|f| f.main_push))
+        })
+    }
+
+    /// 所有需要后台常驻的插件：清单声明了 `background`，**或**有 feature 声明了 `mainPush`。
+    ///
+    /// mainPush 不需要用户开关：它是「边打字出结果」的实现前提，插件不活着就没有结果，
+    /// 用户看到的只是「这插件没反应」，根本不会想到去开一个自启动开关。
+    pub fn auto_background(&self, disabled: &[String]) -> Vec<String> {
+        self.plugins
+            .read()
+            .map(|ps| {
+                ps.iter()
+                    .filter(|p| {
+                        p.manifest.features.iter().any(|f| f.main_push)
+                            && !disabled.iter().any(|d| d == &p.manifest.name)
+                    })
+                    .map(|p| p.manifest.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// 该插件清单是否声明了支持后台常驻。
+    pub fn declares_background(&self, id: &str) -> bool {
+        self.plugins
+            .read()
+            .ok()
+            .is_some_and(|ps| ps.iter().any(|p| p.manifest.name == id && p.manifest.background))
+    }
+
+    /// 取该插件第一个 feature 的 code——后台启动时没有「用户命中了哪个功能」这回事，
+    /// 但 `onEnter` 的契约要求给一个 code，用第一个是最不意外的选择。
+    pub fn first_feature_code(&self, id: &str) -> Option<String> {
+        self.plugins.read().ok().and_then(|ps| {
+            ps.iter()
+                .find(|p| p.manifest.name == id)
+                .and_then(|p| p.manifest.features.first().map(|f| f.code.clone()))
+        })
+    }
+
+    /// 所有「声明了 background」且**未被禁用**的插件 id。
+    pub fn background_capable(&self, disabled: &[String]) -> Vec<String> {
+        self.plugins
+            .read()
+            .map(|ps| {
+                ps.iter()
+                    .filter(|p| p.manifest.background && !disabled.iter().any(|d| d == &p.manifest.name))
+                    .map(|p| p.manifest.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub fn plugin_dir(&self, id: &str) -> Option<PathBuf> {
         self.plugins
             .read()
@@ -668,10 +949,80 @@ impl PluginRegistry {
             Ok(g) => g,
             Err(_) => return Vec::new(),
         };
-        expand_commands(&plugins)
+        let mut out: Vec<PluginCommand> = expand_commands(&plugins)
             .into_iter()
             .filter(|c| !disabled.iter().any(|d| d == &c.plugin_id))
+            .collect();
+        // 并入动态指令（插件运行时用 setFeature 加的，如「网址快开」里用户自建的条目）
+        if let Ok(dyn_map) = self.dynamic.read() {
+            for (id, feats) in dyn_map.iter() {
+                if disabled.iter().any(|d| d == id) {
+                    continue;
+                }
+                let Some(p) = plugins.iter().find(|p| &p.manifest.name == id) else {
+                    continue; // 插件已卸载，它的动态指令自然作废
+                };
+                // 复用 expand_one：动态指令与静态 feature 的匹配规则必须完全一致，
+                // 各写一套迟早会出现「静态能搜到、动态搜不到」这类只在某一边出现的怪问题。
+                let logo = read_logo(&p.dir, &p.manifest.icon);
+                let mut m = p.manifest.clone();
+                m.features = feats.clone();
+                let subtitle = format!("{} · 插件", p.manifest.display_label());
+                out.extend(expand_one(id, &m, &subtitle, logo));
+            }
+        }
+        out
+    }
+
+    /// 新增/更新一条动态指令（同 code 覆盖）。返回是否需要刷新搜索索引（恒 true，调用方据此刷）。
+    pub fn set_dynamic_feature(&self, plugin_id: &str, feature: Feature) -> Result<(), String> {
+        let mut g = self
+            .dynamic
+            .write()
+            .map_err(|_| "动态指令表加锁失败".to_string())?;
+        let list = g.entry(plugin_id.to_string()).or_default();
+        list.retain(|f| f.code != feature.code);
+        list.push(feature);
+        save_dynamic(plugin_id, list)
+    }
+
+    /// 删除一条动态指令。返回是否真的删掉了。
+    pub fn remove_dynamic_feature(&self, plugin_id: &str, code: &str) -> Result<bool, String> {
+        let mut g = self
+            .dynamic
+            .write()
+            .map_err(|_| "动态指令表加锁失败".to_string())?;
+        let Some(list) = g.get_mut(plugin_id) else {
+            return Ok(false);
+        };
+        let before = list.len();
+        list.retain(|f| f.code != code);
+        let changed = list.len() != before;
+        if changed {
+            save_dynamic(plugin_id, list)?;
+        }
+        Ok(changed)
+    }
+
+    /// 列出某插件的动态指令（可按 code 过滤）。
+    pub fn dynamic_features(&self, plugin_id: &str, codes: Option<&[String]>) -> Vec<Feature> {
+        self.dynamic
+            .read()
+            .ok()
+            .and_then(|g| g.get(plugin_id).cloned())
+            .unwrap_or_default()
+            .into_iter()
+            // 同 audit.rs：Option::is_none_or 要 Rust 1.82，本仓 MSRV 是 1.77
+            .filter(|f| codes.map_or(true, |cs| cs.iter().any(|c| c == &f.code)))
             .collect()
+    }
+
+    /// 卸载插件时清掉它的动态指令（连同落盘文件）。
+    pub fn clear_dynamic_features(&self, plugin_id: &str) {
+        if let Ok(mut g) = self.dynamic.write() {
+            g.remove(plugin_id);
+        }
+        let _ = std::fs::remove_file(dynamic_path(plugin_id));
     }
 
     /// 热重载：重扫插件根目录、替换自身清单，返回过滤禁用后的可搜索命令（供刷新搜索索引）。
@@ -701,6 +1052,7 @@ impl PluginRegistry {
         &self,
         disabled: &[String],
         granted_map: &std::collections::HashMap<String, Vec<String>>,
+        background_on: &[String],
     ) -> Vec<PluginInfo> {
         let plugins = match self.plugins.read() {
             Ok(g) => g,
@@ -735,6 +1087,11 @@ impl PluginRegistry {
                     granted: granted_map.get(&m.name).cloned().unwrap_or_default(),
                     has_readme: p.dir.join("README.md").exists(),
                     has_settings: p.dir.join("settings.json").exists(),
+                    background: m.background,
+                    // 只有清单声明了 background 才认这个开关：用户可能在插件更新后
+                    // 失去该能力，此时残留在设置里的 id 不该让 UI 显示成「已开启」。
+                    background_enabled: m.background
+                        && background_on.iter().any(|b| b == &m.name),
                     source: lock.plugins.get(&m.name).map(|e| e.source.clone()),
                     builtin: install::is_builtin(&m.name),
                 }
@@ -767,6 +1124,10 @@ pub struct PluginInfo {
     pub has_readme: bool,
     /// 是否有 settings.json（详情页「设置」tab 是否可用）
     pub has_settings: bool,
+    /// 清单是否声明了支持后台常驻（决定「开机自启动」开关显不显示）。
+    pub background: bool,
+    /// 用户是否为本插件打开了「开机自启动」。
+    pub background_enabled: bool,
     /// Git 安装来源（来自 `<plugins_root>/.installed.json`）；手工放入或内置的插件为 None，
     /// 此时**没有**可用的更新来源，UI 不应展示「检查更新 / 查看仓库」。
     pub source: Option<install::GitSource>,

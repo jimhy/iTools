@@ -21,6 +21,13 @@ tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-notification = "2"
+# 直接依赖 notify-rust：**不新增编译单元**（它本就是 tauri-plugin-notification 的传递依赖，
+# 版本随 Cargo.lock 里的 4.18.0）。之所以要绕开插件层直接用它——
+# tauri-plugin-notification 2.3.3 的 desktop.rs 在 show() 里把 notify_rust 返回的
+# NotificationHandle 直接 `let _ =` 丢掉了，而点击/关闭回调只能从那个 handle 拿。
+# 结果是经插件层发的通知**收不到任何点击事件**，`action_type_id`/`silent` 字段也读了不用。
+# 插件的后台常驻场景（点通知回到插件）离不开这个回调，故直接用底层库。
+notify-rust = "4.18"
 serde = { version = "1", features = ["derive"] }
 # preserve_order：改写 AI 客户端的 MCP 配置时要原样保留用户其余键的顺序。
 # `~/.claude.json` 有 100KB+ 全是它自己的运行状态，键序被打乱虽不改变语义，
@@ -68,7 +75,10 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 # 已在依赖树里（rusqlite/tauri 传递依赖），显式声明不引入新的编译单元。
 sha2 = "0.10"
 # 统一本地存储：单个 SQLite 库（bundled 自带 SQLite，无系统依赖，Windows 直接编译）
-rusqlite = { version = "0.32", features = ["bundled"] }
+# hooks：开放 sqlite3_set_authorizer（Connection::authorizer）。插件 SQLite 能力必须在
+# SQLite 核心层挡掉 ATTACH——只在 SQL 文本层拦，绕过手法太多，而 ATTACH 一旦放行，
+# 插件就能挂载别的插件的库直接读走数据，这是插件间数据隔离的红线（见 sqlite.rs）。
+rusqlite = { version = "0.32", features = ["bundled", "hooks"] }
 # 原生屏幕/窗口捕获（Windows.Graphics.Capture 底层，无 PowerShell/无杀软木马指纹）
 xcap = "0.9"
 # 已随 tauri 编译；直接声明以用 oneshot(框选结果) 与 time(隐藏面板延时)
@@ -92,6 +102,27 @@ windows-sys = { version = "0.59", features = [
 # 复用 tauri 已锁定的 windows 0.61.3（勿写 0.62+，否则与 tauri 分裂成两份）
 windows = { version = "0.61", features = [
     "Win32_Foundation",
+    # ↓ 以下 3 项供插件能力「系统信息」（src/plugin/sysinfo.rs）使用
+    # GlobalMemoryStatusEx：内存总量与占用
+    "Win32_System_SystemInformation",
+    # GetSystemPowerStatus：电池电量、充电状态、有无电池（据此判断是否笔记本）
+    "Win32_System_Power",
+    # GetIfTable2：网卡收发字节数，两次采样差值算上下行速率
+    "Win32_NetworkManagement_IpHelper",
+    # ↓ 以下 2 项供插件能力「上下文感知」（src/plugin/context.rs）使用
+    # IUIAutomation：从浏览器地址栏读当前 URL
+    "Win32_UI_Accessibility",
+    # VARIANT：IShellWindows::Item 与 IUIAutomation::CreatePropertyCondition 都要用
+    "Win32_System_Variant",
+    # ↓ 供插件能力「输入注入」（src/plugin/input_api.rs）
+    # SendInput / VkKeyScanW：模拟键鼠、按输入法原理输入任意字符
+    "Win32_UI_Input_KeyboardAndMouse",
+    # 剪贴板：GetClipboardSequenceNumber（变化监听）、SetClipboardData（CF_HDROP 文件列表）
+    "Win32_System_DataExchange",
+    # GlobalAlloc/Lock/Unlock：CF_HDROP 需要全局内存块
+    "Win32_System_Memory",
+    # DwmGetWindowAttribute(DWMWA_CLOAKED)：过滤已隐藏的 UWP 幽灵窗口（src/plugin/window_api.rs）
+    "Win32_Graphics_Dwm",
     "Win32_System_Com",
     "Win32_System_Search",
     "Win32_UI_Shell",
@@ -127,6 +158,17 @@ windows = { version = "0.61", features = [
     "Graphics_Imaging",
     "Media_Ocr",
     "Storage_Streams",
+    # ↓ 供插件能力「系统管理」（src/plugin/sysmanage.rs）
+    # CreateToolhelp32Snapshot / Process32NextW：进程枚举
+    "Win32_System_Diagnostics_ToolHelp",
+    # GetProcessMemoryInfo：单进程内存占用
+    "Win32_System_ProcessStatus",
+    # LockWorkStation / ExitWindowsEx：锁屏、关机、重启
+    "Win32_System_Shutdown",
+    # CryptProtectData / CryptUnprotectData：插件加密存储（src/plugin/store_api.rs）
+    "Win32_Security_Cryptography",
+    # Media Foundation：摄像头设备枚举与取帧（src/plugin/camera.rs）
+    "Win32_Media_MediaFoundation",
 ] }
 
 # debug 构建的调试信息等级。

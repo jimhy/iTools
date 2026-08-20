@@ -72,6 +72,22 @@ pub fn data_root() -> PathBuf {
         .join(root_dir_name())
 }
 
+/// **两个构建的数据根都算上**（release 的 `itools` 与 debug 的 `itools-dev`）。
+///
+/// 用途是给插件的文件类能力做拒绝名单：插件数据都存在数据根下的 `plugin-data/`，
+/// 放行任何一个数据根都等于打破插件间数据隔离——而 [`data_root`] 只返回**当前构建**的那个，
+/// 拿它当黑名单会漏掉另一个（release 版插件仍能读到 debug 版的插件数据，反之亦然）。
+/// 同机同时装了两种构建是开发者的常态，这个漏不是理论问题。
+///
+/// 同样只返回路径，不建目录；取不到本地数据目录时与 [`data_root`] 一样回退到临时目录。
+pub fn all_data_roots() -> Vec<PathBuf> {
+    let base = dirs::data_local_dir().unwrap_or_else(std::env::temp_dir);
+    [RELEASE_DIR_NAME, DEBUG_DIR_NAME]
+        .iter()
+        .map(|n| base.join(n))
+        .collect()
+}
+
 /// debug 构建启动时记一行「这次用的是哪个数据目录」。
 ///
 /// 为什么值得占一行日志：debug 换到独立目录后，首次启动看到的是空设置、空固定项、

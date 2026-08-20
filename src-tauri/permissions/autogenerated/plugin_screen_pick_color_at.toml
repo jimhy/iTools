@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-screen-pick-color-at"
+description = "Enables the plugin_screen_pick_color_at command without any pre-configured scope."
+commands.allow = ["plugin_screen_pick_color_at"]
+
+[[permission]]
+identifier = "deny-plugin-screen-pick-color-at"
+description = "Denies the plugin_screen_pick_color_at command without any pre-configured scope."
+commands.deny = ["plugin_screen_pick_color_at"]

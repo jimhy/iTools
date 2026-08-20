@@ -82,6 +82,9 @@ pub struct AppSettings {
     // ---------- 插件 ----------
     /// 被禁用的插件名清单：仍加载展示于「插件管理」，但不参与主搜索
     pub disabled_plugins: Vec<String>,
+    /// 用户开启了「随 iTools 启动」的插件 id 列表（仅对清单声明了 `background` 的插件有效）。
+    #[serde(default)]
+    pub background_plugins: Vec<String>,
     /// 按插件已授权的高危能力：插件名 → 已授权能力（如 ["runCommand","network"]）
     pub plugin_permissions: HashMap<String, Vec<String>>,
     /// 每个插件上次的窗口尺寸（逻辑像素 [宽, 高]）：下次打开该插件时还原到此尺寸。
@@ -147,6 +150,7 @@ impl Default for AppSettings {
             proxy_address: String::new(),
             local_launch_items: Vec::new(),
             disabled_plugins: Vec::new(),
+            background_plugins: Vec::new(),
             plugin_permissions: HashMap::new(),
             plugin_window_sizes: HashMap::new(),
             plugin_mirror_mode: default_mirror_mode(),
@@ -175,6 +179,8 @@ pub fn preserve_backend_owned(next: &mut AppSettings, old: &AppSettings) {
     next.local_launch_items = old.local_launch_items.clone();
     // 插件禁用清单：set_plugin_enabled / delete_plugin 独占
     next.disabled_plugins = old.disabled_plugins.clone();
+    // 插件自启动清单：set_plugin_background / delete_plugin 独占
+    next.background_plugins = old.background_plugins.clone();
     // 插件授权表：set_plugin_permission / delete_plugin / 换源安装 独占
     next.plugin_permissions = old.plugin_permissions.clone();
     // 插件下载源偏好：plugin_mirror_set_mode 独占

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-camera-list"
+description = "Enables the plugin_camera_list command without any pre-configured scope."
+commands.allow = ["plugin_camera_list"]
+
+[[permission]]
+identifier = "deny-plugin-camera-list"
+description = "Denies the plugin_camera_list command without any pre-configured scope."
+commands.deny = ["plugin_camera_list"]

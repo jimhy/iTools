@@ -1,0 +1,48 @@
+{
+  "name": "apitest",
+  "displayName": "API 自检",
+  "version": "1.0.0",
+  "description": "逐项调用 window.itools 的全部能力并把真实结果写进沙盒文件（真机验收用）",
+  "author": "iTools",
+  "background": true,
+  "permissions": [
+    "runCommand",
+    "network",
+    "screen-capture",
+    "audio-capture",
+    "hotkey",
+    "fs-user-scope",
+    "fs-named-path",
+    "fs-trash",
+    "context-read",
+    "input-inject",
+    "clipboard-watch",
+    "window-manage",
+    "local-server",
+    "process-manage",
+    "system-read",
+    "system-manage",
+    "runtime",
+    "background",
+    "tray",
+    "camera"
+  ],
+  "tools": {
+    "echo_test": {
+      "description": "把传入的文本原样返回，用于验证插件能力可被外部 AI 经 MCP 调用",
+      "inputSchema": {
+        "type": "object",
+        "properties": { "text": { "type": "string" } },
+        "required": ["text"]
+      }
+    }
+  },
+  "features": [
+    {
+      "code": "run",
+      "explain": "运行 API 自检",
+      "mainPush": true,
+      "cmds": ["apitest", "自检"]
+    }
+  ]
+}

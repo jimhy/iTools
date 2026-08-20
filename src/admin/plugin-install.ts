@@ -25,6 +25,21 @@ const IC_X =
 export const PERM_LABELS: Record<string, string> = {
   runCommand: "执行程序",
   network: "联网",
+  "fs-user-scope": "读写你选择的文件夹",
+  "fs-named-path": "访问系统位置（临时目录 / 下载 / 浏览器缓存等）",
+  "fs-trash": "把文件送进回收站",
+  "context-read": "读取当前活动窗口信息",
+  "input-inject": "模拟键盘鼠标输入",
+  "clipboard-watch": "监听剪贴板变化",
+  "window-manage": "管理其它程序的窗口",
+  "local-server": "在局域网开放本机服务",
+  "process-manage": "查看并结束进程",
+  "system-read": "读取已安装软件等系统信息",
+  "system-manage": "修改启动项 / 关机重启",
+  "runtime": "使用 iTools 托管的外部程序（ffmpeg 等）",
+  "background": "后台常驻与定时任务",
+  "camera": "使用摄像头",
+  "tray": "在系统托盘显示图标",
 };
 
 /** 高危能力的展示文案（未知能力原样显示，不隐瞒）。 */

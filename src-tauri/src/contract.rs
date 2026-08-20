@@ -351,6 +351,8 @@ mod tests {
             granted: Vec::new(),
             has_readme: false,
             has_settings: false,
+            background: false,
+            background_enabled: false,
             source: Some(source),
             builtin: false,
         };
@@ -361,7 +363,7 @@ mod tests {
             &[
                 "name", "display_name", "description", "version", "author", "feature_count",
                 "cmds", "logo", "enabled", "permissions", "granted", "has_readme", "has_settings",
-                "source", "builtin",
+                "background", "background_enabled", "source", "builtin",
             ],
             "本结构**没有** #[serde(rename_all)]：字段名原样 snake_case（feature_count / has_readme / has_settings）。",
         );
@@ -379,7 +381,7 @@ mod tests {
                 "opacity", "background_image", "hotkey", "custom_apps", "autostart", "theme",
                 "background_enabled", "background_dim", "search_placeholder", "separate_hotkey",
                 "auto_clear_seconds", "proxy_enabled", "proxy_address", "local_launch_items",
-                "disabled_plugins", "plugin_permissions", "plugin_window_sizes",
+                "disabled_plugins", "background_plugins", "plugin_permissions", "plugin_window_sizes",
                 "plugin_mirror_mode", "screenshot_hotkey", "pin_hotkey", "dev_plugin_dirs",
                 "dev_plugin_permissions", "dev_search_visible", "sync_endpoint",
             ],

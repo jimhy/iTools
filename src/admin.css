@@ -3887,3 +3887,9 @@ select {
   line-height: 1.65;
   color: var(--text-sub);
 }
+
+/* 审计记录里「被拒绝」的那几条：插件反复尝试未授权能力，是最该被看见的信号，
+   所以用警示色而不是与放行记录同色淹没在列表里。 */
+.audit-denied {
+  color: var(--danger, #d9534f);
+}

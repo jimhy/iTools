@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-audit-clear"
+description = "Enables the plugin_audit_clear command without any pre-configured scope."
+commands.allow = ["plugin_audit_clear"]
+
+[[permission]]
+identifier = "deny-plugin-audit-clear"
+description = "Denies the plugin_audit_clear command without any pre-configured scope."
+commands.deny = ["plugin_audit_clear"]

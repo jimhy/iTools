@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-show-item-in-folder"
+description = "Enables the plugin_show_item_in_folder command without any pre-configured scope."
+commands.allow = ["plugin_show_item_in_folder"]
+
+[[permission]]
+identifier = "deny-plugin-show-item-in-folder"
+description = "Denies the plugin_show_item_in_folder command without any pre-configured scope."
+commands.deny = ["plugin_show_item_in_folder"]

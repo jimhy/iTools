@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-fs-write"
+description = "Enables the plugin_fs_write command without any pre-configured scope."
+commands.allow = ["plugin_fs_write"]
+
+[[permission]]
+identifier = "deny-plugin-fs-write"
+description = "Denies the plugin_fs_write command without any pre-configured scope."
+commands.deny = ["plugin_fs_write"]

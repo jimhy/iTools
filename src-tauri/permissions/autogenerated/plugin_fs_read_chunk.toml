@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-fs-read-chunk"
+description = "Enables the plugin_fs_read_chunk command without any pre-configured scope."
+commands.allow = ["plugin_fs_read_chunk"]
+
+[[permission]]
+identifier = "deny-plugin-fs-read-chunk"
+description = "Denies the plugin_fs_read_chunk command without any pre-configured scope."
+commands.deny = ["plugin_fs_read_chunk"]

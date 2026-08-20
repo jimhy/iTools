@@ -199,6 +199,11 @@ pub fn list() -> Vec<Value> {
             }
         }),
     ]
+    .into_iter()
+    // 把插件自己贡献的工具并进来：用户装的插件，其能力就是外部 AI 可直接调用的工具。
+    // 这是 iTools 作为 MCP server 的独特之处——工具集随用户装了什么插件而变。
+    .chain(crate::plugin::tool_bridge::list_plugin_tools())
+    .collect()
 }
 
 /// `resources/list`：把三份规范也挂成资源，方便支持资源的客户端直接引用。
@@ -262,7 +267,12 @@ pub fn call(app: &AppHandle, name: &str, args: &Value) -> Result<String, String>
         "submit" => submit(app, args),
         "publish_status" => publish_status(app, args),
         "revoke" => revoke(app, args),
-        other => Err(format!("没有这个工具：{other}")),
+        // 不是宿主自带的工具，就问一下插件贡献的那批（`plugin_<插件id>_<工具名>`）。
+        // 插件工具是运行时注册的，不可能写进上面的静态 match 里。
+        other => match crate::plugin::tool_bridge::try_call(app, other, args) {
+            Some(r) => r,
+            None => Err(format!("没有这个工具：{other}")),
+        },
     }
 }
 

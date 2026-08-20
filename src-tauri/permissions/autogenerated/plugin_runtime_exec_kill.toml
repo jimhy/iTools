@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-runtime-exec-kill"
+description = "Enables the plugin_runtime_exec_kill command without any pre-configured scope."
+commands.allow = ["plugin_runtime_exec_kill"]
+
+[[permission]]
+identifier = "deny-plugin-runtime-exec-kill"
+description = "Denies the plugin_runtime_exec_kill command without any pre-configured scope."
+commands.deny = ["plugin_runtime_exec_kill"]

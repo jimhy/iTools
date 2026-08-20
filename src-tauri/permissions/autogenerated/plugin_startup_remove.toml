@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-startup-remove"
+description = "Enables the plugin_startup_remove command without any pre-configured scope."
+commands.allow = ["plugin_startup_remove"]
+
+[[permission]]
+identifier = "deny-plugin-startup-remove"
+description = "Denies the plugin_startup_remove command without any pre-configured scope."
+commands.deny = ["plugin_startup_remove"]

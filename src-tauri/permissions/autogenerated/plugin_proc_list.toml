@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-proc-list"
+description = "Enables the plugin_proc_list command without any pre-configured scope."
+commands.allow = ["plugin_proc_list"]
+
+[[permission]]
+identifier = "deny-plugin-proc-list"
+description = "Denies the plugin_proc_list command without any pre-configured scope."
+commands.deny = ["plugin_proc_list"]

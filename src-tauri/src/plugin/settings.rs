@@ -37,7 +37,10 @@ pub struct SettingsOption {
 pub struct SettingsItem {
     /// 存储键（插件内唯一）。
     pub key: String,
-    /// 控件类型：text|textarea|number|boolean|select|path|color|hotkey，缺省 text。
+    /// 控件类型：text|textarea|password|number|boolean|select|path|color|hotkey，缺省 text。
+    ///
+    /// `password` 只是**掩码显示**（前端渲染成 type=password 并给一个「显示」按钮），
+    /// 值仍按普通设置项存储——别在作者文档里把它说成「加密保管」。
     #[serde(rename = "type", default = "default_item_type")]
     pub kind: String,
     /// 展示标题。

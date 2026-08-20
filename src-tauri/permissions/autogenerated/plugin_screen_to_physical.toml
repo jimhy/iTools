@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-screen-to-physical"
+description = "Enables the plugin_screen_to_physical command without any pre-configured scope."
+commands.allow = ["plugin_screen_to_physical"]
+
+[[permission]]
+identifier = "deny-plugin-screen-to-physical"
+description = "Denies the plugin_screen_to_physical command without any pre-configured scope."
+commands.deny = ["plugin_screen_to_physical"]

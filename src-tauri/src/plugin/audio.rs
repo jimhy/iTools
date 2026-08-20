@@ -39,6 +39,41 @@ struct Recorded {
 pub struct AudioState {
     session: Mutex<Option<Session>>,
 }
+impl AudioState {
+    /// 当前是否有会话在跑，有则给出**完整会话身份**（id + dev）。
+    ///
+    /// 供运行时指示器用（见 `indicator.rs`）：麦克风录音属于敏感能力，
+    /// 使用当下必须让用户看得见是谁在用，否则授权开关就成了一次性的空头承诺。
+    ///
+    /// 返回整个 [`ActiveSession`] 而不是裸 id：指示器旁边那个「点击停止」要靠
+    /// [`ActiveSession::same_as`] 找回会话，而它**同时**比对 id 与 dev 标志——
+    /// 只给 id 的话，调试会话开的麦克风会显示得出来、却一个都掐不掉。
+    pub fn active_owner(&self) -> Option<ActiveSession> {
+        self.session
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|s: &Session| s.owner.clone()))
+    }
+
+    /// 用户从托盘「一键掐断」时调用：置停止标志并注销会话，立刻释放麦克风。
+    ///
+    /// 不 join 工作线程：它看到 stop 标志后会自行退出并释放设备，而这个调用点在 UI 线程上，
+    /// 等它收尾会把界面卡住——用户此刻要的就是「马上别再录了」，不是一份录音结果。
+    /// 注销之后插件自己再调 stop 会得到「没有进行中的录音」，那是**如实**的：会话确实已被用户掐断。
+    ///
+    /// 返回是否真的停掉了一个会话，供调用方记日志用。
+    pub fn force_stop(&self) -> bool {
+        let Ok(mut g) = self.session.lock() else {
+            return false;
+        };
+        let Some(s) = g.take() else {
+            return false;
+        };
+        s.stop.store(true, Ordering::Relaxed);
+        true
+    }
+}
+
 
 /// 校验**发起调用的窗口**当前的插件会话已获 audio-capture 授权，并返回**该会话**
 /// （录音会话的归属者：id + dev 标志，缺一不可）。调试会话查的是独立的调试授权表。

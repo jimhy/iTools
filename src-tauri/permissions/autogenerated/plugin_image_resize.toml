@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-image-resize"
+description = "Enables the plugin_image_resize command without any pre-configured scope."
+commands.allow = ["plugin_image_resize"]
+
+[[permission]]
+identifier = "deny-plugin-image-resize"
+description = "Denies the plugin_image_resize command without any pre-configured scope."
+commands.deny = ["plugin_image_resize"]

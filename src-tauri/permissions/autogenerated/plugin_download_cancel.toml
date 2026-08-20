@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-download-cancel"
+description = "Enables the plugin_download_cancel command without any pre-configured scope."
+commands.allow = ["plugin_download_cancel"]
+
+[[permission]]
+identifier = "deny-plugin-download-cancel"
+description = "Denies the plugin_download_cancel command without any pre-configured scope."
+commands.deny = ["plugin_download_cancel"]

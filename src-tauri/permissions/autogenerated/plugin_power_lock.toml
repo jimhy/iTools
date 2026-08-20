@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-power-lock"
+description = "Enables the plugin_power_lock command without any pre-configured scope."
+commands.allow = ["plugin_power_lock"]
+
+[[permission]]
+identifier = "deny-plugin-power-lock"
+description = "Denies the plugin_power_lock command without any pre-configured scope."
+commands.deny = ["plugin_power_lock"]

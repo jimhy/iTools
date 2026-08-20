@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-serve-start"
+description = "Enables the plugin_serve_start command without any pre-configured scope."
+commands.allow = ["plugin_serve_start"]
+
+[[permission]]
+identifier = "deny-plugin-serve-start"
+description = "Denies the plugin_serve_start command without any pre-configured scope."
+commands.deny = ["plugin_serve_start"]

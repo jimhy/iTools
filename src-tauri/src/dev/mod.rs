@@ -59,6 +59,22 @@ const KNOWN_PERMISSIONS: &[&str] = &[
     "screen-capture",
     "audio-capture",
     "hotkey",
+    // ↓ 能力开放第一波新增（见 doc/插件系统/能力开放路线.md）
+    "fs-user-scope",
+    "fs-named-path",
+    "fs-trash",
+    "context-read",
+    "input-inject",
+    "clipboard-watch",
+    "window-manage",
+    "local-server",
+    "process-manage",
+    "system-read",
+    "system-manage",
+    "runtime",
+    "background",
+    "camera",
+    "tray",
 ];
 
 // ==================== 对前端的数据结构（camelCase） ====================

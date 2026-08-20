@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-fs-hash"
+description = "Enables the plugin_fs_hash command without any pre-configured scope."
+commands.allow = ["plugin_fs_hash"]
+
+[[permission]]
+identifier = "deny-plugin-fs-hash"
+description = "Denies the plugin_fs_hash command without any pre-configured scope."
+commands.deny = ["plugin_fs_hash"]

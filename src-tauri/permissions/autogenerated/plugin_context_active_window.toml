@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-context-active-window"
+description = "Enables the plugin_context_active_window command without any pre-configured scope."
+commands.allow = ["plugin_context_active_window"]
+
+[[permission]]
+identifier = "deny-plugin-context-active-window"
+description = "Denies the plugin_context_active_window command without any pre-configured scope."
+commands.deny = ["plugin_context_active_window"]

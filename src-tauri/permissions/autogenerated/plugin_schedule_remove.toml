@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-schedule-remove"
+description = "Enables the plugin_schedule_remove command without any pre-configured scope."
+commands.allow = ["plugin_schedule_remove"]
+
+[[permission]]
+identifier = "deny-plugin-schedule-remove"
+description = "Denies the plugin_schedule_remove command without any pre-configured scope."
+commands.deny = ["plugin_schedule_remove"]

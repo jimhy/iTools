@@ -159,10 +159,33 @@ curl.exe --noproxy "*" -s -X POST http://127.0.0.1:7345/mcp `
 | 录屏（授权 `screen-capture`） | `startGifRecord()` · `stopGifRecord()`→ArrayBuffer(GIF) |
 | 高危（需授权，见第六节） | `runCommand(program, args?)` · `fetch(url, init?)` |
 | UI/平台 | `showToast(msg)`（同步）· `platform.{isWindows,isMacOS,isLinux,isDev}` |
+| **执行程序拿输出**（授权 `runCommand`） | `exec(prog,args,opts?)`→`{code,stdout,stderr,truncated}` · `execStream(...)` + `execKill/execQuit`（GBK 自动解码） |
+| **用户选择即授权的文件**（授权 `fs-user-scope`） | `fs.pickDir()/pickFile()`→scope · `fs.list/stat/hash/read/readChunk/write` · `fs.zipCreate/unzip` · `fs.watchStart/watchStop` · `fs.getFileIcon` |
+| **系统位置 / 回收站**（授权 `fs-named-path`/`fs-trash`） | `paths.resolve(name)` · `paths.scan(name,opts?)` · `trash(paths)`（送回收站，**不提供真删**） |
+| **上下文感知**（授权 `context-read`） | `context.activeWindow()` · `context.browserUrl()` · `context.folderPath()`（拿不到返回 null，必须判空） |
+| **窗口管理**（授权 `window-manage`） | `win.list/focus/move/resize/setRect/minimize/maximize/restore/close/setTopmost` |
+| **输入注入**（授权 `input-inject`） | `input.typeString(text)`（支持 Emoji）· `input.pasteText/pasteFile/pasteImage` · `input.keyTap` · `input.mouse*` |
+| **剪贴板监听**（授权 `clipboard-watch`） | `clipboard.watchStart/watchStop/onChange` |
+| **托管运行时**（授权 `runtime`） | `runtime.ensure("ffmpeg")` · `runtime.exec/execStream`（含 ffmpeg 进度解析）· `runtime.kill/quit` |
+| **本地服务 / 局域网**（授权 `local-server`） | `serve.start(opts)`→`{url,port}` · `serve.stop` · `lan.announce/discover` |
+| **系统信息 / 管理** | `sys.info()` · `sys.usage()` · `sys.getPath(n)` · `showItemInFolder(p)`；`proc.*`/`installedApps`/`startup.*`/`power.*`（各需对应授权） |
+| **数据** | `sqlite.open/exec/query/batch/close`（按插件隔离，禁 ATTACH）· `crypto.*`（DPAPI 加密）· `attach.*`（附件，32MB） |
+| **图像 / 屏幕** | `image.resize/crop/convert/compress/info` · `screen.cursorPoint/pickColorAt/toDip/toPhysical` |
+| **通知 / 托盘** | `notifyShow(opts)` + `onNotifyClick/onNotifyAction` · `tray.set/remove/onClick/onMenu`（授权 `tray`） |
+| **定时任务**（授权 `background`） | `schedule.add({everySecs,code})` · `schedule.remove/list` · `schedule.onFire(cb)` |
+| **搜索结果注入** | `onMainPush(getList)`（feature 声明 `mainPush:true`；**宿主只等 250ms**，回调别做慢活） |
+| **暴露给外部 AI** | `registerTool(name, handler)`（`plugin.json` 声明 `tools`；**必须在初始化时注册，不能写在 onEnter 里**） |
+| **插件间 / 多窗口** | `redirect(label,payload?)` · `createWindow(page,opts?)` · `closeWindow(label)` |
+| **动态指令** | `setFeature(f)` · `removeFeature(code)` · `getFeatures(codes?)`（运行时增删触发条目） |
+| **下载** | `download(url,dest,id,onProgress?)` · `downloadCancel(id)`；`fetch(url,{responseType:"binary"})` 取二进制 |
 
 > 截图/录制/贴图等原生能力由 iTools **原生 Rust** 实现（xcap 抓屏 / arboard 剪贴板 / WinRT OCR / cpal 录音），**不要再 shell 出去调 PowerShell**——那会被杀软按「隐藏编码 PowerShell 抓屏」的木马指纹误报（Bearfoos!ml），且慢、脆。图片经 base64 走 IPC、桥接层解回 ArrayBuffer；显示用 `URL.createObjectURL(new Blob([buf],{type:'image/png'}))`（CSP 已放行 blob:）。
 
 除 `showToast`/`platform` 外均返回 `Promise`。
+
+> ⚠️ **浏览器级存储（`localStorage`/`sessionStorage`/`IndexedDB`/Cache）每次进插件都会被清空**——
+> 所有插件页同源，不清就等于插件之间互相能读。它们对插件而言是**会话级**的，
+> 持久化一律用 `db` / `data` / `sqlite`。这是新手最容易踩的坑。
 
 ## 五、铁律（违反 = 插件跑不起来）
 

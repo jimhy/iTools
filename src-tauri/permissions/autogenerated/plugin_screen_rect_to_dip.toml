@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-screen-rect-to-dip"
+description = "Enables the plugin_screen_rect_to_dip command without any pre-configured scope."
+commands.allow = ["plugin_screen_rect_to_dip"]
+
+[[permission]]
+identifier = "deny-plugin-screen-rect-to-dip"
+description = "Denies the plugin_screen_rect_to_dip command without any pre-configured scope."
+commands.deny = ["plugin_screen_rect_to_dip"]
