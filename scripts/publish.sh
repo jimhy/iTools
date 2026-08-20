@@ -168,8 +168,21 @@ publish_app() {
   fi
   echo "    安装包 $(ls -lh "$SETUP_SRC" | awk '{print $5}')"
 
+  # 可信哈希：客户端下完安装包会取 `<安装包 URL>.sha256` 逐字节校验（updater.rs 的
+  # INSTALLER_HASH_SUFFIX）。安装包下下来是**直接执行**的，多这一道校验能挡住传输损坏、
+  # 中间人替换、以及「服务器上那份被人动过」。名字必须正好是 `<安装包文件名>.sha256`，
+  # 改名客户端就找不到，会静默退化成「不校验」——不报错，但保护也就没了。
+  echo "==> [app] 生成 SHA-256"
+  ( cd "$(dirname "$SETUP_SRC")" && sha256sum "$(basename "$SETUP_SRC")" > "$(basename "$SETUP_SRC").sha256" )
+  # 固定名副本的哈希内容一样，只是里面记的文件名要跟着改，便于用户自己 sha256sum -c
+  SETUP_HEX=$(cut -d' ' -f1 < "$SETUP_SRC.sha256")
+  printf '%s  %s\n' "$SETUP_HEX" "iTools-latest-setup.exe" > "$SETUP_SRC.latest.sha256"
+  echo "    $SETUP_HEX"
+
   echo "==> [app] 上传 → $NAS_DOWNLOADS_DIR"
-  scp -O -P "$NAS_PORT" "$SETUP_SRC" "$NAS_HOST:$NAS_DOWNLOADS_DIR/"
+  scp -O -P "$NAS_PORT" "$SETUP_SRC" "$SETUP_SRC.sha256" "$NAS_HOST:$NAS_DOWNLOADS_DIR/"
+  scp -O -P "$NAS_PORT" "$SETUP_SRC.latest.sha256" \
+    "$NAS_HOST:$NAS_DOWNLOADS_DIR/iTools-latest-setup.exe.sha256"
   # 固定名副本：官网下载按钮指向它（相对路径 /download/iTools-latest-setup.exe）。
   # 带版本号的那个文件仍要留着——/api/download/latest 靠扫文件名里的版本号得出版本。
   ssh -p "$NAS_PORT" "$NAS_HOST" \

@@ -71,6 +71,8 @@
 
 use crate::logging::ilog;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::io::{Read, Write};
 use std::time::Duration;
 
 // 令牌脱敏与插件安装模块共用一份实现（两处都把 access_token 拼在 URL 上，泄漏面完全相同）
@@ -153,6 +155,23 @@ const USER_AGENT: &str = "itools-updater";
 /// 里的 `SETUP_SRC`）。**刻意匹配 `-setup.exe` 而不是裸 `.exe`**：release 里可能
 /// 还挂着别的 exe 附件（调试符号、便携版…），裸后缀会把它们误当安装包下下来运行。
 const INSTALLER_SUFFIX: &str = "-setup.exe";
+
+/// 安装包旁边那个「可信哈希」附件的后缀：`<安装包 URL>.sha256`。
+///
+/// # 它是让更新走镜像的**唯一**前提
+///
+/// 安装包下下来是要**直接执行**的，而本模块此前的全部信任都压在一句「URL 主机必须是 github.com」
+/// （[`ensure_channel_url`]）上——既没有哈希也没有签名，只验了是不是 PE 文件。在这个前提下
+/// 让下载走任何第三方反代，等于允许对方给用户塞一个任意安装包并被执行。
+///
+/// 所以顺序不能颠倒：**先有可信哈希，才谈得上镜像**。而「可信」的含义是这个哈希文件
+/// 本身必须从**官方源直连**取（见 [`fetch_trusted_sha256`]）——镜像若能同时替换包和哈希，
+/// 校验就成了自欺欺人。哈希文件只有几十字节，即便直连很慢也是一次可以忍受的小请求。
+const INSTALLER_HASH_SUFFIX: &str = ".sha256";
+
+/// 哈希附件的体积上限：正常内容是「64 位十六进制 + 可选的两个空格和文件名」，一行而已。
+/// 给到 4 KB 是为了容下 `sha256sum` 风格的多行清单，同时挡住「拿一个大文件当哈希喂进来」。
+const HASH_FILE_MAX_BYTES: u64 = 4 * 1024;
 
 /// 调起安装器时传的参数。**少了 `/UPDATE` 就会变成「先卸载再安装」**。
 ///
@@ -685,12 +704,16 @@ pub async fn download_update(url: String) -> Result<String, String> {
 fn download_blocking(url: &str) -> Result<String, String> {
     // 发行线门禁排在最前：下错线的包会被紧接着的 launch_installer_and_quit 执行掉，
     // 装完就是另一条线的客户端了（官网版的端点随之消失）。
+    //
+    // 注意这道门禁校验的**必须**是官方地址：镜像地址（`https://gh-proxy.com/https://github.com/…`）
+    // 只在本函数内部按官方地址现场推导，从不接受外部传入——否则「主机必须是 github.com」
+    // 这条判据就等于形同虚设。
     ensure_channel_url(url, "下载安装包")?;
 
     // 后缀门禁只看 URL（剥掉 ?query / #fragment 之后），**不拿远端文件名落盘**。
     //
     // 曾经是 `url.rsplit('/').next()` 直接当文件名 join 到临时目录——那是错的：
-    // Windows 上 `\` 同样是路径分隔符，URL 末段里含字面 `\` 或 `..`
+    // Windows 上反斜杠同样是路径分隔符，URL 末段里含字面反斜杠或 `..`
     // （形如 `…/a\..\..\Startup\x-setup.exe`）就能把文件写到 itools_update 之外，
     // 而紧接着 [`launch_installer_and_quit`] 会**执行**这个路径——可控落点叠加执行。
     // 远端文件名对本地落盘没有任何信息价值，所以固定写死一个名字，问题从根上消失。
@@ -703,36 +726,152 @@ fn download_blocking(url: &str) -> Result<String, String> {
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建临时目录失败: {e}"))?;
     let dest = dir.join("itools-setup.exe");
 
+    // 先拿可信哈希——**它决定了这次能不能用镜像**，所以必须排在选源之前。
+    let trusted = fetch_trusted_sha256(url);
+    if trusted.is_none() {
+        ilog!(
+            "[iTools] 更新包没有可信哈希（{url}{INSTALLER_HASH_SUFFIX} 取不到），本次只走官方源、不使用镜像"
+        );
+    }
+    let sources = candidate_sources(url, trusted.as_deref());
+
+    let mut errors: Vec<String> = Vec::new();
+    for (i, (label, candidate)) in sources.iter().enumerate() {
+        ilog!("[iTools] 下载更新包：尝试源 {}/{} = {label}", i + 1, sources.len());
+        match download_one(candidate, &dest, trusted.as_deref()) {
+            Ok(()) => {
+                ilog!("[iTools] 更新包下载完成，来源 {label}");
+                return Ok(dest.to_string_lossy().into_owned());
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(&dest);
+                // 哈希不符**不换源重试**：说明拿到的东西确实不是官方那一个。换个源再下一遍
+                // 既不会让它变对，还会把「某个源正在投毒」掩盖成一句「网络问题」。
+                if e.starts_with(HASH_MISMATCH_PREFIX) {
+                    ilog!("[iTools] 来源 {label} 的更新包哈希不符，已删除且不再换源");
+                    return Err(e);
+                }
+                ilog!("[iTools] 来源 {label} 下载失败：{e}");
+                errors.push(format!("{label}: {e}"));
+            }
+        }
+    }
+    Err(format!("全部 {} 个下载源都失败——{}", sources.len(), errors.join("；")))
+}
+
+/// 本次下载可以用哪些源。**这是整套镜像加速的安全闸门**，单独拆出来是为了能直接测。
+///
+/// 规则只有一条：**没有可信哈希就只走官方**。安装包下下来是要被执行的，没有校验手段时
+/// 用第三方反代等于把「用户装到什么」的决定权交给对方。有了哈希，镜像最多能让下载失败。
+///
+/// 老 release 没有 `.sha256` 附件，走的正是 `None` 这一支——行为与加镜像之前逐字节一致，
+/// 所以这个改动对已发布的版本不构成任何退化。
+fn candidate_sources(url: &str, trusted: Option<&str>) -> Vec<(String, String)> {
+    let Some(_) = trusted else {
+        return vec![(update_source_label(), url.to_string())];
+    };
+    let mut sources = crate::plugin::mirror::download_sources(url);
+    // `mirror` 模块把官方源标成 `github.com`，那是它服务插件市场时的语境。对**官网线**来说
+    // 官方源根本不是 GitHub（`download_sources` 也确实不会给非 GitHub 地址配任何镜像），
+    // 标签照抄过来就是一条会把排查带偏的日志。标签只出现在日志里，但错的日志比没有更糟。
+    for s in sources.iter_mut() {
+        if s.1 == url {
+            s.0 = update_source_label();
+        }
+    }
+    sources
+}
+
+/// 哈希不符错误的固定前缀：靠它把「内容不对」与「网络失败」区分开，前者绝不换源重试。
+const HASH_MISMATCH_PREFIX: &str = "安装包 SHA-256 校验失败";
+
+/// 取这个安装包的**可信**哈希：`<官方安装包 URL>.sha256`，**只从官方源直连取，绝不经镜像**。
+///
+/// 取不到（老 release 没传这个附件 / 网络失败 / 内容不合规）一律返回 `None`，
+/// 由调用方退化成「只走官方源」，而不是让更新整个失败——老版本升级不能因为这个新机制断掉。
+///
+/// 接受两种内容形态：裸的 64 位十六进制，或 `sha256sum` 风格的 `<hex>  <文件名>`（取首行首段）。
+fn fetch_trusted_sha256(installer_url: &str) -> Option<String> {
+    let url = format!("{installer_url}{INSTALLER_HASH_SUFFIX}");
+    let resp = crate::http::get(&url)
+        .set("User-Agent", USER_AGENT)
+        .timeout(Duration::from_secs(TIMEOUT_SECS))
+        .call()
+        .ok()?;
+    let mut text = String::new();
+    resp.into_reader()
+        .take(HASH_FILE_MAX_BYTES)
+        .read_to_string(&mut text)
+        .ok()?;
+    parse_sha256_file(&text)
+}
+
+/// 从哈希附件的内容里取出那个 64 位小写十六进制串。不合规返回 `None`（绝不「尽力猜一个」）。
+fn parse_sha256_file(text: &str) -> Option<String> {
+    let first = text.lines().find(|l| !l.trim().is_empty())?;
+    let token = first.split_whitespace().next()?;
+    let hex = token.trim().to_ascii_lowercase();
+    if hex.len() == 64 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        Some(hex)
+    } else {
+        None
+    }
+}
+
+/// 从**一个**源把安装包下到 `dest` 并逐项校验；任一项不过就返回错误（文件由调用方删）。
+///
+/// 校验顺序是刻意的：先看体积、再看哈希、最后看 PE。哈希对得上就说明内容与官方发布的
+/// 逐字节相同，PE 检查此时只是多一道兜底；而哈希对不上时，早一步拦下比「先确认它是个 exe」有意义得多。
+fn download_one(
+    url: &str,
+    dest: &std::path::Path,
+    expect_sha256: Option<&str>,
+) -> Result<(), String> {
     // 统一出口取 Agent；600 秒的超时**按请求**设置，代理只决定走哪条链路、不改超时语义
     let resp = crate::http::get(url)
         .set("User-Agent", USER_AGENT)
         .timeout(Duration::from_secs(DOWNLOAD_TIMEOUT_SECS))
         .call()
         .map_err(|e| redact_token(format!("下载请求失败: {e}")))?;
-    let expected: Option<u64> = resp.header("Content-Length").and_then(|s| s.parse().ok());
+    let expected_len: Option<u64> = resp.header("Content-Length").and_then(|s| s.parse().ok());
 
     let mut reader = resp.into_reader();
-    let mut file = std::fs::File::create(&dest).map_err(|e| format!("创建文件失败: {e}"))?;
-    let written =
-        std::io::copy(&mut reader, &mut file).map_err(|e| format!("写入文件失败: {e}"))?;
+    let mut file = std::fs::File::create(dest).map_err(|e| format!("创建文件失败: {e}"))?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    let mut written: u64 = 0;
+    loop {
+        let n = reader.read(&mut buf).map_err(|e| format!("下载读取失败: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        file.write_all(&buf[..n]).map_err(|e| format!("写入文件失败: {e}"))?;
+        written += n as u64;
+    }
     drop(file);
 
     if written == 0 {
-        let _ = std::fs::remove_file(&dest);
         return Err("下载内容为空".into());
     }
-    if let Some(exp) = expected {
+    if let Some(exp) = expected_len {
         if exp != 0 && written != exp {
-            let _ = std::fs::remove_file(&dest);
             return Err(format!("下载不完整：{written}/{exp} 字节"));
         }
     }
+    if let Some(expect) = expect_sha256 {
+        let actual: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        if !actual.eq_ignore_ascii_case(expect) {
+            return Err(format!(
+                "{HASH_MISMATCH_PREFIX}（期望 {expect}，实际 {actual}），已删除，不会执行"
+            ));
+        }
+    }
     // 校验确为 PE 可执行文件——防错误响应/HTML 错误页被当安装包直接运行。
-    if !is_valid_installer(&dest) {
-        let _ = std::fs::remove_file(&dest);
+    if !is_valid_installer(dest) {
         return Err("下载的文件不是合法的安装程序".to_string());
     }
-    Ok(dest.to_string_lossy().into_owned())
+    Ok(())
 }
 
 /// 起安装器之前，先请提权的全盘索引守护退出。
@@ -820,9 +959,61 @@ fn launch_blocking(path: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ensure_channel_url, is_valid_installer, safe_installer_filename, selfhost_endpoint,
-        version_gt, CHANNEL, CHANNEL_MARK, FALLBACK_INSTALLER_FILE, INSTALLER_ARGS,
+        candidate_sources, ensure_channel_url, is_valid_installer, parse_sha256_file,
+        safe_installer_filename, selfhost_endpoint, version_gt, CHANNEL, CHANNEL_MARK,
+        FALLBACK_INSTALLER_FILE, INSTALLER_ARGS,
     };
+
+    // ---------- 更新包的可信哈希（走镜像的前提） ----------
+
+    /// 哈希附件的两种正常形态都要能解析出来；任何不合规的内容都必须解析成 `None`。
+    ///
+    /// `None` 的后果是「退化成只走官方源」——安全方向；所以这里宁可严格：
+    /// 长度不对、含非十六进制字符、空文件，一律不认，绝不「尽力猜一个」。
+    #[test]
+    fn sha256_file_parsing_is_strict() {
+        const HEX: &str = "cc4156d51387566ea8ba653fc3a04897bdf812fddf652428d9030bbf7ae24835";
+
+        // 裸哈希；带换行；sha256sum 风格（哈希 + 两个空格 + 文件名）；大写要归一成小写
+        assert_eq!(parse_sha256_file(HEX).as_deref(), Some(HEX));
+        assert_eq!(parse_sha256_file(&format!("{HEX}\n")).as_deref(), Some(HEX));
+        assert_eq!(
+            parse_sha256_file(&format!("{HEX}  iTools_1.5.6_x64-setup.exe\n")).as_deref(),
+            Some(HEX)
+        );
+        assert_eq!(parse_sha256_file(&HEX.to_ascii_uppercase()).as_deref(), Some(HEX));
+        // 前面有空行也要能找到首个有效行
+        assert_eq!(parse_sha256_file(&format!("\n\n{HEX}\n")).as_deref(), Some(HEX));
+
+        for bad in [
+            "",
+            "   ",
+            "not-a-hash",
+            "cc4156d5",                   // 太短
+            &format!("{HEX}ab"),          // 太长
+            &"z".repeat(64),              // 非十六进制
+            "<html>404 Not Found</html>", // 错误页被当成哈希文件
+        ] {
+            assert!(parse_sha256_file(bad).is_none(), "「{bad}」不该被当成合法哈希");
+        }
+    }
+
+    /// **安全闸门**：拿不到可信哈希时，候选源里绝不能出现任何镜像。
+    ///
+    /// 这条是整个「更新走镜像」改动的底线。安装包下下来是直接执行的，没有哈希就没有任何
+    /// 手段判断它是不是官方那一个——此时用第三方反代，等于让对方决定用户装到什么。
+    /// 谁把这个 `None` 分支改成「也去问镜像」，这条测试当场变红。
+    #[test]
+    fn without_trusted_hash_only_official_source_is_used() {
+        let url =
+            "https://github.com/jimhy/iTools/releases/download/v1.0.0/iTools_1.0.0_x64-setup.exe";
+        let out = candidate_sources(url, None);
+        assert_eq!(out.len(), 1, "没有可信哈希时只能有官方一个候选：{out:?}");
+        assert_eq!(out[0].1, url, "候选地址必须原样是官方地址，不得被改写");
+        for bad in ["gh-proxy", "ghfast", "ghproxy"] {
+            assert!(!out[0].1.contains(bad), "没有可信哈希却混进了镜像：{out:?}");
+        }
+    }
 
     /// 更新安装必须是**覆盖安装**：少了 `/UPDATE`，NSIS 的 PageReinstall 在升级场景下
     /// 默认选中「安装前卸载」，用户每次更新都要走一遍卸载流程。

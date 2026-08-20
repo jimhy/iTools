@@ -112,6 +112,42 @@ jobs:
             exit 1
           fi
 
+      # ---- 产出可信哈希：客户端据此才敢让更新下载走 GitHub 镜像 ----
+      #
+      # 安装包下下来是**直接执行**的。客户端此前的全部信任都压在「URL 主机必须是 github.com」
+      # 上，既没有哈希也没有签名。在那个前提下让下载走任何第三方反代，等于允许对方给用户
+      # 塞一个任意安装包并被执行——所以顺序是「先有哈希，才谈镜像」。
+      #
+      # 文件名必须是 `<安装包文件名>.sha256`：客户端是用「官方安装包 URL + .sha256」现场
+      # 推导出这个地址的（见 updater.rs 的 INSTALLER_HASH_SUFFIX），改名字它就找不到，
+      # 于是静默退化成「只走官方源」——功能不会坏，但镜像加速会白白失效。
+      #
+      # 这一步排在「转为正式发布」**之前**：release 一转正式，客户端下一次检查就可能看到它，
+      # 那时哈希附件必须已经在位，否则那一批用户全都拿不到加速。
+      - name: 生成并上传安装包 SHA-256
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.inputs.version || github.ref_name }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          pkgs=(src-tauri/target/release/bundle/nsis/*-setup.exe)
+          if [ ${#pkgs[@]} -eq 0 ]; then
+            echo "✗ 找不到 NSIS 安装包（src-tauri/target/release/bundle/nsis/*-setup.exe），无法产出哈希" >&2
+            echo "  没有哈希客户端就只能走官方直连，国内用户的更新会非常慢——这里当作失败处理。" >&2
+            exit 1
+          fi
+          for pkg in "${pkgs[@]}"; do
+            name=$(basename "$pkg")
+            # 写成 sha256sum 风格「<hex>  <文件名>」：客户端两种形态都认，而带上文件名
+            # 便于用户自己 `sha256sum -c` 核对。
+            hex=$(sha256sum "$pkg" | cut -d' ' -f1)
+            printf '%s  %s\n' "$hex" "$name" > "$pkg.sha256"
+            echo "✓ $name -> $hex"
+            gh release upload "$TAG" "$pkg.sha256" --clobber
+          done
+
       # 校验通过才转正式：到这一步 releases/latest 才会指向它，老客户端也才拿得到。
       - name: 转为正式发布
         shell: bash
